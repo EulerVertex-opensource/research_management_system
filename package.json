@@ -1,0 +1,47 @@
+{
+  "name": "research-management-system",
+  "displayName": "Research Assistant",
+  "description": "AI-assisted mathematical research management for VSCode",
+  "version": "0.0.1",
+  "publisher": "tianhao",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "research-assistant.openDashboard",
+        "title": "Research Assistant: Open Dashboard"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "node esbuild.js"
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "katex": "^0.17.0",
+    "marked": "^18.0.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}
