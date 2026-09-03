@@ -5,7 +5,7 @@ import { NodeIndexService } from '../services/NodeIndexService';
 import { PaperIndexService } from '../services/PaperIndexService';
 import { WebviewMessage, ExtensionMessage } from '../models/messages';
 import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE } from '../models/types';
-import { generateCopilotInstructions } from '../services/CopilotInstructionsService';
+import { generateAgentInstructions } from '../services/CopilotInstructionsService';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
 
@@ -71,7 +71,7 @@ export class WebviewProvider {
       try {
         const nodes = await this.nodeIndex.refresh();
         this.send({ type: 'nodesUpdated', nodes });
-        generateCopilotInstructions(nodes, this.fileService).catch(() => {});
+        generateAgentInstructions(nodes, this.fileService).catch(() => {});
 
         const filename = uri.path.split('/').pop();
         if (filename?.endsWith('.md')) {
@@ -88,7 +88,7 @@ export class WebviewProvider {
       try {
         const nodes = await this.nodeIndex.refresh();
         this.send({ type: 'nodesUpdated', nodes });
-        generateCopilotInstructions(nodes, this.fileService).catch(() => {});
+        generateAgentInstructions(nodes, this.fileService).catch(() => {});
       } catch { /* non-fatal */ }
     };
 
@@ -142,7 +142,7 @@ export class WebviewProvider {
   private async refreshNodes(): Promise<void> {
     const nodes = await this.nodeIndex.refresh();
     this.send({ type: 'nodesUpdated', nodes });
-    generateCopilotInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
+    generateAgentInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
   }
 
   private async handleMessage(msg: WebviewMessage): Promise<void> {
@@ -154,7 +154,7 @@ export class WebviewProvider {
             this.nodeIndex.refresh(),
             this.paperIndex.getPapers(),
           ]);
-          generateCopilotInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
+          generateAgentInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
           const projectRoot = this.fileService.rootUri.fsPath;
           const uiState = this.getSavedUIState();
           this.send({ type: 'init', nodes, projectRoot, uiState });
@@ -165,7 +165,7 @@ export class WebviewProvider {
         case 'initProject': {
           await this.fileService.ensureProjectStructure();
           const nodes = await this.nodeIndex.refresh();
-          generateCopilotInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
+          generateAgentInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
           const projectRoot = this.fileService.rootUri.fsPath;
           const uiState = this.getSavedUIState();
           this.send({ type: 'init', nodes, projectRoot, uiState });

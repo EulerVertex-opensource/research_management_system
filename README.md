@@ -41,7 +41,7 @@ A local, file-based research management tool for mathematicians, deeply integrat
 - Paper detail view with **Editor / Preview** toggle for BibTeX entry and Markdown description
 - Auto-save (1.5 s debounce)
 
-### AI context (Copilot / Claude)
+### AI context (Copilot and Codex)
 
 Every time any node is saved, the extension regenerates `.github/copilot-instructions.md` with:
 - Full project structure reference
@@ -51,6 +51,14 @@ Every time any node is saved, the extension regenerates `.github/copilot-instruc
 - Draft node list
 
 Copilot reads this file automatically, so it understands your project structure without any extra prompting.
+
+The extension also maintains:
+
+- `AGENTS.md` — durable Codex guidance generated inside protected markers; text outside the markers is preserved
+- `.research/workflows/` — agent-neutral workflow definitions shared by integrations
+- `.agents/skills/import-math-paper/` — a Codex skill for provenance-preserving PDF-to-Markdown import
+
+The original PDF remains authoritative. Imported Markdown is a searchable working transcription with source-page markers and an explicit review state.
 
 ---
 
@@ -70,6 +78,7 @@ your-research-project/
   assets/               ← theorem, lemma, proposition, definition, example, construction, remark nodes
   ideas/                ← idea nodes
   raw_papers/           ← PDF source papers
+  papers/               ← optional Markdown transcriptions and extraction metadata
   manuscript/
     main.tex            ← LaTeX document root
     macro.tex           ← ALL \newcommand, \DeclareMathOperator, theorem environments
@@ -80,6 +89,9 @@ your-research-project/
   papers.md             ← paper index (one ## slug section per paper)
   .github/
     copilot-instructions.md   ← auto-generated AI context (do not edit manually)
+  .research/workflows/        ← generated agent-neutral workflow descriptions
+  .agents/skills/             ← generated project-local Codex skills
+  AGENTS.md                   ← generated Codex repository guidance plus user-authored sections
 ```
 
 ---

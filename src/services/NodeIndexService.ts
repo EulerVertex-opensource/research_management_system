@@ -243,7 +243,10 @@ export class NodeIndexService {
       throw new Error(`Node not found: ${id}`);
     }
     // matter.stringify(body, data) → produces "---\n<yaml>\n---\n<body>"
-    const fileContent = matter.stringify('\n' + body, frontmatter as Record<string, unknown>);
+    const fileContent = matter.stringify(
+      '\n' + body,
+      frontmatter as unknown as Record<string, unknown>
+    );
     await this.fileService.writeFile(node.filePath, fileContent);
   }
 }

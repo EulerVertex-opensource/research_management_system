@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ResearchNode } from '../models/types';
 import { FileService } from './FileService';
+import { RESEARCH_WORKFLOWS } from '../prompts/templates';
 
 const INSTRUCTIONS_PATH = '.github/copilot-instructions.md';
 
@@ -182,6 +183,192 @@ ${draftSection}
     await vscode.workspace.fs.createDirectory(fileService.resolve('.github'));
   } catch { /* already exists */ }
   await fileService.writeFile(INSTRUCTIONS_PATH, content);
+}
+
+const CODEX_AGENTS_PATH = 'AGENTS.md';
+const PAPER_IMPORT_SKILL_PATH = '.agents/skills/import-math-paper/SKILL.md';
+const PAPER_IMPORT_REFERENCE_PATH = '.agents/skills/import-math-paper/references/output-format.md';
+const GENERATED_START = '<!-- research-assistant:generated:start -->';
+const GENERATED_END = '<!-- research-assistant:generated:end -->';
+
+function upsertGeneratedSection(existing: string, generated: string): string {
+  const section = `${GENERATED_START}\n${generated.trim()}\n${GENERATED_END}`;
+  const start = existing.indexOf(GENERATED_START);
+  const end = existing.indexOf(GENERATED_END);
+  if (start !== -1 && end > start) {
+    return existing.slice(0, start) + section + existing.slice(end + GENERATED_END.length);
+  }
+  return existing.trim() ? `${existing.trimEnd()}\n\n${section}\n` : `${section}\n`;
+}
+
+/** Generate durable guidance for both supported coding agents. */
+export async function generateAgentInstructions(
+  nodes: ResearchNode[],
+  fileService: FileService
+): Promise<void> {
+  await generateCopilotInstructions(nodes, fileService);
+
+  const approvedCount = nodes.filter((node) => node.status === 'approved').length;
+  const draftCount = nodes.filter((node) => node.status === 'draft').length;
+  const workflowList = Object.entries(RESEARCH_WORKFLOWS)
+    .map(([id, workflow]) => `- \`${id}\`: ${workflow.purpose}`)
+    .join('\n');
+
+  const agentsContent = `# Mathematical Research Workspace
+
+This workspace is managed by Research Assistant for human–AI collaboration on a mathematical research project.
+
+## Sources of truth
+
+- \`project.md\`: research problem, goals, known results, and open questions
+- \`assets/\`: theorem, lemma, proposition, definition, example, construction, and remark nodes
+- \`ideas/\`: speculative strategies and open directions
+- \`papers/\` or \`raw_papers/\`: source papers and working transcriptions
+- \`manuscript/\`: LaTeX manuscript, macros, notation, and bibliography
+
+## Research rules
+
+- Never present an AI-generated or extracted mathematical statement as verified.
+- Preserve paper slug, page number, and theorem location when extracting a result.
+- Treat a source PDF as authoritative and its Markdown transcription as a searchable working copy.
+- Check ambiguous formulas, diagrams, subscripts, superscripts, and symbols against the PDF.
+- Ideas must keep \`type: idea\`; source kinds are \`paper\` and \`self_proved\`.
+- New or materially edited nodes must have \`status: draft\`. Only the researcher promotes them.
+- Only approved nodes should be relied on in finished manuscript arguments.
+- Before editing LaTeX, read \`manuscript/macro.tex\` and \`manuscript/notations.tex\`.
+- Cite manuscript use of a node with a \`% [node_id]\` comment.
+
+## Node relationships
+
+Use exact node filenames without \`.md\` in \`depends_on\`, \`used_in\`, and \`related_assets\`. Do not invent an existing node or paper ID; verify it from the workspace.
+
+## Available workflows
+
+${workflowList}
+
+For importing or transcribing a paper, use the \`import-math-paper\` skill in \`.agents/skills/import-math-paper/\`.
+
+## Current index
+
+- Approved nodes: ${approvedCount}
+- Draft nodes: ${draftCount}
+
+The generated Copilot context is in \`.github/copilot-instructions.md\`. Agent-neutral workflow descriptions are in \`.research/workflows/\`.
+`;
+
+  const skillContent = `---
+name: import-math-paper
+description: Import a mathematical paper from PDF into a page-marked Markdown working copy, preserve provenance, flag extraction uncertainty, and optionally create draft research nodes. Use when adding, transcribing, OCR-processing, or extracting results from a paper. Do not use for ordinary edits to an already imported paper.
+---
+
+# Import a mathematical paper
+
+Create a searchable working representation without treating extraction as mathematical verification.
+
+## Required outcome
+
+Keep the untouched PDF as the authoritative source. Produce metadata and Markdown that let later agents trace every extracted claim back to the PDF. Read [references/output-format.md](references/output-format.md) before creating files.
+
+## Workflow
+
+1. Choose a stable lowercase paper slug consistent with the BibTeX key.
+2. Preserve the original PDF and compute a SHA-256 checksum when a local hashing tool is available.
+3. Extract text page by page using available local PDF tools. Use OCR only for pages without a usable text layer.
+4. Normalize headings, paragraphs, lists, and ordinary formulas into Markdown while retaining source-page markers.
+5. Preserve uncertain text visibly. Never silently repair a formula whose intended meaning is unclear.
+6. Render or inspect source pages containing important formulas, theorem statements, diagrams, tables, or suspicious extraction.
+7. Record the extraction method, timestamp, checksum, review state, and known limitations in metadata.
+8. If requested, extract definitions and theorem-like results into repository nodes. Set every created or materially changed node to \`status: draft\` and include paper slug plus page/location provenance.
+9. Summarize files created, uncertain passages, visually checked pages, and work still requiring human review.
+
+## Boundaries
+
+- Do not alter or replace the source PDF.
+- Do not claim that OCR accuracy establishes mathematical correctness.
+- Do not mark the transcription or extracted nodes as reviewed or approved without explicit researcher confirmation.
+- Prefer the Markdown for search and broad reading; return to the PDF for exact notation and citation.
+- Do not install converters, OCR engines, or other dependencies without user authorization.
+`;
+
+  const outputReference = `# Paper import output format
+
+Prefer this layout when the workspace does not already define another paper layout:
+
+\`\`\`text
+papers/<slug>/
+  metadata.yaml
+  source.pdf
+  paper.md
+  figures/
+\`\`\`
+
+Use \`raw_papers/<slug>.pdf\` as the authoritative PDF location when maintaining compatibility with the current Research Assistant layout. The Markdown and metadata may still live under \`papers/<slug>/\`.
+
+## metadata.yaml
+
+Record at least:
+
+\`\`\`yaml
+slug: example_2024
+title: Example title
+source_pdf: ../../raw_papers/example_2024.pdf
+markdown: paper.md
+extraction:
+  method: embedded-text
+  generated_at: 2026-01-01T00:00:00Z
+  source_sha256: "..."
+  reviewed: false
+  limitations: []
+\`\`\`
+
+Use an honest method such as \`embedded-text\`, \`ocr\`, or \`mixed\`. Omit unavailable bibliographic fields rather than inventing them.
+
+## paper.md
+
+Start with a short provenance warning and retain page boundaries:
+
+\`\`\`markdown
+> AI-generated working transcription. The PDF is authoritative.
+
+<!-- source-page: 1 -->
+
+# Paper title
+
+<!-- source-page: 2 -->
+
+## Theorem 1
+...
+\`\`\`
+
+Represent uncertain extraction as \`[uncertain: ...]\` or an HTML comment explaining the ambiguity. Do not collapse content across page markers when doing so would make provenance unclear.
+
+## Extracted nodes
+
+For a paper-derived node, include the existing frontmatter fields:
+
+\`\`\`yaml
+status: draft
+source:
+  kind: paper
+  paper_id: example_2024
+  location: Theorem 1, pp. 2–3
+\`\`\`
+
+Distinguish a faithful transcription from a paraphrase in the node body when that distinction matters.
+`;
+
+  const existingAgents = await fileService.readFile(CODEX_AGENTS_PATH).catch(() => '');
+  await Promise.all([
+    fileService.writeFile(CODEX_AGENTS_PATH, upsertGeneratedSection(existingAgents, agentsContent)),
+    fileService.writeFile(PAPER_IMPORT_SKILL_PATH, skillContent),
+    fileService.writeFile(PAPER_IMPORT_REFERENCE_PATH, outputReference),
+    ...Object.entries(RESEARCH_WORKFLOWS).map(([id, workflow]) =>
+      fileService.writeFile(
+        `.research/workflows/${id}.md`,
+        `# ${workflow.label}\n\n${workflow.purpose}\n\n## Required inputs\n\n${workflow.requiredInputs.map((input) => `- ${input}`).join('\n')}\n\n## Output\n\n${workflow.outputFormat}\n\n## Instructions\n\n${workflow.instructions}`
+      )
+    ),
+  ]);
 }
 
 function groupBy<T>(arr: T[], key: (item: T) => string): Record<string, T[]> {

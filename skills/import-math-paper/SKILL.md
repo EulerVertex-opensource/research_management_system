@@ -1,0 +1,32 @@
+---
+name: import-math-paper
+description: Import a mathematical paper from PDF into a page-marked Markdown working copy, preserve provenance, flag extraction uncertainty, and optionally create draft research nodes. Use when adding, transcribing, OCR-processing, or extracting results from a paper. Do not use for ordinary edits to an already imported paper.
+---
+
+# Import a mathematical paper
+
+Create a searchable working representation without treating extraction as mathematical verification.
+
+## Required outcome
+
+Keep the untouched PDF as the authoritative source. Produce metadata and Markdown that let later agents trace every extracted claim back to the PDF. Read [references/output-format.md](references/output-format.md) before creating files.
+
+## Workflow
+
+1. Choose a stable lowercase paper slug consistent with the BibTeX key.
+2. Preserve the original PDF and compute a SHA-256 checksum when a local hashing tool is available.
+3. Extract text page by page using available local PDF tools. Use OCR only for pages without a usable text layer.
+4. Normalize headings, paragraphs, lists, and ordinary formulas into Markdown while retaining source-page markers.
+5. Preserve uncertain text visibly. Never silently repair a formula whose intended meaning is unclear.
+6. Render or inspect source pages containing important formulas, theorem statements, diagrams, tables, or suspicious extraction.
+7. Record the extraction method, timestamp, checksum, review state, and known limitations in metadata.
+8. If requested, extract definitions and theorem-like results into repository nodes. Set every created or materially changed node to `status: draft` and include paper slug plus page/location provenance.
+9. Summarize files created, uncertain passages, visually checked pages, and work still requiring human review.
+
+## Boundaries
+
+- Do not alter or replace the source PDF.
+- Do not claim that OCR accuracy establishes mathematical correctness.
+- Do not mark the transcription or extracted nodes as reviewed or approved without explicit researcher confirmation.
+- Prefer the Markdown for search and broad reading; return to the PDF for exact notation and citation.
+- Do not install converters, OCR engines, or other dependencies without user authorization.
