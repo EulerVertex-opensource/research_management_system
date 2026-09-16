@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "jsx": "react-jsx",
+    "lib": ["ES2020", "DOM"]
+  },
+  "include": [
+    "webview-src/**/*.ts",
+    "webview-src/**/*.tsx",
+    "src/models/**/*.ts"
+  ],
+  "exclude": ["node_modules", "out"]
+}

@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { AddPaperModal } from './AddPaperModal';
 
 interface Props {
-  onAdd: (slug: string, fileName: string, fileData: string, bibEntry: string, description: string) => void;
+  onAdd: (slug: string, fileName: string, fileData: string, bibEntry: string, description: string, sourceUrl: string) => void;
 }
 
 export function AddPaperButton({ onAdd }: Props) {
@@ -17,14 +17,14 @@ export function AddPaperButton({ onAdd }: Props) {
     e.target.value = '';
   };
 
-  const handleConfirm = (slug: string, bibEntry: string, description: string) => {
+  const handleConfirm = (slug: string, bibEntry: string, description: string, sourceUrl: string) => {
     if (!pending) return;
     setReading(true);
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
       const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
-      onAdd(slug, pending.fileName, base64, bibEntry, description);
+      onAdd(slug, pending.fileName, base64, bibEntry, description, sourceUrl);
       setPending(null);
       setReading(false);
     };

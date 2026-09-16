@@ -26,7 +26,7 @@ function replaceBibKey(bib: string, newKey: string): string {
 
 interface Props {
   fileName: string;
-  onConfirm: (slug: string, bibEntry: string, description: string) => void;
+  onConfirm: (slug: string, bibEntry: string, description: string, sourceUrl: string) => void;
   onCancel: () => void;
 }
 
@@ -46,6 +46,7 @@ export function AddPaperModal({ fileName, onConfirm, onCancel }: Props) {
   const [slug, setSlug] = useState(initialSlug);
   const [bibEntry, setBibEntry] = useState(() => defaultBib(initialSlug));
   const [description, setDescription] = useState('');
+  const [sourceUrl, setSourceUrl] = useState('');
 
   // Slug field changed → update the bib key to match
   const handleSlugChange = (newSlug: string) => {
@@ -65,7 +66,7 @@ export function AddPaperModal({ fileName, onConfirm, onCancel }: Props) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = slug.trim();
-    if (trimmed) onConfirm(trimmed, bibEntry.trim(), description.trim());
+    if (trimmed) onConfirm(trimmed, bibEntry.trim(), description.trim(), sourceUrl.trim());
   };
 
   const slugValid = /^[a-z0-9_]+$/.test(slug.trim());
@@ -147,6 +148,18 @@ export function AddPaperModal({ fileName, onConfirm, onCancel }: Props) {
               onChange={(e) => handleBibChange(e.target.value)}
               rows={6}
               style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--vscode-editor-font-family, monospace)', fontSize: 12 }}
+            />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: 'block', fontSize: 12, marginBottom: 4, opacity: 0.8 }}>
+              Stable source URL <span style={{ opacity: 0.5 }}>(DOI, arXiv, or publisher; shared in Git)</span>
+            </label>
+            <input
+              value={sourceUrl}
+              onChange={(e) => setSourceUrl(e.target.value)}
+              placeholder="https://arxiv.org/abs/..."
+              style={inputStyle}
             />
           </div>
 

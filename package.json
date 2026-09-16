@@ -1,7 +1,7 @@
 {
   "name": "research-management-system",
   "displayName": "Research Assistant",
-  "description": "AI-assisted mathematical research management for VSCode",
+  "description": "Shared AI-assisted mathematical research context for Overleaf Git projects in VS Code",
   "version": "0.0.1",
   "publisher": "tianhao",
   "engines": {
@@ -26,6 +26,7 @@
   },
   "scripts": {
     "build": "node esbuild.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "watch": "node esbuild.js --watch",
     "vscode:prepublish": "node esbuild.js"
   },

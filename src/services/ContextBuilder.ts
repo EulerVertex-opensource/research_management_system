@@ -1,11 +1,12 @@
-import { ResearchNode } from '../models/types';
+import { ProjectPaths, ResearchNode } from '../models/types';
 import { FileService } from './FileService';
 import { NodeIndexService } from './NodeIndexService';
 
 export class ContextBuilder {
   constructor(
     private readonly nodeIndex: NodeIndexService,
-    private readonly fileService: FileService
+    private readonly fileService: FileService,
+    private readonly paths: ProjectPaths
   ) {}
 
   getNodesById(ids: string[]): ResearchNode[] {
@@ -22,13 +23,17 @@ export class ContextBuilder {
   }> {
     const nodes = this.getNodesById(selectedNodeIds);
 
-    const [texContent, macroContent, notationsContent] = await Promise.all([
+    const [texContent, macroParts, notationsContent] = await Promise.all([
       this.fileService.readFile(texFilePath).catch(() => ''),
-      this.fileService.readFile('manuscript/macro.tex').catch(() => ''),
-      this.fileService.readFile('manuscript/notations.tex').catch(() => ''),
+      Promise.all(this.paths.macroFiles.map((filePath) =>
+        this.fileService.readFile(filePath).catch(() => '')
+      )),
+      this.paths.notations
+        ? this.fileService.readFile(this.paths.notations).catch(() => '')
+        : Promise.resolve(''),
     ]);
 
-    return { nodes, texContent, macroContent, notationsContent };
+    return { nodes, texContent, macroContent: macroParts.join('\n\n'), notationsContent };
   }
 
   buildContextSummary(nodes: ResearchNode[]): string {

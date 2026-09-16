@@ -63,6 +63,64 @@ export interface PaperEntry {
   bibEntry: string;  // full @type{slug,...} bib entry text
 }
 
+export type ProjectLayout = 'overleaf-shared' | 'legacy';
+
+export interface ResearchAssistantConfig {
+  version: 1;
+  layout: ProjectLayout;
+  latex: {
+    projectRoot: string;
+    main: string;
+    bibliography: string;
+    macros: string[];
+    notations: string | null;
+    sections: string;
+  };
+  research: {
+    root: string;
+    project: string;
+    paperIndex: string;
+    assets: string;
+    ideas: string;
+    papers: string;
+    workflows: string;
+    localSourcePdfs: string;
+  };
+}
+
+/** All paths are workspace-relative and normalized to POSIX separators. */
+export interface ProjectPaths {
+  config: string;
+  mainTex: string;
+  bibliography: string;
+  macroFiles: string[];
+  notations: string | null;
+  sections: string;
+  researchRoot: string;
+  projectMd: string;
+  paperIndex: string;
+  assets: string;
+  ideas: string;
+  papers: string;
+  workflows: string;
+  localSourcePdfs: string;
+}
+
+export interface ProjectPathSummary {
+  layout: ProjectLayout;
+  mainTex: string;
+  bibliography: string;
+  macroFiles: string[];
+  notations: string | null;
+  sections: string;
+  projectMd: string;
+  paperIndex: string;
+  assets: string;
+  ideas: string;
+  papers: string;
+  localSourcePdfs: string;
+}
+
 export interface AIService {
   ask(
     prompt: string,

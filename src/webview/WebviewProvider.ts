@@ -4,9 +4,10 @@ import { FileService } from '../services/FileService';
 import { NodeIndexService } from '../services/NodeIndexService';
 import { PaperIndexService } from '../services/PaperIndexService';
 import { WebviewMessage, ExtensionMessage } from '../models/messages';
-import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE } from '../models/types';
+import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig } from '../models/types';
 import { generateAgentInstructions } from '../services/CopilotInstructionsService';
 import { SkillInstallerService } from '../services/SkillInstallerService';
+import { ProjectConfigService } from '../services/ProjectConfigService';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
 
@@ -15,16 +16,17 @@ export class WebviewProvider {
   private watchers: vscode.Disposable[] = [];
 
   private readonly fileService: FileService;
-  private readonly nodeIndex: NodeIndexService;
-  private readonly paperIndex: PaperIndexService;
+  private readonly configService: ProjectConfigService;
+  private nodeIndex: NodeIndexService | undefined;
+  private paperIndex: PaperIndexService | undefined;
+  private paths: ProjectPaths | undefined;
   private readonly skillInstaller: SkillInstallerService;
   private readonly context: vscode.ExtensionContext;
 
   constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri) {
     this.context = context;
     this.fileService = new FileService(workspaceRoot);
-    this.nodeIndex = new NodeIndexService(this.fileService);
-    this.paperIndex = new PaperIndexService(this.fileService);
+    this.configService = new ProjectConfigService(this.fileService);
     this.skillInstaller = new SkillInstallerService(context.extensionUri, this.fileService);
   }
 
@@ -53,8 +55,6 @@ export class WebviewProvider {
       this.handleMessage(msg);
     });
 
-    this.setupFileWatchers();
-
     this.panel.onDidDispose(() => {
       this.panel = undefined;
       this.watchers.forEach((w) => w.dispose());
@@ -68,19 +68,28 @@ export class WebviewProvider {
    * Existing research files are preserved by ensureProjectStructure().
    */
   async refreshProject(showConfirmation = false): Promise<void> {
-    await this.fileService.ensureProjectStructure();
+    const config = await this.configService.loadOrDiscover();
+    const paths = this.configService.resolvePaths(config);
+    const mainAlreadyExists = await this.fileService.exists(paths.mainTex);
+    await this.configService.save(config);
+    await this.fileService.ensureProjectStructure(config, paths, !mainAlreadyExists);
     await this.skillInstaller.installBundledSkills();
 
+    this.configureServices(paths);
+
     const [nodes, papers] = await Promise.all([
-      this.nodeIndex.refresh(),
-      this.paperIndex.getPapers(),
+      this.nodeIndex!.refresh(),
+      this.paperIndex!.getPapers(),
     ]);
-    await generateAgentInstructions(nodes, this.fileService);
+    await generateAgentInstructions(nodes, this.fileService, paths);
+    this.setupFileWatchers();
 
     const projectRoot = this.fileService.rootUri.fsPath;
     const uiState = this.getSavedUIState();
-    this.send({ type: 'init', nodes, projectRoot, uiState });
+    this.send({ type: 'init', nodes, projectRoot, uiState, initialized: true, paths: this.pathSummary(config, paths) });
     this.send({ type: 'papersData', papers });
+    const projectContent = await this.fileService.readFile(paths.projectMd).catch(() => '');
+    this.send({ type: 'projectMd', content: projectContent });
 
     if (showConfirmation) {
       void vscode.window.showInformationMessage(
@@ -89,25 +98,78 @@ export class WebviewProvider {
     }
   }
 
-  private setupFileWatchers(): void {
-    const root = this.fileService.rootUri;
+  private async loadProject(): Promise<void> {
+    const initialized = await this.configService.hasSavedConfig();
+    const config = await this.configService.loadOrDiscover();
+    const paths = this.configService.resolvePaths(config);
+    this.configureServices(paths);
 
-    // Watch assets/ and ideas/ node files
-    const nodeWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(root, '{assets,ideas}/**/*.md')
+    const [nodes, papers] = await Promise.all([
+      this.nodeIndex!.refresh(),
+      this.paperIndex!.getPapers(),
+    ]);
+    this.setupFileWatchers();
+    this.send({
+      type: 'init',
+      nodes,
+      projectRoot: this.fileService.rootUri.fsPath,
+      uiState: this.getSavedUIState(),
+      initialized,
+      paths: this.pathSummary(config, paths),
+    });
+    this.send({ type: 'papersData', papers });
+    if (initialized) {
+      const content = await this.fileService.readFile(paths.projectMd).catch(() => '');
+      this.send({ type: 'projectMd', content });
+    }
+  }
+
+  private configureServices(paths: ProjectPaths): void {
+    this.paths = paths;
+    this.nodeIndex = new NodeIndexService(this.fileService, paths);
+    this.paperIndex = new PaperIndexService(this.fileService, paths);
+  }
+
+  private pathSummary(config: ResearchAssistantConfig, paths: ProjectPaths) {
+    return {
+      layout: config.layout,
+      mainTex: paths.mainTex,
+      bibliography: paths.bibliography,
+      macroFiles: paths.macroFiles,
+      notations: paths.notations,
+      sections: paths.sections,
+      projectMd: paths.projectMd,
+      paperIndex: paths.paperIndex,
+      assets: paths.assets,
+      ideas: paths.ideas,
+      papers: paths.papers,
+      localSourcePdfs: paths.localSourcePdfs,
+    };
+  }
+
+  private setupFileWatchers(): void {
+    if (!this.paths || !this.nodeIndex || !this.paperIndex) return;
+    this.watchers.forEach((watcher) => watcher.dispose());
+    this.watchers = [];
+    const root = this.fileService.rootUri;
+    const paths = this.paths;
+
+    // Watch shared asset and idea node files.
+    const nodeWatchers = [paths.assets, paths.ideas].map((folder) =>
+      vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, `${folder}/*.md`))
     );
 
     const onNodeFileChange = async (uri: vscode.Uri) => {
       try {
-        const nodes = await this.nodeIndex.refresh();
+        const nodes = await this.nodeIndex!.refresh();
         this.send({ type: 'nodesUpdated', nodes });
-        generateAgentInstructions(nodes, this.fileService).catch(() => {});
+        generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
 
         const filename = uri.path.split('/').pop();
         if (filename?.endsWith('.md')) {
           const id = filename.slice(0, -3);
-          if (this.nodeIndex.getById(id)) {
-            const detail = await this.nodeIndex.getNodeDetail(id);
+          if (this.nodeIndex!.getById(id)) {
+            const detail = await this.nodeIndex!.getNodeDetail(id);
             this.send({ type: 'nodeDetail', id, ...detail });
           }
         }
@@ -116,47 +178,49 @@ export class WebviewProvider {
 
     const onNodeFileDelete = async () => {
       try {
-        const nodes = await this.nodeIndex.refresh();
+        const nodes = await this.nodeIndex!.refresh();
         this.send({ type: 'nodesUpdated', nodes });
-        generateAgentInstructions(nodes, this.fileService).catch(() => {});
+        generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
       } catch { /* non-fatal */ }
     };
 
-    nodeWatcher.onDidChange(onNodeFileChange);
-    nodeWatcher.onDidCreate(onNodeFileChange);
-    nodeWatcher.onDidDelete(onNodeFileDelete);
+    for (const watcher of nodeWatchers) {
+      watcher.onDidChange(onNodeFileChange);
+      watcher.onDidCreate(onNodeFileChange);
+      watcher.onDidDelete(onNodeFileDelete);
+    }
 
-    // Watch project.md
+    // Watch the configured project description.
     const projectWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(root, 'project.md')
+      new vscode.RelativePattern(root, paths.projectMd)
     );
     projectWatcher.onDidChange(async () => {
       try {
-        const content = await this.fileService.readFile('project.md').catch(() => '');
+        const content = await this.fileService.readFile(paths.projectMd).catch(() => '');
         this.send({ type: 'projectMd', content });
       } catch { /* non-fatal */ }
     });
 
-    // Watch papers.md and reference.bib — refresh the paper list on any external change
+    // Watch the configured paper index and bibliography.
     const refreshPapers = async () => {
       try {
-        const papers = await this.paperIndex.getPapers();
+        const papers = await this.paperIndex!.getPapers();
         this.send({ type: 'papersData', papers });
       } catch { /* non-fatal */ }
     };
 
     const papersWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(root, 'papers.md')
+      new vscode.RelativePattern(root, paths.paperIndex)
     );
     papersWatcher.onDidChange(refreshPapers);
     papersWatcher.onDidCreate(refreshPapers);
 
     const bibWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(root, 'manuscript/reference.bib')
+      new vscode.RelativePattern(root, paths.bibliography)
     );
     bibWatcher.onDidChange(refreshPapers);
 
-    this.watchers = [nodeWatcher, projectWatcher, papersWatcher, bibWatcher];
+    this.watchers = [...nodeWatchers, projectWatcher, papersWatcher, bibWatcher];
   }
 
   private send(message: ExtensionMessage): void {
@@ -170,16 +234,17 @@ export class WebviewProvider {
   }
 
   private async refreshNodes(): Promise<void> {
+    if (!this.nodeIndex || !this.paths) return;
     const nodes = await this.nodeIndex.refresh();
     this.send({ type: 'nodesUpdated', nodes });
-    generateAgentInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
+    generateAgentInstructions(nodes, this.fileService, this.paths).catch(() => { /* non-fatal */ });
   }
 
   private async handleMessage(msg: WebviewMessage): Promise<void> {
     try {
       switch (msg.type) {
         case 'ready': {
-          await this.refreshProject();
+          await this.loadProject();
           break;
         }
 
@@ -194,12 +259,14 @@ export class WebviewProvider {
         }
 
         case 'getNodeContent': {
+          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           const { frontmatter, body } = await this.nodeIndex.getNodeDetail(msg.id);
           this.send({ type: 'nodeDetail', id: msg.id, frontmatter, body });
           break;
         }
 
         case 'saveNode': {
+          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.nodeIndex.saveNode(msg.id, msg.frontmatter, msg.body);
           await this.refreshNodes();
           const updated = await this.nodeIndex.getNodeDetail(msg.id);
@@ -208,23 +275,27 @@ export class WebviewProvider {
         }
 
         case 'getProjectMd': {
-          const content = await this.fileService.readFile('project.md').catch(() => '');
+          if (!this.paths) throw new Error('Project paths are not configured.');
+          const content = await this.fileService.readFile(this.paths.projectMd).catch(() => '');
           this.send({ type: 'projectMd', content });
           break;
         }
 
         case 'saveProjectMd': {
-          await this.fileService.writeFile('project.md', msg.content);
+          if (!this.paths) throw new Error('Project paths are not configured.');
+          await this.fileService.writeFile(this.paths.projectMd, msg.content);
           break;
         }
 
         case 'getPapers': {
+          if (!this.paperIndex) throw new Error('Initialize the Research Assistant project first.');
           const papers = await this.paperIndex.getPapers();
           this.send({ type: 'papersData', papers });
           break;
         }
 
         case 'savePaper': {
+          if (!this.paperIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.paperIndex.savePaper(msg.originalSlug, msg.slug, msg.mdSection, msg.bibEntry);
           // File watchers will fire and push papersData automatically
           break;
@@ -236,12 +307,14 @@ export class WebviewProvider {
         }
 
         case 'createNode': {
+          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.nodeIndex.createNode(msg.nodeType as NodeType, msg.title);
           await this.refreshNodes();
           break;
         }
 
         case 'updateStatus': {
+          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.nodeIndex.updateStatus(msg.id, msg.status as NodeStatus);
           await this.refreshNodes();
           break;
@@ -261,18 +334,22 @@ export class WebviewProvider {
         }
 
         case 'addPaper': {
+          if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
           const pdfBytes = Buffer.from(msg.fileData, 'base64');
-          await this.fileService.writeBinary(`raw_papers/${msg.slug}.pdf`, pdfBytes);
+          const sourceSha256 = crypto.createHash('sha256').update(pdfBytes).digest('hex');
+          await this.fileService.writeBinary(`${this.paths.localSourcePdfs}/${msg.slug}.pdf`, pdfBytes);
 
-          const currentBib = await this.fileService.readFile('manuscript/reference.bib').catch(() => '');
+          const currentBib = await this.fileService.readFile(this.paths.bibliography).catch(() => '');
           const newBib = currentBib.trimEnd() + '\n\n' + msg.bibEntry.trim() + '\n';
-          await this.fileService.writeFile('manuscript/reference.bib', newBib);
+          await this.fileService.writeFile(this.paths.bibliography, newBib);
 
-          const currentPapers = await this.fileService.readFile('papers.md').catch(() => '');
-          const lines = [`## ${msg.slug}`, '', `- File: \`raw_papers/${msg.slug}.pdf\``];
+          const currentPapers = await this.fileService.readFile(this.paths.paperIndex).catch(() => '');
+          const lines = [`## ${msg.slug}`, '', `- Local file: \`${this.paths.localSourcePdfs}/${msg.slug}.pdf\``];
+          if (msg.sourceUrl) lines.push(`- Source URL: ${msg.sourceUrl}`);
+          lines.push(`- SHA-256: \`${sourceSha256}\``);
           if (msg.description) lines.push(`- Description: ${msg.description}`);
           const newPapers = currentPapers.trimEnd() + '\n\n' + lines.join('\n') + '\n';
-          await this.fileService.writeFile('papers.md', newPapers);
+          await this.fileService.writeFile(this.paths.paperIndex, newPapers);
           // File watchers will fire and push papersData
           break;
         }

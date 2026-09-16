@@ -57,14 +57,14 @@ Section topic:
   draft_latex: {
     label: 'Draft LaTeX from approved nodes',
     purpose: 'Draft manuscript LaTeX grounded in approved research nodes.',
-    requiredInputs: ['Section goal', 'Approved nodes', 'macro.tex', 'notations.tex'],
+    requiredInputs: ['Section goal', 'Approved nodes', 'configured macro/preamble files', 'configured notation file when present'],
     outputFormat: 'LaTeX with node provenance comments and explicit TODO markers',
     instructions: `Write a LaTeX section draft using the theorem/lemma nodes provided in context.
 
 Rules:
-1. Follow all macros defined in macro.tex — do not introduce new \\newcommand without checking.
-2. Follow all notations defined in notations.tex — do not change notation.
-3. Use \\begin{theorem}...\\end{theorem}, \\begin{proof}...\\end{proof} environments as defined in macro.tex.
+1. Follow all configured macro and preamble files — do not introduce new \\newcommand without checking them.
+2. Follow the configured notation file when present — do not change notation silently.
+3. Use the theorem and proof environments defined by the project.
 4. Reference theorems by their node id in a comment: % [node_id]
 5. Mark unclear steps with % TODO.
 
@@ -75,14 +75,14 @@ Section to draft:
   check_notation: {
     label: 'Check notation consistency',
     purpose: 'Find undefined or inconsistent mathematical notation.',
-    requiredInputs: ['LaTeX content', 'notations.tex'],
+    requiredInputs: ['LaTeX content', 'configured notation file when present'],
     outputFormat: 'Categorized Markdown review with proposed corrections',
-    instructions: `Compare the LaTeX content below against the notations.tex file provided in context.
+    instructions: `Compare the LaTeX content below against the configured notation file provided in context.
 
 Report:
-1. Any notation used in the LaTeX that is not defined in notations.tex
+1. Any notation used in the LaTeX that is not defined in the configured notation file
 2. Any notation used inconsistently (same symbol for different things, or different symbols for the same thing)
-3. Suggested additions to notations.tex
+3. Suggested additions to the configured notation file
 
 LaTeX content to check:
 `,

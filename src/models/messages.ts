@@ -1,8 +1,8 @@
-import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, UIState, PaperEntry } from './types';
+import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary } from './types';
 
 // Messages sent from the extension to the webview
 export type ExtensionMessage =
-  | { type: 'init'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState }
+  | { type: 'init'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'nodesUpdated'; nodes: ResearchNode[] }
   | { type: 'nodeDetail'; id: string; frontmatter: NodeFrontmatter; body: string }
   | { type: 'projectMd'; content: string }
@@ -25,4 +25,4 @@ export type WebviewMessage =
   | { type: 'openFile'; filePath: string }
   | { type: 'initProject' }
   | { type: 'refreshProject' }
-  | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string };
+  | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string; sourceUrl: string };

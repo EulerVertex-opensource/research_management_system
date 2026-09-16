@@ -7,7 +7,7 @@ interface PendingPaper {
 }
 
 interface Props {
-  onAddPaper: (slug: string, fileName: string, fileData: string, bibEntry: string, description: string) => void;
+  onAddPaper: (slug: string, fileName: string, fileData: string, bibEntry: string, description: string, sourceUrl: string) => void;
 }
 
 export function PapersView({ onAddPaper }: Props) {
@@ -22,14 +22,14 @@ export function PapersView({ onAddPaper }: Props) {
     e.target.value = '';
   };
 
-  const handleConfirm = (slug: string, bibEntry: string, description: string) => {
+  const handleConfirm = (slug: string, bibEntry: string, description: string, sourceUrl: string) => {
     if (!pending) return;
     setReading(true);
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
       const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
-      onAddPaper(slug, pending.fileName, base64, bibEntry, description);
+      onAddPaper(slug, pending.fileName, base64, bibEntry, description, sourceUrl);
       setPending(null);
       setReading(false);
     };
@@ -69,12 +69,12 @@ export function PapersView({ onAddPaper }: Props) {
         </button>
 
         <p style={{ fontSize: 12, opacity: 0.5, marginBottom: 20 }}>
-          Copies the PDF to <code>raw_papers/</code>, adds a BibTeX entry to{' '}
-          <code>manuscript/reference.bib</code>, and appends an entry to <code>papers.md</code>.
+          Keeps the PDF in the Git-ignored local source directory, adds a BibTeX entry to the configured
+          bibliography, and appends shared metadata to the research paper index.
         </p>
 
         <p style={{ fontSize: 13, opacity: 0.7 }}>
-          You can also edit <code>papers.md</code> and <code>manuscript/reference.bib</code> directly.
+          Stable source URLs and descriptions are shared through Git; original PDFs stay local.
           Reference papers in asset nodes via their <code>paper_id</code> (slug).
         </p>
       </div>

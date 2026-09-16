@@ -5,4 +5,5 @@ out/webview/*.js.map
 out/extension.js.map
 esbuild.js
 tsconfig.json
+tsconfig.webview.json
 .gitignore

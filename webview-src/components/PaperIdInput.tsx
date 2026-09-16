@@ -6,10 +6,11 @@ interface Props {
   onChange: (value: string) => void;
   papers: PaperEntry[];
   onOpenPdf: (slug: string) => void;
+  sourcePdfDirectory: string;
   inputStyle: React.CSSProperties;
 }
 
-export function PaperIdInput({ value, onChange, papers, onOpenPdf, inputStyle }: Props) {
+export function PaperIdInput({ value, onChange, papers, onOpenPdf, sourcePdfDirectory, inputStyle }: Props) {
   const [open, setOpen] = useState(false);
 
   const trimmed = value.trim();
@@ -43,7 +44,7 @@ export function PaperIdInput({ value, onChange, papers, onOpenPdf, inputStyle }:
         {exactMatch && (
           <button
             onClick={() => onOpenPdf(exactMatch.slug)}
-            title={`Open raw_papers/${exactMatch.slug}.pdf`}
+            title={`Open ${sourcePdfDirectory}/${exactMatch.slug}.pdf`}
             style={{
               background: 'none',
               border: 'none',

@@ -1,226 +1,197 @@
-# Research Assistant — VSCode Extension
+# Research Assistant — VS Code Extension
 
-A local, file-based research management tool for mathematicians, deeply integrated with VSCode. It organizes mathematical research around structured **nodes** (theorems, lemmas, ideas, etc.) stored as plain Markdown files with YAML frontmatter, and keeps your Copilot/Claude context automatically up to date.
+A file-based mathematical research workspace designed to live inside an Overleaf Git project. LaTeX, research nodes, paper metadata, and AI instructions are shared through Git; original source PDFs and reproducible build output stay local.
 
----
+## Overleaf-first workflow
 
-## Features
+1. Create or open a project in Overleaf and enable its Git integration.
+2. Clone the Overleaf project and open that clone in VS Code:
 
-### Dashboard panels
+   ```bash
+   git clone https://git.overleaf.com/<project-id> my-paper
+   cd my-paper
+   code .
+   ```
 
-| Panel | What it does |
+3. Run **Research Assistant: Open Dashboard**.
+4. Open the Project panel and select **Initialize Shared Research Scaffold**.
+5. Review and commit the added scaffold, then push it to Overleaf.
+6. Collaborators clone the same project, open it in VS Code, and run Research Assistant. The committed `.research-assistant.json` makes every installation use the same paths and context.
+
+Initialization discovers an existing root-level `.tex` file containing `\documentclass`, preferring `main.tex`, and discovers common BibTeX, preamble, macro, and notation files. Existing files are never overwritten. Edit `.research-assistant.json` if the detected layout needs adjustment, then run **Research Assistant: Refresh Agent Setup**.
+
+## Shared workspace structure
+
+```text
+overleaf-project/
+  main.tex                         ← existing Overleaf main document
+  sections/                        ← manuscript sections, when used
+  figures/                         ← manuscript figures
+  macros.tex                       ← optional; discovered/configured
+  notations.tex                    ← optional; discovered/configured
+  references.bib                   ← discovered/configured bibliography
+
+  research/                        ← shared, canonical AI/research context
+    README.md
+    project.md                     ← problem, goals, known results, open questions
+    papers.md                      ← paper index keyed by BibTeX slug
+    assets/                        ← theorem/lemma/definition/etc. nodes
+    ideas/                         ← idea nodes
+    papers/<slug>/                 ← shared metadata and working transcriptions
+    workflows/                     ← agent-neutral workflow instructions
+
+  research-local/                  ← local only; ignored by Git
+    raw_papers/                    ← authoritative source PDFs
+
+  .research-assistant.json         ← committed path configuration
+  .github/copilot-instructions.md  ← compact deterministic Copilot guidance
+  .agents/skills/                  ← project-local Codex skills
+  .claude/skills/                  ← project-local Claude Code skills
+  AGENTS.md                        ← generated section plus preserved user text
+  CLAUDE.md                        ← generated section plus preserved user text
+  .gitignore                       ← includes managed local/build exclusions
+```
+
+Overleaf should compile the existing root document exactly as before. Research Assistant does not insert inputs into an adopted manuscript or replace its bibliography.
+
+## What is shared
+
+Commit these files:
+
+- LaTeX, BibTeX, figures required by the manuscript, and project-specific class/style files.
+- `.research-assistant.json`.
+- `research/**/*.md`, `research/**/*.yaml`, and other lightweight research metadata.
+- `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, agent skills, and workflows.
+
+Do not normally commit:
+
+- `research-local/raw_papers/*.pdf`.
+- OCR caches or extraction scratch files.
+- LaTeX output such as `.aux`, `.log`, `.fls`, `.fdb_latexmk`, `.synctex.gz`, and `.toc` files.
+- A compiled copy of the manuscript PDF.
+
+For each paper, share a stable DOI, arXiv, or publisher URL and a checksum when available. This lets collaborators retrieve and verify the same authoritative PDF without storing large binaries in the Overleaf repository.
+
+## Collaboration practice
+
+Overleaf Git supports a single remote `master` history. Pull before beginning local work and once more before pushing:
+
+```bash
+git pull --rebase origin master
+# edit in VS Code / Research Assistant
+git add .
+git commit -m "Add research context for theorem X"
+git pull --rebase origin master
+git push origin HEAD:master
+```
+
+Prefer one node per file so independent results merge cleanly. Avoid renaming files that have active Overleaf comments or tracked changes, because a Git-side rename is represented as delete-and-create by Overleaf.
+
+## Configuration
+
+The default generated `.research-assistant.json` is:
+
+```json
+{
+  "version": 1,
+  "layout": "overleaf-shared",
+  "latex": {
+    "projectRoot": ".",
+    "main": "main.tex",
+    "bibliography": "references.bib",
+    "macros": ["macros.tex"],
+    "notations": "notations.tex",
+    "sections": "sections"
+  },
+  "research": {
+    "root": "research",
+    "project": "research/project.md",
+    "paperIndex": "research/papers.md",
+    "assets": "research/assets",
+    "ideas": "research/ideas",
+    "papers": "research/papers",
+    "workflows": "research/workflows",
+    "localSourcePdfs": "research-local/raw_papers"
+  }
+}
+```
+
+All paths must remain within the workspace. LaTeX paths are relative to `latex.projectRoot`; research paths are workspace-relative. Macro files may be an empty array and `notations` may be `null` for projects without dedicated files.
+
+Existing workspaces using `manuscript/`, root `assets/`, root `ideas/`, and `raw_papers/` are detected as `legacy` and continue to work without moving files.
+
+## Dashboard
+
+| Panel | Purpose |
 |---|---|
-| **Project** | Edit and preview `project.md` — your project description, goals, open questions |
-| **Papers** | Browse registered papers, view/edit BibTeX + description, add PDFs |
-| **Assets** | Browse and edit theorem/lemma/definition/etc. nodes |
-| **Ideas** | Browse and edit idea nodes |
-| **Manuscript** | Quick reference to LaTeX file locations |
+| **Project** | Edit and preview the configured project description; initialize or refresh shared setup |
+| **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
+| **Assets** | Browse and edit theorem, lemma, proposition, definition, example, construction, and remark nodes |
+| **Ideas** | Browse and edit research ideas |
+| **Manuscript** | Display the configured main, bibliography, macros, notation, and section paths |
 
-### Node editor (Assets & Ideas)
+Node changes are reflected live. New or materially changed nodes remain `draft`; only a researcher should promote them to `approved`.
 
-- **Metadata form** with live validation:
-  - *Type* — locked to `idea` for ideas; dropdown limited to asset types for assets
-  - *Status* — `draft | approved | deprecated | archived`
-  - *Source* — `paper` or `self_proved` only; paper_id field has autocomplete against registered papers, turns green on valid match (clickable to open PDF), red on invalid entry
-  - *Depends on / Used in / Related assets* — chip-based multi-select with node search; unknown IDs shown in red
-  - *Tags* — comma-separated free text
-- **Markdown editor** with **Editor / Split / Preview** modes
-  - Math rendered by KaTeX (HTML output with proper fonts)
-  - GFM: tables and `- [ ]` / `- [x]` checklists
-  - Block math requires `$$` on its own line (see [Math syntax](#math-syntax))
-- **Auto-save** — changes are saved automatically 1.5 s after the last edit; manual Save button available for immediate saving
-- **Resizable panes** — drag the splitter between the node list and content area; drag the splitter below the metadata form to adjust its height; all sizes persisted across sessions
-- **Live sync** — external edits (e.g. from Copilot) are reflected immediately without switching panels
+## Node format
 
-### Papers panel
-
-- List of all registered papers (parsed from `papers.md` + `manuscript/reference.bib`)
-- **Add PDF…** button — opens OS file picker, copies PDF to `raw_papers/`, updates `papers.md` and `reference.bib`
-- Slug and BibTeX key stay in sync: editing one updates the other
-- Renaming a slug renames the PDF file on disk if possible
-- Paper detail view with **Editor / Preview** toggle for BibTeX entry and Markdown description
-- Auto-save (1.5 s debounce)
-
-### AI context (Copilot, Codex, and Claude Code)
-
-Every time any node is saved, the extension regenerates `.github/copilot-instructions.md` with:
-- Full project structure reference
-- Node frontmatter schema and rules
-- Math and file-format conventions
-- All approved nodes (with body snippets)
-- Draft node list
-
-Copilot reads this file automatically, so it understands your project structure without any extra prompting.
-
-The extension also maintains:
-
-- `AGENTS.md` — durable Codex guidance generated inside protected markers; text outside the markers is preserved
-- `CLAUDE.md` — durable Claude Code guidance with the same preservation behavior
-- `.research/workflows/` — agent-neutral workflow definitions shared by integrations
-- `.agents/skills/import-math-paper/` — Codex registration of the paper-import skill
-- `.claude/skills/import-math-paper/` — Claude Code registration of the same skill
-
-The extension's bundled `skills/` directory is the single source of truth. On project initialization, the extension copies every valid skill directory to both agent-specific discovery locations.
-
-The original PDF remains authoritative. Imported Markdown is a searchable working transcription with source-page markers and an explicit review state.
-
----
-
-## Getting started
-
-1. Open any folder in VSCode as your research workspace.
-2. Run the command **Research Assistant: Open Dashboard** (Ctrl+Shift+P).
-3. Click **Initialize Project** in the Project panel to create the folder structure.
-4. Start adding papers (Papers panel) and creating nodes (Assets / Ideas panels).
-
----
-
-## Workspace structure
-
-```
-your-research-project/
-  assets/               ← theorem, lemma, proposition, definition, example, construction, remark nodes
-  ideas/                ← idea nodes
-  raw_papers/           ← PDF source papers
-  papers/               ← optional Markdown transcriptions and extraction metadata
-  manuscript/
-    main.tex            ← LaTeX document root
-    macro.tex           ← ALL \newcommand, \DeclareMathOperator, theorem environments
-    notations.tex       ← ALL notation definitions
-    reference.bib       ← BibTeX bibliography
-    sections/           ← one .tex file per paper section
-  project.md            ← project description, goals, open questions
-  papers.md             ← paper index (one ## slug section per paper)
-  .github/
-    copilot-instructions.md   ← auto-generated AI context (do not edit manually)
-  .research/workflows/        ← generated agent-neutral workflow descriptions
-  .agents/skills/             ← generated project-local Codex skills
-  .claude/skills/             ← generated project-local Claude Code skills
-  AGENTS.md                   ← generated Codex repository guidance plus user-authored sections
-  CLAUDE.md                   ← generated Claude Code guidance plus user-authored sections
-```
-
-### Using the paper-import skill
-
-- In Codex, select the skill with `/skills` or mention `$import-math-paper` in a prompt.
-- In Claude Code, invoke `/import-math-paper` or ask naturally for a paper to be imported or transcribed.
-
-To update an existing research workspace after installing a newer extension build, run **Research Assistant: Refresh Agent Setup** from the Command Palette or click **Refresh Agent Setup** in the Project panel. This reinstalls the bundled skills for both agents and regenerates `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, and `.research/workflows/` without replacing existing research files.
-
----
-
-## File formats
-
-### Asset node (`assets/<id>.md`)
+An asset at `research/assets/<id>.md` uses YAML frontmatter:
 
 ```markdown
 ---
-type: theorem          # theorem | lemma | proposition | definition | example | construction | remark
+type: theorem
 title: Chebotarev Density Theorem
-status: draft          # draft | approved | deprecated | archived
+status: draft
 source:
-  kind: paper          # paper | self_proved  (only these two)
-  paper_id: lang_weil  # must match a slug in papers.md
+  kind: paper
+  paper_id: lang_weil
   location: Theorem 3.1
-depends_on:            # ids of nodes this result relies on
+depends_on:
   - frobenius_conjugacy_class
-used_in:               # ids of nodes that use this result
+used_in:
   - main_counting_argument
 tags:
   - arithmetic-geometry
-  - finite-fields
 ---
 
-Markdown body. Inline math: $x^2 + y^2 = r^2$.
-
-Block math ($$  must be on its own line):
+Markdown body with inline math $x^2+y^2=r^2$.
 
 $$
 \sum_{p \leq x} 1 \sim \frac{x}{\log x}
 $$
 ```
 
-### Idea node (`ideas/<id>.md`)
+Ideas always use `type: idea` and may reference `related_assets`. Source kinds are `paper` and `self_proved`. Relationship values are exact filenames without `.md`.
+
+## Paper format
+
+`research/papers.md` contains one section per slug; the slug must equal the key in the configured bibliography:
 
 ```markdown
----
-type: idea             # always idea — do not change
-title: Use Frobenius cycle type to count factorization patterns
-status: draft
-related_assets:
-  - chebotarev_density_theorem
-tags:
-  - galois-theory
-  - counting
----
-
-Description of the idea, strategy, open questions…
-```
-
-### papers.md
-
-```markdown
-# Papers
-
 ## lang_weil
 
-- File: `raw_papers/lang_weil.pdf`
-- Description: Original Lang-Weil theorem on rational points over finite fields.
+- Local file: `research-local/raw_papers/lang_weil.pdf`
+- Source URL: https://example.org/stable-paper-location
+- SHA-256: `...`
+- Description: Original Lang–Weil theorem on rational points over finite fields.
 ```
 
-The slug (`lang_weil`) is the `paper_id` used in asset frontmatter and the BibTeX citation key.
+The local file line is shared as a convention, but the PDF itself is ignored by Git.
 
----
+## AI setup
 
-## Math syntax
+The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/`, writes workflows under `research/workflows/`, and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. Text outside the protected markers is preserved.
 
-The Markdown renderer uses **remark-math + rehype-katex**. Block display math requires `$$` on its own line:
+Generated instructions are deliberately compact and deterministic. They point agents to canonical node and paper files instead of duplicating every node body, reducing Git noise and merge conflicts.
 
-```
-$$
-ax + by + cz = 0
-$$
-```
-
-Single-line `$$ax+by=0$$` is **not** parsed as display math. Inline math uses `$...$` as usual.
-
----
-
-## Key rules for AI assistants
-
-- **Source kind**: only `paper` and `self_proved` are valid — never `textbook` or `note`.
-- **Idea type**: the `type` field of an idea must always remain `idea`.
-- **Status after edit**: whenever you create or modify a node file, set `status: draft`. Do not promote to `approved` — that is the researcher's decision.
-- **Array fields** (`depends_on`, `used_in`, `related_assets`): values must be exact node IDs (filenames without `.md`). Both block format (dashes) and flow format `[id1, id2]` are valid YAML and parsed correctly.
-- **Block math**: always use the newline form shown above.
-- **LaTeX**: do not introduce `\newcommand` without reading `macro.tex` first; do not change notation without reading `notations.tex` first.
-
----
-
-## Tech stack
-
-| Layer | Technology |
-|---|---|
-| Extension host | TypeScript, VSCode Extension API |
-| Webview UI | React 18, esbuild (IIFE bundle) |
-| YAML frontmatter | gray-matter |
-| Markdown rendering | react-markdown, remark-gfm |
-| Math rendering | remark-math, rehype-katex, KaTeX (HTML output) |
-| File watching | `vscode.workspace.createFileSystemWatcher` |
-| UI state persistence | `vscode.ExtensionContext.globalState` |
-
----
+Run **Research Assistant: Refresh Agent Setup** after editing `.research-assistant.json` or upgrading the extension.
 
 ## Development
 
 ```bash
 npm install
-npm run build      # one-shot build
-npm run watch      # rebuild on file changes
+npm run typecheck
+npm run build
+npm run watch
 ```
 
-Press **F5** in VSCode to launch the Extension Development Host.
-
-The build produces:
-- `out/extension.js` — extension host (CommonJS)
-- `out/webview/main.js` + `out/webview/main.css` — webview bundle (IIFE + KaTeX CSS + fonts)
+Press **F5** in VS Code to launch the Extension Development Host. The build produces `out/extension.js` and the webview bundle under `out/webview/`.

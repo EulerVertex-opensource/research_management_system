@@ -9,12 +9,12 @@ Create a searchable working representation without treating extraction as mathem
 
 ## Required outcome
 
-Keep the untouched PDF as the authoritative source. Produce metadata and Markdown that let later agents trace every extracted claim back to the PDF. Read [references/output-format.md](references/output-format.md) before creating files.
+Read `.research-assistant.json` and keep the untouched PDF in its configured `localSourcePdfs` directory. That directory is local-only and must remain ignored by Git. Produce shared metadata and Markdown in the configured research paper directory so collaborators can trace every extracted claim and retrieve the same source. Read [references/output-format.md](references/output-format.md) before creating files.
 
 ## Workflow
 
 1. Choose a stable lowercase paper slug consistent with the BibTeX key.
-2. Preserve the original PDF and compute a SHA-256 checksum when a local hashing tool is available.
+2. Preserve the original PDF locally, record a stable DOI/arXiv/publisher URL when available, and compute a SHA-256 checksum when a local hashing tool is available.
 3. Extract text page by page using available local PDF tools. Use OCR only for pages without a usable text layer.
 4. Normalize headings, paragraphs, lists, and ordinary formulas into Markdown while retaining source-page markers.
 5. Preserve uncertain text visibly. Never silently repair a formula whose intended meaning is unclear.
@@ -26,6 +26,7 @@ Keep the untouched PDF as the authoritative source. Produce metadata and Markdow
 ## Boundaries
 
 - Do not alter or replace the source PDF.
+- Do not add source PDFs, OCR caches, or LaTeX build output to Git.
 - Do not claim that OCR accuracy establishes mathematical correctness.
 - Do not mark the transcription or extracted nodes as reviewed or approved without explicit researcher confirmation.
 - Prefer the Markdown for search and broad reading; return to the PDF for exact notation and citation.

@@ -9,12 +9,32 @@ function parseDescription(mdSection: string): string {
   return match ? match[1].trim() : '';
 }
 
-function buildMdSection(slug: string, description: string): string {
-  const lines = [`- File: \`raw_papers/${slug}.pdf\``];
+function parseSourceUrl(mdSection: string): string {
+  const match = mdSection.match(/^- Source URL:\s*(.+)$/m);
+  return match ? match[1].trim() : '';
+}
+
+function buildMdSection(
+  existing: string,
+  slug: string,
+  sourceUrl: string,
+  description: string,
+  sourcePdfDirectory: string
+): string {
+  const lines = [`- Local file: \`${sourcePdfDirectory}/${slug}.pdf\``];
+  if (sourceUrl.trim()) {
+    lines.push(`- Source URL: ${sourceUrl.trim()}`);
+  }
   if (description.trim()) {
     lines.push(`- Description: ${description.trim()}`);
   }
-  return lines.join('\n') + '\n';
+  const preserved = existing
+    .split('\n')
+    .filter((line) => line.trim())
+    .filter((line) => !/^- (?:Local )?File:/i.test(line))
+    .filter((line) => !/^- Source URL:/i.test(line))
+    .filter((line) => !/^- Description:/i.test(line));
+  return [...lines, ...preserved].join('\n') + '\n';
 }
 
 function extractBibKey(bib: string): string {
@@ -26,10 +46,12 @@ interface Props {
   paper: PaperEntry;
   onSave: (originalSlug: string, newSlug: string, mdSection: string, bibEntry: string) => void;
   onOpenPdf: (slug: string) => void;
+  sourcePdfDirectory: string;
 }
 
-export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
+export function PaperDetail({ paper, onSave, onOpenPdf, sourcePdfDirectory }: Props) {
   const [localSlug, setLocalSlug] = useState(paper.slug);
+  const [sourceUrl, setSourceUrl] = useState(() => parseSourceUrl(paper.mdSection));
   const [description, setDescription] = useState(() => parseDescription(paper.mdSection));
   const [bibEntry, setBibEntry] = useState(paper.bibEntry);
   const [mode, setMode] = useState<ViewMode>('editor');
@@ -40,6 +62,8 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
   localSlugRef.current = localSlug;
   const descriptionRef = useRef(description);
   descriptionRef.current = description;
+  const sourceUrlRef = useRef(sourceUrl);
+  sourceUrlRef.current = sourceUrl;
   const bibEntryRef = useRef(bibEntry);
   bibEntryRef.current = bibEntry;
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -53,6 +77,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
   // Full reset when a different paper is selected (component remounts via key)
   useEffect(() => {
     setLocalSlug(paper.slug);
+    setSourceUrl(parseSourceUrl(paper.mdSection));
     setDescription(parseDescription(paper.mdSection));
     setBibEntry(paper.bibEntry);
     setDirty(false);
@@ -62,6 +87,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
   // Always sync display when external changes arrive — the file is the source of truth.
   useEffect(() => {
     setLocalSlug(paper.slug);
+    setSourceUrl(parseSourceUrl(paper.mdSection));
     setDescription(parseDescription(paper.mdSection));
     setBibEntry(paper.bibEntry);
     setDirty(false);
@@ -80,7 +106,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
       onSave(
         paper.slug,
         localSlugRef.current,
-        buildMdSection(localSlugRef.current, descriptionRef.current),
+        buildMdSection(paper.mdSection, localSlugRef.current, sourceUrlRef.current, descriptionRef.current, sourcePdfDirectory),
         bibEntryRef.current,
       );
       setDirty(false);
@@ -89,7 +115,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
       statusTimerRef.current = setTimeout(() => setSaveStatus('idle'), 1500);
     }, 1500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, localSlug, description, bibEntry]);
+  }, [dirty, localSlug, sourceUrl, description, bibEntry]);
 
   // When the BibTeX textarea changes, sync slug from the entry key
   const handleBibChange = (newBib: string) => {
@@ -103,7 +129,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
 
   const handleSave = () => {
     if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
-    onSave(paper.slug, localSlug, buildMdSection(localSlug, description), bibEntry);
+    onSave(paper.slug, localSlug, buildMdSection(paper.mdSection, localSlug, sourceUrl, description, sourcePdfDirectory), bibEntry);
     setDirty(false);
     setSaveStatus('saved');
     if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
@@ -171,7 +197,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
 
         <button
           onClick={() => onOpenPdf(paper.slug)}
-          title={`Open raw_papers/${paper.slug}.pdf`}
+          title={`Open ${sourcePdfDirectory}/${paper.slug}.pdf`}
           style={{ padding: '2px 10px', fontSize: 11, border: '1px solid var(--vscode-input-border)', borderRadius: 3, background: 'transparent', color: 'var(--vscode-foreground)', cursor: 'pointer' }}
         >
           Open PDF
@@ -254,6 +280,22 @@ export function PaperDetail({ paper, onSave, onOpenPdf }: Props) {
             >
               {bibEntry || '(no BibTeX entry)'}
             </pre>
+          )}
+        </div>
+
+        <div>
+          <label style={lbl}>Stable source URL</label>
+          {mode === 'editor' ? (
+            <input
+              value={sourceUrl}
+              onChange={(e) => { setSourceUrl(e.target.value); setDirty(true); }}
+              placeholder="https://arxiv.org/abs/..."
+              style={inp}
+            />
+          ) : sourceUrl ? (
+            <a href={sourceUrl} style={{ color: 'var(--vscode-textLink-foreground)' }}>{sourceUrl}</a>
+          ) : (
+            <p style={{ fontSize: 13, opacity: 0.4 }}>(no shared source URL)</p>
           )}
         </div>
 

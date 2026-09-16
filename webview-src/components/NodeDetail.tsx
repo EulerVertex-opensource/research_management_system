@@ -20,6 +20,7 @@ interface Props {
   metadataHeight: number;
   allNodes: ResearchNode[];
   allPapers: PaperEntry[];
+  sourcePdfDirectory: string;
   onLayoutChange: (mode: LayoutMode) => void;
   onSplitRatioChange: (ratio: number) => void;
   onMetadataHeightChange: (height: number) => void;
@@ -37,6 +38,7 @@ export function NodeDetail({
   metadataHeight,
   allNodes,
   allPapers,
+  sourcePdfDirectory,
   onLayoutChange,
   onSplitRatioChange,
   onMetadataHeightChange,
@@ -236,6 +238,7 @@ export function NodeDetail({
                   onChange={(v) => { updateSource('paper_id', v); setDirty(true); }}
                   papers={allPapers}
                   onOpenPdf={onOpenPdf}
+                  sourcePdfDirectory={sourcePdfDirectory}
                   inputStyle={inp}
                 />
               </div>

@@ -1,5 +1,5 @@
 import React, { useReducer, useCallback, useRef } from 'react';
-import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry } from '../src/models/types';
+import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary } from '../src/models/types';
 import { ExtensionMessage } from '../src/models/messages';
 import { useExtension } from './hooks/useExtension';
 import { Sidebar, SidebarView } from './components/Sidebar';
@@ -19,6 +19,8 @@ interface NodeDetailData {
 interface State {
   nodes: ResearchNode[];
   projectRoot: string;
+  initialized: boolean;
+  paths: ProjectPathSummary | null;
   selectedNodeId: string | null;
   nodeDetails: Record<string, NodeDetailData>;
   projectMd: string | null;
@@ -32,7 +34,7 @@ interface State {
 }
 
 type Action =
-  | { type: 'INIT'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState }
+  | { type: 'INIT'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'NODES_UPDATED'; nodes: ResearchNode[] }
   | { type: 'NODE_DETAIL'; id: string; frontmatter: NodeFrontmatter; body: string }
   | { type: 'PROJECT_MD'; content: string }
@@ -50,7 +52,16 @@ type Action =
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'INIT':
-      return { ...state, nodes: action.nodes, projectRoot: action.projectRoot, uiState: action.uiState, error: null };
+      return {
+        ...state,
+        nodes: action.nodes,
+        projectRoot: action.projectRoot,
+        initialized: action.initialized,
+        paths: action.paths,
+        activeView: action.initialized ? state.activeView : 'project',
+        error: null,
+        uiState: action.uiState,
+      };
     case 'NODES_UPDATED':
       return { ...state, nodes: action.nodes };
     case 'NODE_DETAIL':
@@ -85,6 +96,8 @@ function reducer(state: State, action: Action): State {
 const initialState: State = {
   nodes: [],
   projectRoot: '',
+  initialized: false,
+  paths: null,
   selectedNodeId: null,
   nodeDetails: {},
   projectMd: null,
@@ -103,7 +116,7 @@ export function App() {
   const handleMessage = useCallback((msg: ExtensionMessage) => {
     switch (msg.type) {
       case 'init':
-        dispatch({ type: 'INIT', nodes: msg.nodes, projectRoot: msg.projectRoot, uiState: msg.uiState });
+        dispatch({ type: 'INIT', nodes: msg.nodes, projectRoot: msg.projectRoot, uiState: msg.uiState, initialized: msg.initialized, paths: msg.paths });
         break;
       case 'nodesUpdated':
         dispatch({ type: 'NODES_UPDATED', nodes: msg.nodes });
@@ -165,8 +178,8 @@ export function App() {
     if (node) send({ type: 'openInEditor', filePath: node.filePath });
   };
 
-  const handleAddPaper = (slug: string, fileName: string, fileData: string, bibEntry: string, description: string) => {
-    send({ type: 'addPaper', slug, fileName, fileData, bibEntry, description });
+  const handleAddPaper = (slug: string, fileName: string, fileData: string, bibEntry: string, description: string, sourceUrl: string) => {
+    send({ type: 'addPaper', slug, fileName, fileData, bibEntry, description, sourceUrl });
   };
 
   const handleSavePaper = (originalSlug: string, newSlug: string, mdSection: string, bibEntry: string) => {
@@ -177,7 +190,7 @@ export function App() {
   };
 
   const handleOpenPdf = (slug: string) => {
-    send({ type: 'openFile', filePath: `raw_papers/${slug}.pdf` });
+    if (state.paths) send({ type: 'openFile', filePath: `${state.paths.localSourcePdfs}/${slug}.pdf` });
   };
 
   const handleLayoutChange = (layoutMode: LayoutMode) => {
@@ -318,6 +331,8 @@ export function App() {
             <ProjectView
               content={state.projectMd}
               projectRoot={state.projectRoot}
+              initialized={state.initialized}
+              paths={state.paths}
               layoutMode={layoutMode}
               splitRatio={splitRatio}
               onLayoutChange={handleLayoutChange}
@@ -333,6 +348,7 @@ export function App() {
                 paper={selectedPaper}
                 onSave={handleSavePaper}
                 onOpenPdf={handleOpenPdf}
+                sourcePdfDirectory={state.paths?.localSourcePdfs ?? 'research-local/raw_papers'}
               />
             ) : (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>
@@ -351,6 +367,7 @@ export function App() {
                 metadataHeight={metadataHeight}
                 allNodes={state.nodes}
                 allPapers={state.papers}
+                sourcePdfDirectory={state.paths?.localSourcePdfs ?? 'research-local/raw_papers'}
                 onLayoutChange={handleLayoutChange}
                 onSplitRatioChange={handleSplitRatioChange}
                 onMetadataHeightChange={handleMetadataHeightChange}
@@ -366,12 +383,13 @@ export function App() {
           ) : state.activeView === 'manuscript' ? (
             <div style={{ padding: 24 }}>
               <h2 style={{ fontSize: 15, marginBottom: 10 }}>Manuscript</h2>
-              <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 8 }}>LaTeX files live in <code>manuscript/</code>:</p>
+              <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 8 }}>Overleaf-compatible files are configured at the repository root:</p>
               <ul style={{ fontSize: 13, opacity: 0.7, paddingLeft: 20, lineHeight: 2 }}>
-                <li><code>manuscript/macro.tex</code> — macros and theorem environments</li>
-                <li><code>manuscript/notations.tex</code> — notation reference</li>
-                <li><code>manuscript/main.tex</code> — document root</li>
-                <li><code>manuscript/sections/</code> — one file per section</li>
+                <li><code>{state.paths?.mainTex ?? 'main.tex'}</code> — document root</li>
+                <li><code>{state.paths?.bibliography ?? 'references.bib'}</code> — shared bibliography</li>
+                <li><code>{state.paths?.macroFiles.join(', ') || '(none configured)'}</code> — macros/preamble</li>
+                <li><code>{state.paths?.notations ?? '(none configured)'}</code> — notation reference</li>
+                <li><code>{state.paths?.sections ?? 'sections'}</code> — section files</li>
               </ul>
             </div>
           ) : null}

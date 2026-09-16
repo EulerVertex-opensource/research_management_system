@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutMode } from '../../src/models/types';
+import { LayoutMode, ProjectPathSummary } from '../../src/models/types';
 import { MarkdownEditor } from './MarkdownEditor';
 
 interface Props {
   content: string | null;
   projectRoot: string;
+  initialized: boolean;
+  paths: ProjectPathSummary | null;
   layoutMode: LayoutMode;
   splitRatio: number;
   onLayoutChange: (mode: LayoutMode) => void;
@@ -17,6 +19,8 @@ interface Props {
 export function ProjectView({
   content,
   projectRoot,
+  initialized,
+  paths,
   layoutMode,
   splitRatio,
   onLayoutChange,
@@ -35,13 +39,27 @@ export function ProjectView({
     }
   }, [content]);
 
-  if (content === null) {
+  if (!initialized || content === null) {
     return (
       <div style={{ padding: 24 }}>
         <h2 style={{ fontSize: 15, marginBottom: 12 }}>Project</h2>
         <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 16 }}>
           Root: <code>{projectRoot}</code>
         </p>
+        {paths?.layout === 'legacy' ? (
+          <p style={{ fontSize: 13, opacity: 0.75, marginBottom: 16, maxWidth: 680, lineHeight: 1.6 }}>
+            Research Assistant found the existing legacy layout with <code>{paths.mainTex}</code> and{' '}
+            <code>{paths.bibliography}</code>. Initialization records that layout without moving or replacing files
+            and refreshes the shared agent setup.
+          </p>
+        ) : (
+          <p style={{ fontSize: 13, opacity: 0.75, marginBottom: 16, maxWidth: 680, lineHeight: 1.6 }}>
+            Research Assistant found <code>{paths?.mainTex ?? 'main.tex'}</code> as the Overleaf main document
+            and <code>{paths?.bibliography ?? 'references.bib'}</code> as the bibliography. Initialization preserves
+            those files and adds the shared <code>research/</code> scaffold, agent guidance, skills, configuration,
+            and local-only PDF exclusions.
+          </p>
+        )}
         <button
           onClick={onInitProject}
           style={{
@@ -54,7 +72,7 @@ export function ProjectView({
             fontSize: 13,
           }}
         >
-          Initialize Project Structure
+          Initialize Shared Research Scaffold
         </button>
       </div>
     );
@@ -73,7 +91,7 @@ export function ProjectView({
           gap: 10,
         }}
       >
-        <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>project.md</span>
+        <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{paths?.projectMd ?? 'research/project.md'}</span>
         {dirty && <span style={{ fontSize: 11, opacity: 0.5 }}>Unsaved changes</span>}
         <button
           onClick={onRefreshProject}

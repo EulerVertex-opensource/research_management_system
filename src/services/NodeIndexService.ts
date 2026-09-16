@@ -1,6 +1,6 @@
 import * as path from 'path';
 import matter from 'gray-matter';
-import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter } from '../models/types';
+import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, ProjectPaths } from '../models/types';
 import { FileService } from './FileService';
 
 const NODE_TEMPLATES: Record<string, string> = {
@@ -149,13 +149,16 @@ function parseNode(relativePath: string, raw: string): ResearchNode | null {
 export class NodeIndexService {
   private nodes: Map<string, ResearchNode> = new Map();
 
-  constructor(private readonly fileService: FileService) {}
+  constructor(
+    private readonly fileService: FileService,
+    private readonly paths: ProjectPaths
+  ) {}
 
   async refresh(): Promise<ResearchNode[]> {
     this.nodes.clear();
 
-    const assetPaths = await this.fileService.listFiles('assets', '.md');
-    const ideaPaths = await this.fileService.listFiles('ideas', '.md');
+    const assetPaths = await this.fileService.listFiles(this.paths.assets, '.md');
+    const ideaPaths = await this.fileService.listFiles(this.paths.ideas, '.md');
 
     for (const filePath of [...assetPaths, ...ideaPaths]) {
       try {
@@ -182,7 +185,7 @@ export class NodeIndexService {
 
   async createNode(nodeType: NodeType, title: string): Promise<ResearchNode> {
     const slug = slugify(title) || 'untitled';
-    const folder = nodeType === 'idea' ? 'ideas' : 'assets';
+    const folder = nodeType === 'idea' ? this.paths.ideas : this.paths.assets;
     const filename = `${slug}.md`;
     const relativePath = `${folder}/${filename}`;
 

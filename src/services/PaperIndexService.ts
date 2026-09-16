@@ -1,4 +1,4 @@
-import { PaperEntry } from '../models/types';
+import { PaperEntry, ProjectPaths } from '../models/types';
 import { FileService } from './FileService';
 
 // ---------------------------------------------------------------------------
@@ -147,12 +147,15 @@ function removeBibEntry(content: string, slug: string): string {
 // ---------------------------------------------------------------------------
 
 export class PaperIndexService {
-  constructor(private readonly fileService: FileService) {}
+  constructor(
+    private readonly fileService: FileService,
+    private readonly paths: ProjectPaths
+  ) {}
 
   async getPapers(): Promise<PaperEntry[]> {
     const [mdContent, bibContent] = await Promise.all([
-      this.fileService.readFile('papers.md').catch(() => ''),
-      this.fileService.readFile('manuscript/reference.bib').catch(() => ''),
+      this.fileService.readFile(this.paths.paperIndex).catch(() => ''),
+      this.fileService.readFile(this.paths.bibliography).catch(() => ''),
     ]);
 
     const mdSections = parsePapersMd(mdContent);
@@ -168,8 +171,8 @@ export class PaperIndexService {
 
   async savePaper(originalSlug: string, newSlug: string, mdSection: string, bibEntry: string): Promise<void> {
     const [mdContent, bibContent] = await Promise.all([
-      this.fileService.readFile('papers.md').catch(() => ''),
-      this.fileService.readFile('manuscript/reference.bib').catch(() => ''),
+      this.fileService.readFile(this.paths.paperIndex).catch(() => ''),
+      this.fileService.readFile(this.paths.bibliography).catch(() => ''),
     ]);
 
     let finalMdSection = mdSection;
@@ -182,13 +185,13 @@ export class PaperIndexService {
       // reference stays valid.
       try {
         await this.fileService.renameFile(
-          `raw_papers/${originalSlug}.pdf`,
-          `raw_papers/${newSlug}.pdf`
+          `${this.paths.localSourcePdfs}/${originalSlug}.pdf`,
+          `${this.paths.localSourcePdfs}/${newSlug}.pdf`
         );
       } catch {
         finalMdSection = finalMdSection.replace(
-          /^- File:.*$/m,
-          `- File: \`raw_papers/${originalSlug}.pdf\``
+          /^- (?:Local )?File:.*$/mi,
+          `- Local file: \`${this.paths.localSourcePdfs}/${originalSlug}.pdf\``
         );
       }
 
@@ -200,8 +203,8 @@ export class PaperIndexService {
     }
 
     await Promise.all([
-      this.fileService.writeFile('papers.md', newMd),
-      this.fileService.writeFile('manuscript/reference.bib', newBib),
+      this.fileService.writeFile(this.paths.paperIndex, newMd),
+      this.fileService.writeFile(this.paths.bibliography, newBib),
     ]);
   }
 }
