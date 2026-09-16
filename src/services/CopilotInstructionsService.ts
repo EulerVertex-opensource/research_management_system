@@ -186,8 +186,7 @@ ${draftSection}
 }
 
 const CODEX_AGENTS_PATH = 'AGENTS.md';
-const PAPER_IMPORT_SKILL_PATH = '.agents/skills/import-math-paper/SKILL.md';
-const PAPER_IMPORT_REFERENCE_PATH = '.agents/skills/import-math-paper/references/output-format.md';
+const CLAUDE_INSTRUCTIONS_PATH = 'CLAUDE.md';
 const GENERATED_START = '<!-- research-assistant:generated:start -->';
 const GENERATED_END = '<!-- research-assistant:generated:end -->';
 
@@ -246,7 +245,7 @@ Use exact node filenames without \`.md\` in \`depends_on\`, \`used_in\`, and \`r
 
 ${workflowList}
 
-For importing or transcribing a paper, use the \`import-math-paper\` skill in \`.agents/skills/import-math-paper/\`.
+For importing or transcribing a paper, use the \`import-math-paper\` skill. It is registered for Codex under \`.agents/skills/\` and for Claude Code under \`.claude/skills/\`.
 
 ## Current index
 
@@ -256,112 +255,11 @@ For importing or transcribing a paper, use the \`import-math-paper\` skill in \`
 The generated Copilot context is in \`.github/copilot-instructions.md\`. Agent-neutral workflow descriptions are in \`.research/workflows/\`.
 `;
 
-  const skillContent = `---
-name: import-math-paper
-description: Import a mathematical paper from PDF into a page-marked Markdown working copy, preserve provenance, flag extraction uncertainty, and optionally create draft research nodes. Use when adding, transcribing, OCR-processing, or extracting results from a paper. Do not use for ordinary edits to an already imported paper.
----
-
-# Import a mathematical paper
-
-Create a searchable working representation without treating extraction as mathematical verification.
-
-## Required outcome
-
-Keep the untouched PDF as the authoritative source. Produce metadata and Markdown that let later agents trace every extracted claim back to the PDF. Read [references/output-format.md](references/output-format.md) before creating files.
-
-## Workflow
-
-1. Choose a stable lowercase paper slug consistent with the BibTeX key.
-2. Preserve the original PDF and compute a SHA-256 checksum when a local hashing tool is available.
-3. Extract text page by page using available local PDF tools. Use OCR only for pages without a usable text layer.
-4. Normalize headings, paragraphs, lists, and ordinary formulas into Markdown while retaining source-page markers.
-5. Preserve uncertain text visibly. Never silently repair a formula whose intended meaning is unclear.
-6. Render or inspect source pages containing important formulas, theorem statements, diagrams, tables, or suspicious extraction.
-7. Record the extraction method, timestamp, checksum, review state, and known limitations in metadata.
-8. If requested, extract definitions and theorem-like results into repository nodes. Set every created or materially changed node to \`status: draft\` and include paper slug plus page/location provenance.
-9. Summarize files created, uncertain passages, visually checked pages, and work still requiring human review.
-
-## Boundaries
-
-- Do not alter or replace the source PDF.
-- Do not claim that OCR accuracy establishes mathematical correctness.
-- Do not mark the transcription or extracted nodes as reviewed or approved without explicit researcher confirmation.
-- Prefer the Markdown for search and broad reading; return to the PDF for exact notation and citation.
-- Do not install converters, OCR engines, or other dependencies without user authorization.
-`;
-
-  const outputReference = `# Paper import output format
-
-Prefer this layout when the workspace does not already define another paper layout:
-
-\`\`\`text
-papers/<slug>/
-  metadata.yaml
-  source.pdf
-  paper.md
-  figures/
-\`\`\`
-
-Use \`raw_papers/<slug>.pdf\` as the authoritative PDF location when maintaining compatibility with the current Research Assistant layout. The Markdown and metadata may still live under \`papers/<slug>/\`.
-
-## metadata.yaml
-
-Record at least:
-
-\`\`\`yaml
-slug: example_2024
-title: Example title
-source_pdf: ../../raw_papers/example_2024.pdf
-markdown: paper.md
-extraction:
-  method: embedded-text
-  generated_at: 2026-01-01T00:00:00Z
-  source_sha256: "..."
-  reviewed: false
-  limitations: []
-\`\`\`
-
-Use an honest method such as \`embedded-text\`, \`ocr\`, or \`mixed\`. Omit unavailable bibliographic fields rather than inventing them.
-
-## paper.md
-
-Start with a short provenance warning and retain page boundaries:
-
-\`\`\`markdown
-> AI-generated working transcription. The PDF is authoritative.
-
-<!-- source-page: 1 -->
-
-# Paper title
-
-<!-- source-page: 2 -->
-
-## Theorem 1
-...
-\`\`\`
-
-Represent uncertain extraction as \`[uncertain: ...]\` or an HTML comment explaining the ambiguity. Do not collapse content across page markers when doing so would make provenance unclear.
-
-## Extracted nodes
-
-For a paper-derived node, include the existing frontmatter fields:
-
-\`\`\`yaml
-status: draft
-source:
-  kind: paper
-  paper_id: example_2024
-  location: Theorem 1, pp. 2–3
-\`\`\`
-
-Distinguish a faithful transcription from a paraphrase in the node body when that distinction matters.
-`;
-
   const existingAgents = await fileService.readFile(CODEX_AGENTS_PATH).catch(() => '');
+  const existingClaude = await fileService.readFile(CLAUDE_INSTRUCTIONS_PATH).catch(() => '');
   await Promise.all([
     fileService.writeFile(CODEX_AGENTS_PATH, upsertGeneratedSection(existingAgents, agentsContent)),
-    fileService.writeFile(PAPER_IMPORT_SKILL_PATH, skillContent),
-    fileService.writeFile(PAPER_IMPORT_REFERENCE_PATH, outputReference),
+    fileService.writeFile(CLAUDE_INSTRUCTIONS_PATH, upsertGeneratedSection(existingClaude, agentsContent)),
     ...Object.entries(RESEARCH_WORKFLOWS).map(([id, workflow]) =>
       fileService.writeFile(
         `.research/workflows/${id}.md`,

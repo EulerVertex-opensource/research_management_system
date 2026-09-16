@@ -24,4 +24,5 @@ export type WebviewMessage =
   | { type: 'openInEditor'; filePath: string }
   | { type: 'openFile'; filePath: string }
   | { type: 'initProject' }
+  | { type: 'refreshProject' }
   | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string };

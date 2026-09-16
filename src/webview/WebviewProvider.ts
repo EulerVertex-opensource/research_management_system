@@ -6,6 +6,7 @@ import { PaperIndexService } from '../services/PaperIndexService';
 import { WebviewMessage, ExtensionMessage } from '../models/messages';
 import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE } from '../models/types';
 import { generateAgentInstructions } from '../services/CopilotInstructionsService';
+import { SkillInstallerService } from '../services/SkillInstallerService';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
 
@@ -16,6 +17,7 @@ export class WebviewProvider {
   private readonly fileService: FileService;
   private readonly nodeIndex: NodeIndexService;
   private readonly paperIndex: PaperIndexService;
+  private readonly skillInstaller: SkillInstallerService;
   private readonly context: vscode.ExtensionContext;
 
   constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri) {
@@ -23,6 +25,7 @@ export class WebviewProvider {
     this.fileService = new FileService(workspaceRoot);
     this.nodeIndex = new NodeIndexService(this.fileService);
     this.paperIndex = new PaperIndexService(this.fileService);
+    this.skillInstaller = new SkillInstallerService(context.extensionUri, this.fileService);
   }
 
   async open(): Promise<void> {
@@ -57,6 +60,33 @@ export class WebviewProvider {
       this.watchers.forEach((w) => w.dispose());
       this.watchers = [];
     });
+  }
+
+  /**
+   * Recreate missing project scaffolding, reinstall bundled skills for every
+   * supported agent, and regenerate the agent instruction and workflow files.
+   * Existing research files are preserved by ensureProjectStructure().
+   */
+  async refreshProject(showConfirmation = false): Promise<void> {
+    await this.fileService.ensureProjectStructure();
+    await this.skillInstaller.installBundledSkills();
+
+    const [nodes, papers] = await Promise.all([
+      this.nodeIndex.refresh(),
+      this.paperIndex.getPapers(),
+    ]);
+    await generateAgentInstructions(nodes, this.fileService);
+
+    const projectRoot = this.fileService.rootUri.fsPath;
+    const uiState = this.getSavedUIState();
+    this.send({ type: 'init', nodes, projectRoot, uiState });
+    this.send({ type: 'papersData', papers });
+
+    if (showConfirmation) {
+      void vscode.window.showInformationMessage(
+        'Research Assistant: refreshed Codex and Claude Code skills and project guidance.'
+      );
+    }
   }
 
   private setupFileWatchers(): void {
@@ -149,26 +179,17 @@ export class WebviewProvider {
     try {
       switch (msg.type) {
         case 'ready': {
-          await this.fileService.ensureProjectStructure();
-          const [nodes, papers] = await Promise.all([
-            this.nodeIndex.refresh(),
-            this.paperIndex.getPapers(),
-          ]);
-          generateAgentInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
-          const projectRoot = this.fileService.rootUri.fsPath;
-          const uiState = this.getSavedUIState();
-          this.send({ type: 'init', nodes, projectRoot, uiState });
-          this.send({ type: 'papersData', papers });
+          await this.refreshProject();
           break;
         }
 
         case 'initProject': {
-          await this.fileService.ensureProjectStructure();
-          const nodes = await this.nodeIndex.refresh();
-          generateAgentInstructions(nodes, this.fileService).catch(() => { /* non-fatal */ });
-          const projectRoot = this.fileService.rootUri.fsPath;
-          const uiState = this.getSavedUIState();
-          this.send({ type: 'init', nodes, projectRoot, uiState });
+          await this.refreshProject(true);
+          break;
+        }
+
+        case 'refreshProject': {
+          await this.refreshProject(true);
           break;
         }
 

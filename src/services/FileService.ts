@@ -7,7 +7,8 @@ const RESEARCH_FOLDERS = [
   'raw_papers',
   'manuscript/sections',
   '.research/workflows',
-  '.agents/skills/import-math-paper/references',
+  '.agents/skills',
+  '.claude/skills',
 ];
 
 const INITIAL_FILES: Record<string, string> = {

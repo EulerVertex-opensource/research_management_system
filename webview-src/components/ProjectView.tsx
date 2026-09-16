@@ -11,6 +11,7 @@ interface Props {
   onSplitRatioChange: (ratio: number) => void;
   onSave: (content: string) => void;
   onInitProject: () => void;
+  onRefreshProject: () => void;
 }
 
 export function ProjectView({
@@ -22,6 +23,7 @@ export function ProjectView({
   onSplitRatioChange,
   onSave,
   onInitProject,
+  onRefreshProject,
 }: Props) {
   const [text, setText] = useState(content ?? '');
   const [dirty, setDirty] = useState(false);
@@ -73,6 +75,21 @@ export function ProjectView({
       >
         <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>project.md</span>
         {dirty && <span style={{ fontSize: 11, opacity: 0.5 }}>Unsaved changes</span>}
+        <button
+          onClick={onRefreshProject}
+          title="Reinstall Codex and Claude Code skills and regenerate agent guidance"
+          style={{
+            padding: '3px 12px',
+            fontSize: 12,
+            background: 'var(--vscode-button-secondaryBackground)',
+            color: 'var(--vscode-button-secondaryForeground)',
+            border: 'none',
+            borderRadius: 3,
+            cursor: 'pointer',
+          }}
+        >
+          Refresh Agent Setup
+        </button>
         <button
           onClick={() => { onSave(text); setDirty(false); }}
           disabled={!dirty}

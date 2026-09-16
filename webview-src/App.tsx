@@ -324,6 +324,7 @@ export function App() {
               onSplitRatioChange={handleSplitRatioChange}
               onSave={handleSaveProjectMd}
               onInitProject={() => send({ type: 'initProject' })}
+              onRefreshProject={() => send({ type: 'refreshProject' })}
             />
           ) : showPaperList ? (
             selectedPaper ? (

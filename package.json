@@ -17,6 +17,10 @@
       {
         "command": "research-assistant.openDashboard",
         "title": "Research Assistant: Open Dashboard"
+      },
+      {
+        "command": "research-assistant.refreshAgentSetup",
+        "title": "Research Assistant: Refresh Agent Setup"
       }
     ]
   },

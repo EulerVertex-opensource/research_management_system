@@ -41,7 +41,7 @@ A local, file-based research management tool for mathematicians, deeply integrat
 - Paper detail view with **Editor / Preview** toggle for BibTeX entry and Markdown description
 - Auto-save (1.5 s debounce)
 
-### AI context (Copilot and Codex)
+### AI context (Copilot, Codex, and Claude Code)
 
 Every time any node is saved, the extension regenerates `.github/copilot-instructions.md` with:
 - Full project structure reference
@@ -55,8 +55,12 @@ Copilot reads this file automatically, so it understands your project structure 
 The extension also maintains:
 
 - `AGENTS.md` — durable Codex guidance generated inside protected markers; text outside the markers is preserved
+- `CLAUDE.md` — durable Claude Code guidance with the same preservation behavior
 - `.research/workflows/` — agent-neutral workflow definitions shared by integrations
-- `.agents/skills/import-math-paper/` — a Codex skill for provenance-preserving PDF-to-Markdown import
+- `.agents/skills/import-math-paper/` — Codex registration of the paper-import skill
+- `.claude/skills/import-math-paper/` — Claude Code registration of the same skill
+
+The extension's bundled `skills/` directory is the single source of truth. On project initialization, the extension copies every valid skill directory to both agent-specific discovery locations.
 
 The original PDF remains authoritative. Imported Markdown is a searchable working transcription with source-page markers and an explicit review state.
 
@@ -91,8 +95,17 @@ your-research-project/
     copilot-instructions.md   ← auto-generated AI context (do not edit manually)
   .research/workflows/        ← generated agent-neutral workflow descriptions
   .agents/skills/             ← generated project-local Codex skills
+  .claude/skills/             ← generated project-local Claude Code skills
   AGENTS.md                   ← generated Codex repository guidance plus user-authored sections
+  CLAUDE.md                   ← generated Claude Code guidance plus user-authored sections
 ```
+
+### Using the paper-import skill
+
+- In Codex, select the skill with `/skills` or mention `$import-math-paper` in a prompt.
+- In Claude Code, invoke `/import-math-paper` or ask naturally for a paper to be imported or transcribed.
+
+To update an existing research workspace after installing a newer extension build, run **Research Assistant: Refresh Agent Setup** from the Command Palette or click **Refresh Agent Setup** in the Project panel. This reinstalls the bundled skills for both agents and regenerates `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, and `.research/workflows/` without replacing existing research files.
 
 ---
 

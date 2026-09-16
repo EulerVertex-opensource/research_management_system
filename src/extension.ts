@@ -15,14 +15,21 @@ export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = workspaceFolders[0].uri;
   provider = new WebviewProvider(context, workspaceRoot);
 
-  const disposable = vscode.commands.registerCommand(
+  const openDashboard = vscode.commands.registerCommand(
     'research-assistant.openDashboard',
     async () => {
       await provider!.open();
     }
   );
 
-  context.subscriptions.push(disposable);
+  const refreshAgentSetup = vscode.commands.registerCommand(
+    'research-assistant.refreshAgentSetup',
+    async () => {
+      await provider!.refreshProject(true);
+    }
+  );
+
+  context.subscriptions.push(openDashboard, refreshAgentSetup);
 }
 
 export function deactivate(): void {
