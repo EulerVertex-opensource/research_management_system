@@ -1,4 +1,4 @@
-import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary } from './types';
+import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
 export type ExtensionMessage =
@@ -7,6 +7,7 @@ export type ExtensionMessage =
   | { type: 'nodeDetail'; id: string; frontmatter: NodeFrontmatter; body: string }
   | { type: 'projectMd'; content: string }
   | { type: 'papersData'; papers: PaperEntry[] }
+  | { type: 'manuscriptStatus'; status: ManuscriptStatus }
   | { type: 'error'; message: string };
 
 // Messages sent from the webview to the extension
@@ -25,4 +26,11 @@ export type WebviewMessage =
   | { type: 'openFile'; filePath: string }
   | { type: 'initProject' }
   | { type: 'refreshProject' }
+  | { type: 'getManuscriptStatus' }
+  | { type: 'buildManuscript' }
+  | { type: 'reloadManuscript' }
+  | { type: 'openManuscriptPdf' }
+  | { type: 'setManuscriptAutoBuild'; enabled: boolean }
+  | { type: 'applyLatexBuildSettings' }
+  | { type: 'installLatexWorkshop' }
   | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string; sourceUrl: string };

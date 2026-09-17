@@ -14,7 +14,6 @@ const SHARED_RESEARCH_DEFAULTS: ResearchAssistantConfig['research'] = {
   assets: 'research/assets',
   ideas: 'research/ideas',
   papers: 'research/papers',
-  workflows: 'research/workflows',
   localSourcePdfs: 'research-local/raw_papers',
 };
 
@@ -25,7 +24,6 @@ const LEGACY_RESEARCH_DEFAULTS: ResearchAssistantConfig['research'] = {
   assets: 'assets',
   ideas: 'ideas',
   papers: 'papers',
-  workflows: '.research/workflows',
   localSourcePdfs: 'raw_papers',
 };
 
@@ -106,7 +104,6 @@ export class ProjectConfigService {
       assets: normalizeRelative(config.research.assets, 'research/assets'),
       ideas: normalizeRelative(config.research.ideas, 'research/ideas'),
       papers: normalizeRelative(config.research.papers, 'research/papers'),
-      workflows: normalizeRelative(config.research.workflows, 'research/workflows'),
       localSourcePdfs: normalizeRelative(config.research.localSourcePdfs, 'research-local/raw_papers'),
     };
   }
@@ -209,7 +206,6 @@ export class ProjectConfigService {
         assets: normalizeRelative(research.assets, researchDefaults.assets),
         ideas: normalizeRelative(research.ideas, researchDefaults.ideas),
         papers: normalizeRelative(research.papers, researchDefaults.papers),
-        workflows: normalizeRelative(research.workflows, researchDefaults.workflows),
         localSourcePdfs: normalizeRelative(research.localSourcePdfs, researchDefaults.localSourcePdfs),
       },
     };

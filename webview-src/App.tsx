@@ -1,5 +1,5 @@
-import React, { useReducer, useCallback, useRef } from 'react';
-import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary } from '../src/models/types';
+import React, { useReducer, useCallback, useEffect, useRef } from 'react';
+import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary, ManuscriptStatus } from '../src/models/types';
 import { ExtensionMessage } from '../src/models/messages';
 import { useExtension } from './hooks/useExtension';
 import { Sidebar, SidebarView } from './components/Sidebar';
@@ -10,6 +10,7 @@ import { PaperList } from './components/PaperList';
 import { PaperDetail } from './components/PaperDetail';
 import { AddPaperButton } from './components/AddPaperButton';
 import { CreateNodeModal } from './components/CreateNodeModal';
+import { ManuscriptView } from './components/ManuscriptView';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -30,6 +31,7 @@ interface State {
   activeView: SidebarView;
   showCreateModal: boolean;
   error: string | null;
+  manuscriptStatus: ManuscriptStatus | null;
   uiState: UIState;
 }
 
@@ -44,6 +46,7 @@ type Action =
   | { type: 'SET_VIEW'; view: SidebarView }
   | { type: 'TOGGLE_CREATE_MODAL' }
   | { type: 'SET_ERROR'; message: string | null }
+  | { type: 'MANUSCRIPT_STATUS'; status: ManuscriptStatus }
   | { type: 'SET_LAYOUT'; layoutMode: LayoutMode }
   | { type: 'SET_SPLIT_RATIO'; splitRatio: number }
   | { type: 'SET_NODE_LIST_WIDTH'; width: number }
@@ -80,6 +83,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, showCreateModal: !state.showCreateModal };
     case 'SET_ERROR':
       return { ...state, error: action.message };
+    case 'MANUSCRIPT_STATUS':
+      return { ...state, manuscriptStatus: action.status };
     case 'SET_LAYOUT':
       return { ...state, uiState: { ...state.uiState, layoutMode: action.layoutMode } };
     case 'SET_SPLIT_RATIO':
@@ -107,6 +112,7 @@ const initialState: State = {
   activeView: 'assets',
   showCreateModal: false,
   error: null,
+  manuscriptStatus: null,
   uiState: DEFAULT_UI_STATE,
 };
 
@@ -130,6 +136,9 @@ export function App() {
       case 'papersData':
         dispatch({ type: 'PAPERS_DATA', papers: msg.papers });
         break;
+      case 'manuscriptStatus':
+        dispatch({ type: 'MANUSCRIPT_STATUS', status: msg.status });
+        break;
       case 'error':
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
@@ -138,11 +147,9 @@ export function App() {
 
   const send = useExtension(handleMessage);
 
-  const sentReady = useRef(false);
-  if (!sentReady.current) {
-    sentReady.current = true;
+  useEffect(() => {
     send({ type: 'ready' });
-  }
+  }, [send]);
 
   const handleSetView = (view: SidebarView) => {
     dispatch({ type: 'SET_VIEW', view });
@@ -151,6 +158,9 @@ export function App() {
     }
     if (view === 'papers' && !state.papersLoaded) {
       send({ type: 'getPapers' });
+    }
+    if (view === 'manuscript') {
+      send({ type: 'getManuscriptStatus' });
     }
   };
 
@@ -381,17 +391,15 @@ export function App() {
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Select a node to view and edit</div>
             )
           ) : state.activeView === 'manuscript' ? (
-            <div style={{ padding: 24 }}>
-              <h2 style={{ fontSize: 15, marginBottom: 10 }}>Manuscript</h2>
-              <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 8 }}>Overleaf-compatible files are configured at the repository root:</p>
-              <ul style={{ fontSize: 13, opacity: 0.7, paddingLeft: 20, lineHeight: 2 }}>
-                <li><code>{state.paths?.mainTex ?? 'main.tex'}</code> — document root</li>
-                <li><code>{state.paths?.bibliography ?? 'references.bib'}</code> — shared bibliography</li>
-                <li><code>{state.paths?.macroFiles.join(', ') || '(none configured)'}</code> — macros/preamble</li>
-                <li><code>{state.paths?.notations ?? '(none configured)'}</code> — notation reference</li>
-                <li><code>{state.paths?.sections ?? 'sections'}</code> — section files</li>
-              </ul>
-            </div>
+            <ManuscriptView
+              status={state.manuscriptStatus}
+              onBuild={() => send({ type: 'buildManuscript' })}
+              onReload={() => send({ type: 'reloadManuscript' })}
+              onOpenExternal={() => send({ type: 'openManuscriptPdf' })}
+              onSetAutoBuild={(enabled) => send({ type: 'setManuscriptAutoBuild', enabled })}
+              onApplySettings={() => send({ type: 'applyLatexBuildSettings' })}
+              onInstallLatexWorkshop={() => send({ type: 'installLatexWorkshop' })}
+            />
           ) : null}
         </div>
       </div>

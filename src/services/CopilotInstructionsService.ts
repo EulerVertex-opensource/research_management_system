@@ -19,7 +19,7 @@ function sharedGuidance(paths: ProjectPaths): string {
 
   return `# Mathematical Research Workspace
 
-This repository is an Overleaf-compatible LaTeX project and a shared Research Assistant knowledge base. The committed text files are the collaboration source of truth; local source PDFs and build artifacts are not.
+This repository is an Overleaf-compatible LaTeX project and a shared Research Assistant knowledge base. Tracked manuscript and research files are the collaboration source of truth; generated agent guidance, local source PDFs, and build artifacts are not.
 
 ## Sources of truth
 
@@ -36,7 +36,7 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 
 ## Collaboration rules
 
-- Treat committed Markdown, YAML, BibTeX, agent instructions, and LaTeX as shared project state.
+- Treat tracked research Markdown, YAML, BibTeX, configuration, and LaTeX as shared project state. This agent guidance is regenerated locally by Research Assistant.
 - Never commit source-paper PDFs or LaTeX build output unless the team explicitly changes that policy.
 - Preserve a stable URL, DOI/arXiv identifier, checksum, page number, and theorem location when recording a source.
 - Treat a source PDF as authoritative and its Markdown transcription as a searchable working copy.
@@ -112,16 +112,16 @@ export async function generateAgentInstructions(
     await vscode.workspace.fs.createDirectory(fileService.resolve('.github'));
   } catch { /* already exists */ }
 
-  const workflowList = Object.entries(RESEARCH_WORKFLOWS)
-    .map(([id, workflow]) => `- \`${id}\`: ${workflow.purpose}`)
+  const skillList = Object.entries(RESEARCH_WORKFLOWS)
+    .map(([id, workflow]) => `- \`${id.replace(/_/g, '-')}\`: ${workflow.purpose}`)
     .join('\n');
   const agentsContent = `${sharedGuidance(paths)}
 
-## Available workflows
+## Available skills
 
-${workflowList}
+${skillList}
 
-For importing or transcribing a paper, use the \`import-math-paper\` skill. It is registered for Codex under \`.agents/skills/\` and for Claude Code under \`.claude/skills/\`. Agent-neutral workflow descriptions are in \`${paths.workflows}/\`.
+For importing or transcribing a paper, use the \`import-math-paper\` skill. Bundled skills are registered for Codex under \`.agents/skills/\` and for Claude Code under \`.claude/skills/\`.
 `;
 
   const existingAgents = await fileService.readFile(CODEX_AGENTS_PATH).catch(() => '');
@@ -130,11 +130,5 @@ For importing or transcribing a paper, use the \`import-math-paper\` skill. It i
     fileService.writeFile(INSTRUCTIONS_PATH, copilotGuidance(paths)),
     fileService.writeFile(CODEX_AGENTS_PATH, upsertGeneratedSection(existingAgents, agentsContent)),
     fileService.writeFile(CLAUDE_INSTRUCTIONS_PATH, upsertGeneratedSection(existingClaude, agentsContent)),
-    ...Object.entries(RESEARCH_WORKFLOWS).map(([id, workflow]) =>
-      fileService.writeFile(
-        `${paths.workflows}/${id}.md`,
-        `# ${workflow.label}\n\n${workflow.purpose}\n\n## Required inputs\n\n${workflow.requiredInputs.map((input) => `- ${input}`).join('\n')}\n\n## Output\n\n${workflow.outputFormat}\n\n## Instructions\n\n${workflow.instructions}`
-      )
-    ),
   ]);
 }

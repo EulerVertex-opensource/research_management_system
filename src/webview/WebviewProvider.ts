@@ -4,10 +4,12 @@ import { FileService } from '../services/FileService';
 import { NodeIndexService } from '../services/NodeIndexService';
 import { PaperIndexService } from '../services/PaperIndexService';
 import { WebviewMessage, ExtensionMessage } from '../models/messages';
-import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig } from '../models/types';
+import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig, ManuscriptBuildPhase, ManuscriptStatus } from '../models/types';
 import { generateAgentInstructions } from '../services/CopilotInstructionsService';
 import { SkillInstallerService } from '../services/SkillInstallerService';
 import { ProjectConfigService } from '../services/ProjectConfigService';
+import { LATEX_OUTPUT_DIRECTORY } from '../services/FileService';
+import { ManuscriptBuildService } from '../services/ManuscriptBuildService';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
 
@@ -22,12 +24,18 @@ export class WebviewProvider {
   private paths: ProjectPaths | undefined;
   private readonly skillInstaller: SkillInstallerService;
   private readonly context: vscode.ExtensionContext;
+  private readonly manuscriptBuildService: ManuscriptBuildService;
+  private manuscriptPhase: ManuscriptBuildPhase = 'idle';
+  private manuscriptMessage: string | undefined;
+  private readonly output: vscode.OutputChannel;
 
-  constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri) {
+  constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri, output: vscode.OutputChannel) {
     this.context = context;
+    this.output = output;
     this.fileService = new FileService(workspaceRoot);
     this.configService = new ProjectConfigService(this.fileService);
     this.skillInstaller = new SkillInstallerService(context.extensionUri, this.fileService);
+    this.manuscriptBuildService = new ManuscriptBuildService(this.fileService, workspaceRoot);
   }
 
   async open(): Promise<void> {
@@ -45,11 +53,10 @@ export class WebviewProvider {
         retainContextWhenHidden: true,
         localResourceRoots: [
           vscode.Uri.joinPath(this.context.extensionUri, 'out', 'webview'),
+          vscode.Uri.joinPath(this.fileService.rootUri, LATEX_OUTPUT_DIRECTORY),
         ],
       }
     );
-
-    this.panel.webview.html = this.getHtml();
 
     this.panel.webview.onDidReceiveMessage((msg: WebviewMessage) => {
       this.handleMessage(msg);
@@ -60,6 +67,10 @@ export class WebviewProvider {
       this.watchers.forEach((w) => w.dispose());
       this.watchers = [];
     });
+
+    // Attach message listeners before loading HTML: the webview posts `ready`
+    // as soon as React mounts, and losing it leaves all panels uninitialized.
+    this.panel.webview.html = this.getHtml();
   }
 
   /**
@@ -68,33 +79,54 @@ export class WebviewProvider {
    * Existing research files are preserved by ensureProjectStructure().
    */
   async refreshProject(showConfirmation = false): Promise<void> {
-    const config = await this.configService.loadOrDiscover();
-    const paths = this.configService.resolvePaths(config);
-    const mainAlreadyExists = await this.fileService.exists(paths.mainTex);
-    await this.configService.save(config);
-    await this.fileService.ensureProjectStructure(config, paths, !mainAlreadyExists);
-    await this.skillInstaller.installBundledSkills();
+    const startedAt = Date.now();
+    this.output.appendLine(`[refresh] Starting for ${this.fileService.rootUri.fsPath}`);
+    try {
+      const config = await this.configService.loadOrDiscover();
+      const paths = this.configService.resolvePaths(config);
+      const mainAlreadyExists = await this.fileService.exists(paths.mainTex);
+      const bundledSkillNames = await this.skillInstaller.listBundledSkillNames();
+      this.output.appendLine(`[refresh] Layout: ${config.layout}; main TeX: ${paths.mainTex}`);
 
-    this.configureServices(paths);
+      await this.configService.save(config);
+      this.output.appendLine('[refresh] Saved .research-assistant.json');
 
-    const [nodes, papers] = await Promise.all([
-      this.nodeIndex!.refresh(),
-      this.paperIndex!.getPapers(),
-    ]);
-    await generateAgentInstructions(nodes, this.fileService, paths);
-    this.setupFileWatchers();
+      await this.fileService.ensureProjectStructure(config, paths, !mainAlreadyExists, bundledSkillNames);
+      this.output.appendLine('[refresh] Reconciled scaffold, .gitignore, .vscode settings, extension recommendations, and .latex-out');
 
-    const projectRoot = this.fileService.rootUri.fsPath;
-    const uiState = this.getSavedUIState();
-    this.send({ type: 'init', nodes, projectRoot, uiState, initialized: true, paths: this.pathSummary(config, paths) });
-    this.send({ type: 'papersData', papers });
-    const projectContent = await this.fileService.readFile(paths.projectMd).catch(() => '');
-    this.send({ type: 'projectMd', content: projectContent });
+      await this.skillInstaller.installBundledSkills(bundledSkillNames);
+      this.output.appendLine('[refresh] Installed bundled agent skills');
 
-    if (showConfirmation) {
-      void vscode.window.showInformationMessage(
-        'Research Assistant: refreshed Codex and Claude Code skills and project guidance.'
-      );
+      this.configureServices(paths);
+      const [nodes, papers] = await Promise.all([
+        this.nodeIndex!.refresh(),
+        this.paperIndex!.getPapers(),
+      ]);
+      await generateAgentInstructions(nodes, this.fileService, paths);
+      this.output.appendLine('[refresh] Regenerated agent guidance');
+      this.setupFileWatchers();
+      this.output.appendLine('[refresh] Restarted project and manuscript PDF watchers');
+
+      const projectRoot = this.fileService.rootUri.fsPath;
+      const uiState = this.getSavedUIState();
+      this.send({ type: 'init', nodes, projectRoot, uiState, initialized: true, paths: this.pathSummary(config, paths) });
+      this.send({ type: 'papersData', papers });
+      await this.sendManuscriptStatus();
+      const projectContent = await this.fileService.readFile(paths.projectMd).catch(() => '');
+      this.send({ type: 'projectMd', content: projectContent });
+
+      this.output.appendLine(`[refresh] Completed in ${Date.now() - startedAt} ms`);
+      if (showConfirmation) {
+        void vscode.window.showInformationMessage(
+          'Research Assistant: refreshed project paths, shared scaffold, agent guidance, LaTeX build settings, and manuscript preview.'
+        );
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[refresh] FAILED after ${Date.now() - startedAt} ms: ${message}`);
+      if (error instanceof Error && error.stack) this.output.appendLine(error.stack);
+      this.output.show(true);
+      throw error;
     }
   }
 
@@ -118,6 +150,7 @@ export class WebviewProvider {
       paths: this.pathSummary(config, paths),
     });
     this.send({ type: 'papersData', papers });
+    await this.sendManuscriptStatus();
     if (initialized) {
       const content = await this.fileService.readFile(paths.projectMd).catch(() => '');
       this.send({ type: 'projectMd', content });
@@ -220,7 +253,52 @@ export class WebviewProvider {
     );
     bibWatcher.onDidChange(refreshPapers);
 
-    this.watchers = [...nodeWatchers, projectWatcher, papersWatcher, bibWatcher];
+    const pdfWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(root, this.manuscriptBuildService.outputPdfPath(paths))
+    );
+    const refreshPdf = async () => {
+      this.manuscriptPhase = 'succeeded';
+      this.manuscriptMessage = undefined;
+      await this.sendManuscriptStatus();
+    };
+    pdfWatcher.onDidChange(refreshPdf);
+    pdfWatcher.onDidCreate(refreshPdf);
+    pdfWatcher.onDidDelete(async () => {
+      this.manuscriptPhase = 'idle';
+      this.manuscriptMessage = undefined;
+      await this.sendManuscriptStatus();
+    });
+
+    this.watchers = [...nodeWatchers, projectWatcher, papersWatcher, bibWatcher, pdfWatcher];
+  }
+
+  private async sendManuscriptStatus(forceReload = false): Promise<void> {
+    if (!this.paths || !this.panel) return;
+    const outputPdf = this.manuscriptBuildService.outputPdfPath(this.paths);
+    const outputUri = this.fileService.resolve(outputPdf);
+    const installed = this.manuscriptBuildService.isLatexWorkshopInstalled();
+    const status: ManuscriptStatus = {
+      phase: installed ? this.manuscriptPhase : 'unavailable',
+      mainTex: this.paths.mainTex,
+      outputPdf,
+      latexWorkshopInstalled: installed,
+      autoBuild: this.manuscriptBuildService.isAutoBuildEnabled(),
+      configurationConflicts: this.manuscriptBuildService.configurationConflicts(),
+      message: installed ? this.manuscriptMessage : 'LaTeX Workshop is not installed.',
+    };
+    try {
+      const stat = await vscode.workspace.fs.stat(outputUri);
+      const version = forceReload ? Date.now() : stat.mtime;
+      const versionedUri = outputUri.with({ query: `v=${version}` });
+      status.pdfUri = this.panel.webview.asWebviewUri(versionedUri).toString();
+      status.pdfVersion = version;
+    } catch {
+      // The empty state explains that the manuscript has not been built yet.
+    }
+    this.output.appendLine(
+      `[manuscript] Main: ${status.mainTex}; PDF: ${status.pdfUri ? 'found' : 'missing'} (${status.outputPdf}); phase: ${status.phase}`
+    );
+    this.send({ type: 'manuscriptStatus', status });
   }
 
   private send(message: ExtensionMessage): void {
@@ -244,6 +322,7 @@ export class WebviewProvider {
     try {
       switch (msg.type) {
         case 'ready': {
+          this.output.appendLine('[webview] Dashboard ready; loading project and manuscript preview');
           await this.loadProject();
           break;
         }
@@ -255,6 +334,65 @@ export class WebviewProvider {
 
         case 'refreshProject': {
           await this.refreshProject(true);
+          break;
+        }
+
+        case 'getManuscriptStatus': {
+          await this.sendManuscriptStatus();
+          break;
+        }
+
+        case 'reloadManuscript': {
+          await this.sendManuscriptStatus(true);
+          break;
+        }
+
+        case 'buildManuscript': {
+          if (!this.paths) throw new Error('Project paths are not configured.');
+          this.manuscriptPhase = 'compiling';
+          this.manuscriptMessage = undefined;
+          await this.sendManuscriptStatus();
+          try {
+            await this.manuscriptBuildService.build(
+              this.paths,
+              this.panel?.viewColumn,
+              () => this.panel?.reveal(this.panel.viewColumn, false)
+            );
+            this.manuscriptPhase = 'succeeded';
+            this.manuscriptMessage = undefined;
+          } catch (error: unknown) {
+            this.manuscriptPhase = this.manuscriptBuildService.isLatexWorkshopInstalled() ? 'failed' : 'unavailable';
+            this.manuscriptMessage = error instanceof Error ? error.message : String(error);
+          }
+          await this.sendManuscriptStatus(true);
+          break;
+        }
+
+        case 'openManuscriptPdf': {
+          if (!this.paths) throw new Error('Project paths are not configured.');
+          const outputPdf = this.manuscriptBuildService.outputPdfPath(this.paths);
+          if (!(await this.fileService.exists(outputPdf))) throw new Error('Compile the manuscript before opening its PDF.');
+          await vscode.env.openExternal(this.fileService.resolve(outputPdf));
+          break;
+        }
+
+        case 'setManuscriptAutoBuild': {
+          await this.manuscriptBuildService.setAutoBuild(msg.enabled);
+          await this.sendManuscriptStatus();
+          break;
+        }
+
+        case 'applyLatexBuildSettings': {
+          await this.manuscriptBuildService.applyRecommendedSettings();
+          this.manuscriptPhase = 'idle';
+          this.manuscriptMessage = undefined;
+          await this.sendManuscriptStatus();
+          break;
+        }
+
+        case 'installLatexWorkshop': {
+          await this.manuscriptBuildService.installLatexWorkshop();
+          await this.sendManuscriptStatus();
           break;
         }
 
@@ -356,6 +494,8 @@ export class WebviewProvider {
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      this.output.appendLine(`[webview:${msg.type}] ${message}`);
+      if (err instanceof Error && err.stack) this.output.appendLine(err.stack);
       this.send({ type: 'error', message });
     }
   }
@@ -368,6 +508,9 @@ export class WebviewProvider {
     const cssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'out', 'webview', 'main.css')
     );
+    const pdfWorkerUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, 'out', 'webview', 'pdf.worker.min.mjs')
+    );
     const nonce = crypto.randomBytes(16).toString('hex');
 
     return `<!DOCTYPE html>
@@ -378,6 +521,8 @@ export class WebviewProvider {
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'none';
              script-src 'nonce-${nonce}';
+             worker-src ${webview.cspSource} blob:;
+             connect-src ${webview.cspSource};
              style-src ${webview.cspSource} 'unsafe-inline';
              font-src ${webview.cspSource};" />
   <link rel="stylesheet" href="${cssUri}" />
@@ -416,6 +561,7 @@ export class WebviewProvider {
 </head>
 <body>
   <div id="root"></div>
+  <script nonce="${nonce}">window.__RESEARCH_ASSISTANT_PDF_WORKER__ = ${JSON.stringify(pdfWorkerUri.toString())};</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

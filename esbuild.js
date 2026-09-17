@@ -1,5 +1,7 @@
 // @ts-check
 const esbuild = require('esbuild');
+const fs = require('fs/promises');
+const path = require('path');
 
 const isWatch = process.argv.includes('--watch');
 
@@ -11,6 +13,9 @@ const extensionConfig = {
   external: ['vscode'],
   format: 'cjs',
   platform: 'node',
+  // Prefer ESM package entry points so dependencies such as jsonc-parser are
+  // fully bundled instead of retaining unresolved UMD-relative requires.
+  mainFields: ['module', 'main'],
   sourcemap: true,
 };
 
@@ -37,6 +42,15 @@ const webviewConfig = {
 };
 
 async function main() {
+  await fs.mkdir(path.join('out', 'webview'), { recursive: true });
+  await fs.copyFile(
+    require.resolve('pdfjs-dist/build/pdf.worker.min.mjs'),
+    path.join('out', 'webview', 'pdf.worker.min.mjs')
+  );
+  await fs.copyFile(
+    path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'LICENSE'),
+    path.join('out', 'webview', 'PDFJS-LICENSE')
+  );
   if (isWatch) {
     const [extCtx, webCtx] = await Promise.all([
       esbuild.context(extensionConfig),

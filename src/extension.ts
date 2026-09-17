@@ -13,7 +13,10 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const workspaceRoot = workspaceFolders[0].uri;
-  provider = new WebviewProvider(context, workspaceRoot);
+  const output = vscode.window.createOutputChannel('Research Assistant');
+  output.appendLine(`[activate] Extension ${context.extension.packageJSON.version ?? 'unknown'} loaded.`);
+  output.appendLine(`[activate] Workspace: ${workspaceRoot.fsPath}`);
+  provider = new WebviewProvider(context, workspaceRoot, output);
 
   const openDashboard = vscode.commands.registerCommand(
     'research-assistant.openDashboard',
@@ -25,11 +28,24 @@ export function activate(context: vscode.ExtensionContext): void {
   const refreshAgentSetup = vscode.commands.registerCommand(
     'research-assistant.refreshAgentSetup',
     async () => {
-      await provider!.refreshProject(true);
+      try {
+        await provider!.refreshProject(true);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        output.appendLine(`[refresh] FAILED: ${message}`);
+        if (error instanceof Error && error.stack) output.appendLine(error.stack);
+        output.show(true);
+        void vscode.window.showErrorMessage(`Research Assistant refresh failed: ${message}`);
+      }
     }
   );
 
-  context.subscriptions.push(openDashboard, refreshAgentSetup);
+  const showOutput = vscode.commands.registerCommand(
+    'research-assistant.showOutput',
+    () => output.show(true)
+  );
+
+  context.subscriptions.push(output, openDashboard, refreshAgentSetup, showOutput);
 }
 
 export function deactivate(): void {

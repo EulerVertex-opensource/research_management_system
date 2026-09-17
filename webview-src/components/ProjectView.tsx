@@ -50,14 +50,14 @@ export function ProjectView({
           <p style={{ fontSize: 13, opacity: 0.75, marginBottom: 16, maxWidth: 680, lineHeight: 1.6 }}>
             Research Assistant found the existing legacy layout with <code>{paths.mainTex}</code> and{' '}
             <code>{paths.bibliography}</code>. Initialization records that layout without moving or replacing files
-            and refreshes the shared agent setup.
+            and regenerates local agent setup. Authored research context remains shareable through Git.
           </p>
         ) : (
           <p style={{ fontSize: 13, opacity: 0.75, marginBottom: 16, maxWidth: 680, lineHeight: 1.6 }}>
             Research Assistant found <code>{paths?.mainTex ?? 'main.tex'}</code> as the Overleaf main document
             and <code>{paths?.bibliography ?? 'references.bib'}</code> as the bibliography. Initialization preserves
-            those files and adds the shared <code>research/</code> scaffold, agent guidance, skills, configuration,
-            and local-only PDF exclusions.
+            those files and adds authored <code>research/</code> context and path configuration for Git. Reproducible
+            agent guidance, bundled skills, editor settings, and PDFs stay local.
           </p>
         )}
         <button
@@ -106,7 +106,7 @@ export function ProjectView({
             cursor: 'pointer',
           }}
         >
-          Refresh Agent Setup
+          Refresh Project Setup
         </button>
         <button
           onClick={() => { onSave(text); setDirty(false); }}

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
 
 const PROJECT_TEMPLATE = `# Project
@@ -19,6 +20,14 @@ const PROJECT_TEMPLATE = `# Project
 
 const GITIGNORE_START = '# research-assistant:local:start';
 const GITIGNORE_END = '# research-assistant:local:end';
+const LATEX_WORKSHOP_ID = 'james-yu.latex-workshop';
+
+export const LATEX_OUTPUT_DIRECTORY = '.latex-out';
+export const LATEX_WORKSHOP_SETTINGS = {
+  'latex-workshop.latex.outDir': `%WORKSPACE_FOLDER%/${LATEX_OUTPUT_DIRECTORY}`,
+  'latex-workshop.latex.auxDir': '%OUTDIR%',
+  'latex-workshop.latex.autoBuild.run': 'never',
+} as const;
 
 export class FileService {
   constructor(private readonly workspaceRoot: vscode.Uri) {}
@@ -95,15 +104,16 @@ export class FileService {
   async ensureProjectStructure(
     config: ResearchAssistantConfig,
     paths: ProjectPaths,
-    createLatexDefaults: boolean
+    createLatexDefaults: boolean,
+    bundledSkillNames: string[]
   ): Promise<void> {
     const researchFolders = [
       paths.researchRoot,
       paths.assets,
       paths.ideas,
       paths.papers,
-      paths.workflows,
       paths.localSourcePdfs,
+      LATEX_OUTPUT_DIRECTORY,
       '.agents/skills',
       '.claude/skills',
       '.github',
@@ -123,8 +133,10 @@ export class FileService {
 
     if (config.layout === 'overleaf-shared') {
       await this.writeIfMissing(`${paths.researchRoot}/README.md`, this.researchReadme(paths));
-      await this.upsertGitignore(paths.localSourcePdfs);
     }
+
+    await this.upsertGitignore(paths, bundledSkillNames);
+    await this.ensureLatexWorkspaceConfiguration();
 
     if (createLatexDefaults) {
       await vscode.workspace.fs.createDirectory(this.resolve(paths.sections));
@@ -165,15 +177,42 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${paths.assets}/\` contains theorem, lemma, proposition, definition, example, construction, and remark nodes.
 - \`${paths.ideas}/\` contains speculative strategies and open directions.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
-- \`${paths.workflows}/\` contains agent-neutral research workflows.
 
 Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, which is ignored by Git. Record stable URLs, DOI/arXiv identifiers, checksums, and page-level provenance in shared paper metadata so collaborators can retrieve the same source.
 `;
   }
 
-  private async upsertGitignore(localSourcePdfs: string): Promise<void> {
+  private async upsertGitignore(paths: ProjectPaths, bundledSkillNames: string[]): Promise<void> {
     const current = await this.readFile('.gitignore').catch(() => '');
-    const managed = `${GITIGNORE_START}\n/${localSourcePdfs.replace(/\/$/, '')}/\n*.aux\n*.fdb_latexmk\n*.fls\n*.log\n*.out\n*.run.xml\n*.synctex.gz\n*.toc\n${GITIGNORE_END}`;
+    const managed = [
+      GITIGNORE_START,
+      '# Local source PDFs and LaTeX output',
+      `/${paths.localSourcePdfs.replace(/\/$/, '')}/`,
+      `/${LATEX_OUTPUT_DIRECTORY}/`,
+      '*.aux',
+      '*.fdb_latexmk',
+      '*.fls',
+      '*.log',
+      '*.out',
+      '*.run.xml',
+      '*.synctex.gz',
+      '*.toc',
+      '__pycache__/',
+      '*.pyc',
+      '# Recreated by the same Research Assistant extension version',
+      '# Only extension-maintained skills are local; project skills can be tracked',
+      ...bundledSkillNames.flatMap((name) => [
+        `/.agents/skills/${name}/`,
+        `/.claude/skills/${name}/`,
+      ]),
+      '/.github/copilot-instructions.md',
+      '/AGENTS.md',
+      '/CLAUDE.md',
+      '/.vscode/settings.json',
+      '/.vscode/extensions.json',
+      ...(paths.researchRoot !== '.' ? [`/${paths.researchRoot}/README.md`] : []),
+      GITIGNORE_END,
+    ].join('\n');
     const start = current.indexOf(GITIGNORE_START);
     const end = current.indexOf(GITIGNORE_END);
     const updated = start !== -1 && end > start
@@ -182,6 +221,50 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
         ? `${current.trimEnd()}\n\n${managed}\n`
         : `${managed}\n`;
     if (updated !== current) await this.writeFile('.gitignore', updated);
+  }
+
+  private async ensureLatexWorkspaceConfiguration(): Promise<void> {
+    const existingSettings = await this.readFile('.vscode/settings.json').catch(() => '');
+    let settings = existingSettings || '{}\n';
+    const parsedSettings = this.parseJsoncObject(settings, '.vscode/settings.json');
+    for (const [key, value] of Object.entries(LATEX_WORKSHOP_SETTINGS)) {
+      if (parsedSettings && Object.prototype.hasOwnProperty.call(parsedSettings, key)) continue;
+      settings = applyEdits(settings, modify(settings, [key], value, {
+        formattingOptions: { insertSpaces: true, tabSize: 2 },
+      }));
+    }
+    settings = settings.endsWith('\n') ? settings : `${settings}\n`;
+    if (settings !== existingSettings) await this.writeFile('.vscode/settings.json', settings);
+
+    const existingExtensions = await this.readFile('.vscode/extensions.json').catch(() => '');
+    let extensions = existingExtensions || '{}\n';
+    const parsedExtensions = this.parseJsoncObject(extensions, '.vscode/extensions.json');
+    const existing = Array.isArray(parsedExtensions?.recommendations)
+      ? parsedExtensions.recommendations.filter((item): item is string => typeof item === 'string')
+      : [];
+    if (!existing.includes(LATEX_WORKSHOP_ID)) {
+      extensions = applyEdits(extensions, modify(
+        extensions,
+        ['recommendations'],
+        [...existing, LATEX_WORKSHOP_ID],
+        { formattingOptions: { insertSpaces: true, tabSize: 2 } }
+      ));
+    }
+    extensions = extensions.endsWith('\n') ? extensions : `${extensions}\n`;
+    if (extensions !== existingExtensions) await this.writeFile('.vscode/extensions.json', extensions);
+  }
+
+  private parseJsoncObject(content: string, relativePath: string): Record<string, unknown> {
+    const errors: ParseError[] = [];
+    const parsed = parse(content, errors, {
+      allowTrailingComma: true,
+      allowEmptyContent: true,
+      disallowComments: false,
+    });
+    if (errors.length || (parsed !== undefined && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)))) {
+      throw new Error(`Research Assistant cannot merge ${relativePath} because it is not valid JSON with comments.`);
+    }
+    return (parsed ?? {}) as Record<string, unknown>;
   }
 
   get rootUri(): vscode.Uri {

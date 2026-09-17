@@ -20,16 +20,27 @@ export class SkillInstallerService {
     private readonly fileService: FileService
   ) {}
 
-  async installBundledSkills(): Promise<void> {
+  async listBundledSkillNames(): Promise<string[]> {
     const sourceRoot = vscode.Uri.joinPath(this.extensionUri, 'skills');
     const entries = await vscode.workspace.fs.readDirectory(sourceRoot);
+    const skillNames: string[] = [];
 
     for (const [skillName, type] of entries) {
       if (!(type & vscode.FileType.Directory)) continue;
 
       const sourceSkill = vscode.Uri.joinPath(sourceRoot, skillName);
       if (!(await this.hasSkillManifest(sourceSkill))) continue;
+      skillNames.push(skillName);
+    }
 
+    return skillNames;
+  }
+
+  async installBundledSkills(skillNames: string[]): Promise<void> {
+    const sourceRoot = vscode.Uri.joinPath(this.extensionUri, 'skills');
+
+    for (const skillName of skillNames) {
+      const sourceSkill = vscode.Uri.joinPath(sourceRoot, skillName);
       await Promise.all(
         SKILL_DESTINATIONS.map((destinationRoot) =>
           this.copyDirectory(

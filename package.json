@@ -2,7 +2,7 @@
   "name": "research-management-system",
   "displayName": "Research Assistant",
   "description": "Shared AI-assisted mathematical research context for Overleaf Git projects in VS Code",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "publisher": "tianhao",
   "engines": {
     "vscode": "^1.85.0"
@@ -20,7 +20,11 @@
       },
       {
         "command": "research-assistant.refreshAgentSetup",
-        "title": "Research Assistant: Refresh Agent Setup"
+        "title": "Research Assistant: Refresh Project Setup"
+      },
+      {
+        "command": "research-assistant.showOutput",
+        "title": "Research Assistant: Show Output"
       }
     ]
   },
@@ -32,8 +36,10 @@
   },
   "dependencies": {
     "gray-matter": "^4.0.3",
+    "jsonc-parser": "^3.3.1",
     "katex": "^0.17.0",
     "marked": "^18.0.4",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",

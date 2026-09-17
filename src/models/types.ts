@@ -83,7 +83,6 @@ export interface ResearchAssistantConfig {
     assets: string;
     ideas: string;
     papers: string;
-    workflows: string;
     localSourcePdfs: string;
   };
 }
@@ -102,7 +101,6 @@ export interface ProjectPaths {
   assets: string;
   ideas: string;
   papers: string;
-  workflows: string;
   localSourcePdfs: string;
 }
 
@@ -119,6 +117,25 @@ export interface ProjectPathSummary {
   ideas: string;
   papers: string;
   localSourcePdfs: string;
+}
+
+export type ManuscriptBuildPhase =
+  | 'idle'
+  | 'compiling'
+  | 'succeeded'
+  | 'failed'
+  | 'unavailable';
+
+export interface ManuscriptStatus {
+  phase: ManuscriptBuildPhase;
+  mainTex: string;
+  outputPdf: string;
+  pdfUri?: string;
+  pdfVersion?: number;
+  latexWorkshopInstalled: boolean;
+  autoBuild: boolean;
+  configurationConflicts: string[];
+  message?: string;
 }
 
 export interface AIService {
