@@ -109,6 +109,9 @@ export class ProjectConfigService {
       definitions: normalizeRelative(config.research.definitions, 'research/definitions'),
       ideas: normalizeRelative(config.research.ideas, 'research/ideas'),
       plans: normalizeRelative(config.research.plans, path.posix.join(path.posix.dirname(config.research.ideas), 'plans')),
+      writingRoot: path.posix.join(normalizeRelative(config.research.root, 'research'), 'writing'),
+      writingOutline: path.posix.join(normalizeRelative(config.research.root, 'research'), 'writing', 'outline.md'),
+      writingSections: path.posix.join(normalizeRelative(config.research.root, 'research'), 'writing', 'sections'),
       papers: normalizeRelative(config.research.papers, 'research/papers'),
       localSourcePdfs: normalizeRelative(config.research.localSourcePdfs, 'research-local/raw_papers'),
     };

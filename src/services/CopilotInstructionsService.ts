@@ -32,6 +32,9 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - \`${paths.definitions}/\`: primary mathematical definitions and notation
 - \`${paths.ideas}/\`: freeform research ideas
 - \`${paths.plans}/\`: executable proof plans and retained proof records
+- \`${paths.writingOutline}\`: presentation order for the manuscript
+- \`${paths.writingSections}/\`: section briefs with verified asset IDs and writing gaps
+- \`${paths.sections}/\`: canonical, editable LaTeX section files
 - \`${paths.paperIndex}\`: shared paper index
 - \`${paths.papers}/\`: shared paper metadata and searchable working transcriptions
 - \`${paths.localSourcePdfs}/\`: local-only authoritative PDFs; this path is ignored by Git
@@ -45,6 +48,7 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - Check ambiguous formulas, diagrams, subscripts, superscripts, and symbols against the PDF.
 - Do not rename shared files casually: Git-based Overleaf updates can detach comments and tracked-change metadata.
 - Pull before editing and again before pushing; resolve conflicts locally.
+- Review manuscript changes through Git. Overleaf comments and tracked changes may move when Git pushes alter their files.
 
 ## Research rules
 
@@ -55,6 +59,9 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - When asked to prove an asset, read its pending linked plans, follow and update one plan's checkboxes, and record any mathematical obstruction under Failure. Put a successful proof in the asset and then convert the plan to a proof record.
 - New or materially edited assets and definitions must have \`status: draft\`. Only a researcher promotes them. New ideas start \`draft\`; new plans start \`pending\`.
 - Only approved nodes should be relied on in finished manuscript arguments.
+- Keep manuscript writing plans separate from proof plans. Work on one section at a time; read its brief, selected approved nodes and dependencies, relevant definitions, and the configured preamble. Do not send the whole research archive to a model.
+- Preserve existing section TeX prose. Generate a missing file once; later revisions must target a passage or provide a patch.
+- Sync the marked section input block in the main document from the writing outline only after previewing it with the manuscript-writing skill.
 - Use exact node filenames without \`.md\` in \`depends_on\`, \`used_in\`, and \`related_assets\`.
 - Assets link definition IDs in \`uses_definitions\`. Definition \`depends_on\` lists definition IDs; asset \`depends_on\` lists asset IDs.
 - After drafting or materially revising an asset, run \`check-notation\` against linked approved definitions, macros, and the notation supplement.
@@ -134,6 +141,8 @@ export async function generateAgentInstructions(
     .concat('- `extract-definitions`: Extract and migrate definitions, and link assets to them.')
     .concat('- `link-research-nodes`: Link verified asset and definition mentions in Markdown bodies.')
     .concat('- `convert-proof-ideas`: Classify legacy ideas and plans, migrate plans to their own folder, and synchronize Markdown links.')
+    .concat('- `plan-manuscript`: Agree on presentation order and write the shared outline and section briefs.')
+    .concat('- `manuscript-writing`: Validate section sources, create missing TeX sections, and preview/apply input order.')
     .join('\n');
   const agentsContent = `${sharedGuidance(paths)}
 

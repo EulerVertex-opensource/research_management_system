@@ -114,6 +114,9 @@ export interface ProjectPaths {
   definitions: string;
   ideas: string;
   plans: string;
+  writingRoot: string;
+  writingOutline: string;
+  writingSections: string;
   papers: string;
   localSourcePdfs: string;
 }

@@ -31,16 +31,22 @@ Notes/excerpt:
 `,
   },
 
+  plan_manuscript: {
+    label: 'Plan manuscript order',
+    purpose: 'Order the paper and divide it into sections linked to stable research asset IDs.',
+    instructions: `Use a compact index of node IDs, titles, status, and dependencies to propose the paper's presentation order. Read full bodies only for candidate results that need closer inspection. For each proposed section, give a stable ID, title, purpose, relevant approved asset IDs, and unresolved gaps. Keep this writing outline separate from mathematical proof plans.\n\nAudience and main contribution:\n`,
+  },
+
   plan_section: {
     label: 'Plan a paper section',
     purpose: 'Plan a manuscript section from approved results and relevant ideas.',
-    instructions: `Using the approved research nodes and ideas provided as context, suggest a detailed outline for a paper section.
+    instructions: `Using the section brief, approved research nodes, and relevant ideas provided as context, suggest a detailed outline for one paper section.
 
 For each subsection, indicate:
 - What to prove or explain
 - Which theorems/lemmas are needed (reference by node id)
 - Suggested order of presentation
-- Any gaps or missing intermediate results
+- Any gaps or missing intermediate results (do not present draft nodes as proved)
 
 Section topic:
 `,
@@ -49,7 +55,7 @@ Section topic:
   draft_latex: {
     label: 'Draft LaTeX from approved nodes',
     purpose: 'Draft manuscript LaTeX grounded in approved research nodes.',
-    instructions: `Write a LaTeX section draft using the theorem/lemma nodes provided in context.
+    instructions: `Write or revise one LaTeX section from its brief and approved theorem/lemma nodes. Preserve existing researcher prose; make targeted changes after the first draft.
 
 Rules:
 1. Follow all configured macro and preamble files — do not introduce new \\newcommand without checking them.
@@ -57,6 +63,7 @@ Rules:
 3. Use the theorem and proof environments defined by the project.
 4. Reference theorems by their node id in a comment: % [node_id]
 5. Mark unclear steps with % TODO.
+6. Use normal LaTeX labels and verified BibTeX keys from node paper provenance for printed references.
 
 Section to draft:
 `,

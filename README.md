@@ -39,6 +39,9 @@ overleaf-project/
     definitions/                   ← definitions and their notation
     ideas/                         ← freeform research ideas
     plans/                         ← executable plans and proof records
+    writing/
+      outline.md                  ← ordered manuscript section links
+      sections/<id>.md            ← section briefs and asset IDs
     papers/<slug>/                 ← shared metadata and working transcriptions
 
   research-local/                  ← local only; ignored by Git
@@ -63,7 +66,7 @@ Commit these files:
 
 - LaTeX, BibTeX, figures required by the manuscript, and project-specific class/style files.
 - `.research-assistant.json` and the managed `.gitignore`.
-- Authored research files: `research/project.md`, `research/papers.md`, nodes in `research/assets/`, `research/definitions/`, `research/ideas/`, and `research/plans/`, and metadata/transcriptions in `research/papers/`.
+- Authored research files: `research/project.md`, `research/papers.md`, nodes in `research/assets/`, `research/definitions/`, `research/ideas/`, and `research/plans/`, writing plans in `research/writing/`, and metadata/transcriptions in `research/papers/`.
 - Project skills under `.agents/skills/` or `.claude/skills/` whose names do not match an extension-bundled skill.
 
 Do not normally commit:
@@ -152,7 +155,57 @@ The locally generated workspace defaults are:
 
 Use the **Build on save** checkbox in Manuscript to switch the last setting between `never` and `onSave`. This is a local preference in each collaborator's clone; refresh preserves it. If a project already has conflicting output settings, Research Assistant shows them and waits for an explicit **Use Research Assistant build setup** action.
 
-Overleaf still compiles the tracked source independently. Do not push `.latex-out/` or generated LaTeX files to Overleaf; Overleaf likewise [recommends excluding auxiliary and local output files](https://docs.overleaf.com/managing-projects-and-files/adding-files-to-a-project/uploading-files-to-a-project/files-that-should-not-be-included-in-a-project).
+Overleaf still compiles the tracked source independently. Commit accepted manuscript section `.tex` files; do not push `.latex-out/`, auxiliary files, or compiled PDFs. Overleaf likewise [recommends excluding auxiliary and local output files](https://docs.overleaf.com/managing-projects-and-files/adding-files-to-a-project/uploading-files-to-a-project/files-that-should-not-be-included-in-a-project).
+
+## Modular manuscript writing
+
+The canonical paper is the configured main TeX file plus editable files in its configured sections folder. The writing plan is shared Markdown under `<research.root>/writing/`; it is separate from `research/plans/`, which records mathematical proof attempts. Refresh project setup to create an empty `outline.md` without changing existing TeX.
+
+Under `## Sections`, add numbered links in presentation order. The link text must match the brief's `title`, and each stable ID names both a brief and a TeX file:
+
+```markdown
+1. [Introduction](sections/introduction.md)
+2. [Main result](sections/main_result.md)
+```
+
+Each `writing/sections/<id>.md` brief has a short YAML header and prose:
+
+```markdown
+---
+title: Main result
+assets: [main_theorem, key_lemma]
+---
+
+## Purpose
+
+Explain what the reader should learn in this section.
+
+## Subsections
+
+- State the main result, then establish the key lemma.
+
+## Gaps
+
+- Record any unproved step or draft result here.
+```
+
+Use `plan-manuscript` with a researcher to decide the section order, then `plan-section` to refine one brief. The agents begin with a compact node index and read full content only for selected results. To validate a brief and list the exact approved assets, dependency definitions, preamble files, and BibTeX keys needed for drafting, run:
+
+```bash
+node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs prepare main_result --preview
+node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs prepare main_result --apply
+```
+
+`--apply` creates `sections/main_result.tex` only if it is missing. The `draft-latex` skill replaces that untouched skeleton with a first draft and thereafter edits only requested passages. It marks uses of research nodes with `% [node_id]` comments; printed references use normal LaTeX labels and verified bibliography keys. Unknown or unapproved dependencies stop preparation.
+
+When every listed TeX section exists, preview and apply the main document's input order:
+
+```bash
+node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs sync --preview
+node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs sync --apply
+```
+
+For a new document, Research Assistant creates the input markers in `main.tex`. In an adopted document, place `% research-assistant:sections:start` and `% research-assistant:sections:end` on their own lines around the section inputs once. The command changes only the text between them; it refuses to guess an insertion point in an existing manuscript. Review the Git diff and compile after syncing. Use Git changes for coauthor review; [Overleaf warns](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/advanced-git-operations) that Git pushes can displace comments and tracked changes.
 
 ## Dashboard
 
@@ -256,7 +309,7 @@ The local file line is shared as a convention, but the PDF itself is ignored by 
 
 ## AI setup
 
-The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The bundled skills cover paper import, theorem and definition extraction, asset and definition ordering, proof idea conversion, research node interlinks, section planning, LaTeX drafting, notation review, node search, and node summaries. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. The dashboard keeps its prompt templates for in-panel chat. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
+The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The bundled skills cover paper import, theorem and definition extraction, asset and definition ordering, proof idea conversion, research node interlinks, manuscript and section planning, writing sync, LaTeX drafting, notation review, node search, and node summaries. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. The dashboard keeps its prompt templates for in-panel chat. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
 
 Generated instructions are deliberately compact and deterministic. They point agents to canonical node and paper files instead of duplicating every node body, reducing Git noise and merge conflicts.
 

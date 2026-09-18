@@ -19,6 +19,13 @@ const PROJECT_TEMPLATE = `# Project
 `;
 
 const GITIGNORE_START = '# research-assistant:local:start';
+const WRITING_OUTLINE_TEMPLATE = `# Manuscript outline
+
+List sections in presentation order using stable IDs. Each entry points to a brief in sections/<id>.md. Keep proof plans in the configured research plans folder.
+
+## Sections
+
+`;
 const GITIGNORE_END = '# research-assistant:local:end';
 const LATEX_WORKSHOP_ID = 'james-yu.latex-workshop';
 
@@ -113,6 +120,7 @@ export class FileService {
       paths.definitions,
       paths.ideas,
       paths.plans,
+      paths.writingSections,
       paths.papers,
       paths.localSourcePdfs,
       LATEX_OUTPUT_DIRECTORY,
@@ -132,6 +140,7 @@ export class FileService {
 
     await this.writeIfMissing(paths.projectMd, PROJECT_TEMPLATE);
     await this.writeIfMissing(paths.paperIndex, '# Papers\n');
+    await this.writeIfMissing(paths.writingOutline, WRITING_OUTLINE_TEMPLATE);
 
     if (config.layout === 'overleaf-shared') {
       await this.writeIfMissing(`${paths.researchRoot}/README.md`, this.researchReadme(paths));
@@ -156,7 +165,7 @@ export class FileService {
       ].map((inputPath) => `\\input{${inputPath.replace(/\.tex$/i, '')}}`).join('\n');
       await this.writeIfMissing(
         paths.mainTex,
-        `\\documentclass{amsart}\n${preambleInputs}${preambleInputs ? '\n' : ''}\n\\begin{document}\n\n\\end{document}\n`
+        `\\documentclass{amsart}\n${preambleInputs}${preambleInputs ? '\n' : ''}\n\\begin{document}\n\n% research-assistant:sections:start\n% research-assistant:sections:end\n\n\\end{document}\n`
       );
     }
   }
@@ -180,6 +189,7 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${paths.definitions}/\` contains mathematical definitions and their notation.
 - \`${paths.ideas}/\` contains freeform research ideas.
 - \`${paths.plans}/\` contains executable proof plans and retained proof records.
+- \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
 
 Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, which is ignored by Git. Record stable URLs, DOI/arXiv identifiers, checksums, and page-level provenance in shared paper metadata so collaborators can retrieve the same source.
