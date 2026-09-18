@@ -12,7 +12,7 @@ export const RESEARCH_WORKFLOWS: Record<string, ResearchWorkflow> = {
   extract_theorems: {
     label: 'Extract theorem nodes from paper notes',
     purpose: 'Turn a paper transcription or notes into provenance-preserving draft research nodes.',
-    instructions: `From the notes or paper excerpt below, extract theorem-like results (theorems, lemmas, propositions, examples). Put important definitions in separate definition files.
+    instructions: `From the notes or paper excerpt below, extract theorem-like results (theorems, lemmas, propositions, examples). Put only commonly used mathematical definitions in separate definition files. Put conditions or assumptions specific to this project in remark assets, with verified relative Markdown links to the relevant definitions and assets. If a passage mixes both, split it without changing its mathematical content.
 
 For each result, provide:
 - Suggested node id (snake_case, descriptive)

@@ -64,6 +64,7 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - Sync the marked section input block in the main document from the writing outline only after previewing it with the manuscript-writing skill.
 - Use exact node filenames without \`.md\` in \`depends_on\`, \`used_in\`, and \`related_assets\`.
 - Assets link definition IDs in \`uses_definitions\`. Definition \`depends_on\` lists definition IDs; asset \`depends_on\` lists asset IDs.
+- Extract only commonly used mathematical concepts as definitions. Put project-specific conditions and assumptions in draft remark assets, with verified relative Markdown links to relevant definitions and assets. Split mixed passages into a standard definition and a linked remark.
 - After drafting or materially revising an asset, run \`check-notation\` against linked approved definitions, macros, and the notation supplement.
 - After adding or changing an asset, use the \`order-assets\` skill to check dependencies and title order. The extension also reorders assets when it sees file changes.
 - After adding or changing a definition, use \`order-definitions\` to check dependencies and title order. The extension also reorders definitions when it sees file changes.

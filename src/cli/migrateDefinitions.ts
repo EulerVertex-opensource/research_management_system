@@ -40,7 +40,10 @@ async function main(): Promise<void> {
   const original = new Map(assets.map((item) => [item.id, item.raw]));
   const edited = plan.updatedAssets.filter((item) => item.raw !== original.get(item.id));
   process.stdout.write(`Move ${plan.moved.length} definition file(s); update ${edited.length} asset link file(s).\n`);
-  for (const item of plan.moved) process.stdout.write(`MOVE ${item.id}.md -> ${definitionsFolder}\n`);
+  for (const item of plan.moved) {
+    process.stdout.write(`MOVE ${item.id}.md -> ${definitionsFolder}\n`);
+    process.stdout.write(`REVIEW ${item.id}.md: confirm this is a commonly used definition; keep project-specific conditions or assumptions as linked remark assets\n`);
+  }
   for (const item of edited) {
     const before = matter(original.get(item.id)!).data;
     const after = matter(item.raw).data;
