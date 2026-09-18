@@ -110,7 +110,9 @@ export class FileService {
     const researchFolders = [
       paths.researchRoot,
       paths.assets,
+      paths.definitions,
       paths.ideas,
+      paths.plans,
       paths.papers,
       paths.localSourcePdfs,
       LATEX_OUTPUT_DIRECTORY,
@@ -174,8 +176,10 @@ export class FileService {
 This directory is the version-controlled source of truth for Research Assistant.
 
 - \`${paths.projectMd}\` describes the research problem, goals, and open questions.
-- \`${paths.assets}/\` contains theorem, lemma, proposition, definition, example, construction, and remark nodes.
-- \`${paths.ideas}/\` contains speculative strategies and open directions.
+- \`${paths.assets}/\` contains theorem, lemma, proposition, example, construction, and remark nodes.
+- \`${paths.definitions}/\` contains mathematical definitions and their notation.
+- \`${paths.ideas}/\` contains freeform research ideas.
+- \`${paths.plans}/\` contains executable proof plans and retained proof records.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
 
 Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, which is ignored by Git. Record stable URLs, DOI/arXiv identifiers, checksums, and page-level provenance in shared paper metadata so collaborators can retrieve the same source.

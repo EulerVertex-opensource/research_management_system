@@ -4,18 +4,30 @@ import { FileService } from '../services/FileService';
 import { NodeIndexService } from '../services/NodeIndexService';
 import { PaperIndexService } from '../services/PaperIndexService';
 import { WebviewMessage, ExtensionMessage } from '../models/messages';
-import { NodeType, NodeStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig, ManuscriptBuildPhase, ManuscriptStatus } from '../models/types';
+import { NodeType, ResearchStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig, ManuscriptBuildPhase, ManuscriptStatus } from '../models/types';
 import { generateAgentInstructions } from '../services/CopilotInstructionsService';
 import { SkillInstallerService } from '../services/SkillInstallerService';
 import { ProjectConfigService } from '../services/ProjectConfigService';
 import { LATEX_OUTPUT_DIRECTORY } from '../services/FileService';
 import { ManuscriptBuildService } from '../services/ManuscriptBuildService';
+import { orderAssets } from '../services/AssetOrderService';
+import { syncProofIdeaLinks } from '../services/ProofIdeas';
+import { requirePaperPdfPath } from '../services/PaperPdfPath';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
 
 export class WebviewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private watchers: vscode.Disposable[] = [];
+  private assetOrderTimer: ReturnType<typeof setTimeout> | undefined;
+  private assetOrderRun: Promise<void> = Promise.resolve();
+  private lastOrderedIds: string[] = [];
+  private definitionOrderTimer: ReturnType<typeof setTimeout> | undefined;
+  private definitionOrderRun: Promise<void> = Promise.resolve();
+  private proofIdeasTimer: ReturnType<typeof setTimeout> | undefined;
+  private proofIdeasRun: Promise<void> = Promise.resolve();
+  private lastOrderedDefinitionIds: string[] = [];
+  private startup: Promise<void> | undefined;
 
   private readonly fileService: FileService;
   private readonly configService: ProjectConfigService;
@@ -38,7 +50,24 @@ export class WebviewProvider {
     this.manuscriptBuildService = new ManuscriptBuildService(this.fileService, workspaceRoot);
   }
 
+  start(): Promise<void> {
+    this.startup ??= this.loadProject().catch((error: unknown) => {
+      this.startup = undefined;
+      throw error;
+    });
+    return this.startup;
+  }
+
+  dispose(): void {
+    if (this.assetOrderTimer) clearTimeout(this.assetOrderTimer);
+    if (this.definitionOrderTimer) clearTimeout(this.definitionOrderTimer);
+    if (this.proofIdeasTimer) clearTimeout(this.proofIdeasTimer);
+    this.watchers.forEach((watcher) => watcher.dispose());
+    this.watchers = [];
+  }
+
   async open(): Promise<void> {
+    await this.start();
     if (this.panel) {
       this.panel.reveal();
       return;
@@ -64,8 +93,6 @@ export class WebviewProvider {
 
     this.panel.onDidDispose(() => {
       this.panel = undefined;
-      this.watchers.forEach((w) => w.dispose());
-      this.watchers = [];
     });
 
     // Attach message listeners before loading HTML: the webview posts `ready`
@@ -98,6 +125,8 @@ export class WebviewProvider {
       this.output.appendLine('[refresh] Installed bundled agent skills');
 
       this.configureServices(paths);
+      await this.tryOrderAssets();
+      await this.tryOrderDefinitions();
       const [nodes, papers] = await Promise.all([
         this.nodeIndex!.refresh(),
         this.paperIndex!.getPapers(),
@@ -135,6 +164,9 @@ export class WebviewProvider {
     const config = await this.configService.loadOrDiscover();
     const paths = this.configService.resolvePaths(config);
     this.configureServices(paths);
+    await this.tryOrderAssets();
+    await this.tryOrderDefinitions();
+    await this.queueProofIdeaSync();
 
     const [nodes, papers] = await Promise.all([
       this.nodeIndex!.refresh(),
@@ -163,6 +195,94 @@ export class WebviewProvider {
     this.paperIndex = new PaperIndexService(this.fileService, paths);
   }
 
+  private async trySyncProofIdeas(): Promise<void> {
+    if (!this.paths) return;
+    try {
+      const result = await syncProofIdeaLinks(this.fileService, this.paths.assets, this.paths.ideas, this.paths.plans);
+      if (result.updated) this.output.appendLine(`[ideas] Updated ${result.updated} managed research link sections`);
+      for (const issue of result.issues) this.output.appendLine(`[ideas] REVIEW ${issue}`);
+    } catch (error: unknown) {
+      this.output.appendLine(`[ideas] Link sync failed: ${String(error)}`);
+    }
+  }
+
+  private queueProofIdeaSync(): Promise<void> {
+    this.proofIdeasRun = this.proofIdeasRun.then(() => this.trySyncProofIdeas());
+    return this.proofIdeasRun;
+  }
+
+  private scheduleProofIdeaSync(): void {
+    if (this.proofIdeasTimer) clearTimeout(this.proofIdeasTimer);
+    this.proofIdeasTimer = setTimeout(() => {
+      this.proofIdeasTimer = undefined;
+      void this.queueProofIdeaSync().then(() => this.refreshNodes())
+        .catch((error: unknown) => this.output.appendLine(`[ideas] Refresh failed: ${String(error)}`));
+    }, 150);
+  }
+
+  private async tryOrderAssets(): Promise<void> {
+    if (!this.paths) return;
+    try {
+      const result = await orderAssets(this.fileService, this.paths.assets);
+      this.lastOrderedIds = result.changes.map((change) => change.id);
+      if (result.changes.length) this.output.appendLine(`[assets] Updated ${result.changes.length} ordered titles`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[assets] Ordering stopped: ${message}`);
+      this.lastOrderedIds = [];
+      this.send({ type: 'error', message: `Asset ordering stopped: ${message}` });
+    }
+  }
+
+  private async tryOrderDefinitions(): Promise<void> {
+    if (!this.paths) return;
+    try {
+      const result = await orderAssets(this.fileService, this.paths.definitions, 'definition');
+      this.lastOrderedDefinitionIds = result.changes.map((change) => change.id);
+      if (result.changes.length) this.output.appendLine(`[definitions] Updated ${result.changes.length} ordered titles`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastOrderedDefinitionIds = [];
+      this.output.appendLine(`[definitions] Ordering stopped: ${message}`);
+      this.send({ type: 'error', message: `Definition ordering stopped: ${message}` });
+    }
+  }
+
+  private scheduleAssetOrder(): void {
+    if (this.assetOrderTimer) clearTimeout(this.assetOrderTimer);
+    this.assetOrderTimer = setTimeout(() => {
+      this.assetOrderTimer = undefined;
+      this.assetOrderRun = this.assetOrderRun.then(async () => {
+        await this.tryOrderAssets();
+        await this.refreshNodes();
+        for (const id of this.lastOrderedIds) {
+          if (!this.nodeIndex?.getById(id)) continue;
+          const detail = await this.nodeIndex.getNodeDetail(id);
+          this.send({ type: 'nodeDetail', id, ...detail });
+        }
+      }).catch((error: unknown) => {
+        this.output.appendLine(`[assets] Refresh failed: ${String(error)}`);
+      });
+    }, 100);
+  }
+
+  private scheduleDefinitionOrder(): void {
+    if (this.definitionOrderTimer) clearTimeout(this.definitionOrderTimer);
+    if (this.proofIdeasTimer) clearTimeout(this.proofIdeasTimer);
+    this.definitionOrderTimer = setTimeout(() => {
+      this.definitionOrderTimer = undefined;
+      this.definitionOrderRun = this.definitionOrderRun.then(async () => {
+        await this.tryOrderDefinitions();
+        await this.refreshNodes();
+        for (const id of this.lastOrderedDefinitionIds) {
+          if (!this.nodeIndex?.getById(id)) continue;
+          const detail = await this.nodeIndex.getNodeDetail(id);
+          this.send({ type: 'nodeDetail', id, ...detail });
+        }
+      }).catch((error: unknown) => this.output.appendLine(`[definitions] Refresh failed: ${String(error)}`));
+    }, 100);
+  }
+
   private pathSummary(config: ResearchAssistantConfig, paths: ProjectPaths) {
     return {
       layout: config.layout,
@@ -174,7 +294,9 @@ export class WebviewProvider {
       projectMd: paths.projectMd,
       paperIndex: paths.paperIndex,
       assets: paths.assets,
+      definitions: paths.definitions,
       ideas: paths.ideas,
+      plans: paths.plans,
       papers: paths.papers,
       localSourcePdfs: paths.localSourcePdfs,
     };
@@ -184,11 +306,13 @@ export class WebviewProvider {
     if (!this.paths || !this.nodeIndex || !this.paperIndex) return;
     this.watchers.forEach((watcher) => watcher.dispose());
     this.watchers = [];
+    if (this.assetOrderTimer) clearTimeout(this.assetOrderTimer);
+    if (this.definitionOrderTimer) clearTimeout(this.definitionOrderTimer);
     const root = this.fileService.rootUri;
     const paths = this.paths;
 
     // Watch shared asset and idea node files.
-    const nodeWatchers = [paths.assets, paths.ideas].map((folder) =>
+    const nodeWatchers = [paths.assets, paths.definitions, paths.ideas, paths.plans].map((folder) =>
       vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, `${folder}/*.md`))
     );
 
@@ -217,11 +341,20 @@ export class WebviewProvider {
       } catch { /* non-fatal */ }
     };
 
-    for (const watcher of nodeWatchers) {
-      watcher.onDidChange(onNodeFileChange);
-      watcher.onDidCreate(onNodeFileChange);
-      watcher.onDidDelete(onNodeFileDelete);
-    }
+    const [assetWatcher, definitionWatcher, ideaWatcher, planWatcher] = nodeWatchers;
+    assetWatcher.onDidChange(() => this.scheduleAssetOrder());
+    assetWatcher.onDidCreate(() => this.scheduleAssetOrder());
+    assetWatcher.onDidDelete(() => this.scheduleAssetOrder());
+    assetWatcher.onDidCreate(() => this.scheduleProofIdeaSync());
+    definitionWatcher.onDidChange(() => this.scheduleDefinitionOrder());
+    definitionWatcher.onDidCreate(() => this.scheduleDefinitionOrder());
+    definitionWatcher.onDidDelete(() => this.scheduleDefinitionOrder());
+    ideaWatcher.onDidChange((uri) => { void onNodeFileChange(uri); this.scheduleProofIdeaSync(); });
+    ideaWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); this.scheduleProofIdeaSync(); });
+    ideaWatcher.onDidDelete(() => { void onNodeFileDelete(); this.scheduleProofIdeaSync(); });
+    planWatcher.onDidChange((uri) => { void onNodeFileChange(uri); this.scheduleProofIdeaSync(); });
+    planWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); this.scheduleProofIdeaSync(); });
+    planWatcher.onDidDelete(() => { void onNodeFileDelete(); this.scheduleProofIdeaSync(); });
 
     // Watch the configured project description.
     const projectWatcher = vscode.workspace.createFileSystemWatcher(
@@ -406,6 +539,7 @@ export class WebviewProvider {
         case 'saveNode': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.nodeIndex.saveNode(msg.id, msg.frontmatter, msg.body);
+          await this.queueProofIdeaSync();
           await this.refreshNodes();
           const updated = await this.nodeIndex.getNodeDetail(msg.id);
           this.send({ type: 'nodeDetail', id: msg.id, ...updated });
@@ -446,14 +580,16 @@ export class WebviewProvider {
 
         case 'createNode': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
-          await this.nodeIndex.createNode(msg.nodeType as NodeType, msg.title);
+          await this.nodeIndex.createNode(msg.nodeType as NodeType, msg.title, msg.targetAsset);
+          await this.queueProofIdeaSync();
           await this.refreshNodes();
           break;
         }
 
         case 'updateStatus': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
-          await this.nodeIndex.updateStatus(msg.id, msg.status as NodeStatus);
+          await this.nodeIndex.updateStatus(msg.id, msg.status as ResearchStatus);
+          await this.queueProofIdeaSync();
           await this.refreshNodes();
           break;
         }
@@ -465,8 +601,13 @@ export class WebviewProvider {
         }
 
         case 'openFile': {
-          // Uses vscode.open command so non-text files (PDFs) open with their default handler
-          const uri = this.fileService.resolve(msg.filePath);
+          if (!this.paths) throw new Error('Project paths are not configured.');
+          const paperPdf = await requirePaperPdfPath(msg.filePath, this.paths.localSourcePdfs, async (filePath) => {
+            const stat = await vscode.workspace.fs.stat(this.fileService.resolve(filePath));
+            return Boolean(stat.type & vscode.FileType.File) && !(stat.type & vscode.FileType.SymbolicLink);
+          });
+          const uri = this.fileService.resolve(paperPdf);
+          // Use the same VS Code PDF viewer as the dashboard's Open PDF button.
           await vscode.commands.executeCommand('vscode.open', uri);
           break;
         }
@@ -554,7 +695,7 @@ export class WebviewProvider {
     .md-preview table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
     .md-preview th, .md-preview td { border: 1px solid var(--vscode-panel-border); padding: 0.35em 0.7em; text-align: left; }
     .md-preview th { background: var(--vscode-list-hoverBackground); font-weight: 600; }
-    .md-preview a { color: var(--vscode-textLink-foreground); }
+    .md-preview a { color: var(--vscode-textLink-foreground); text-decoration: underline; cursor: pointer; }
     .md-preview hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 1em 0; }
     .md-preview .katex-display { overflow-x: auto; }
   </style>

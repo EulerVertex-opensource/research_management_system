@@ -12,6 +12,7 @@ interface Props {
   onLayoutChange: (mode: LayoutMode) => void;
   onSplitRatioChange: (ratio: number) => void;
   onSave: (content: string) => void;
+  onOpenNodeLink?: (href: string) => boolean;
   onInitProject: () => void;
   onRefreshProject: () => void;
 }
@@ -26,6 +27,7 @@ export function ProjectView({
   onLayoutChange,
   onSplitRatioChange,
   onSave,
+  onOpenNodeLink,
   onInitProject,
   onRefreshProject,
 }: Props) {
@@ -135,6 +137,7 @@ export function ProjectView({
           splitRatio={splitRatio}
           onLayoutChange={onLayoutChange}
           onSplitRatioChange={onSplitRatioChange}
+          onOpenNodeLink={onOpenNodeLink}
         />
       </div>
     </div>

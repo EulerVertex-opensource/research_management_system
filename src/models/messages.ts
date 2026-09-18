@@ -1,4 +1,4 @@
-import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ManuscriptStatus } from './types';
+import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
 export type ExtensionMessage =
@@ -15,8 +15,8 @@ export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'getNodeContent'; id: string }
   | { type: 'saveNode'; id: string; frontmatter: NodeFrontmatter; body: string }
-  | { type: 'createNode'; nodeType: NodeType; title: string }
-  | { type: 'updateStatus'; id: string; status: NodeStatus }
+  | { type: 'createNode'; nodeType: NodeType; title: string; targetAsset?: string }
+  | { type: 'updateStatus'; id: string; status: ResearchStatus }
   | { type: 'getProjectMd' }
   | { type: 'saveProjectMd'; content: string }
   | { type: 'getPapers' }

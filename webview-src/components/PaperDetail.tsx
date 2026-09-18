@@ -47,9 +47,10 @@ interface Props {
   onSave: (originalSlug: string, newSlug: string, mdSection: string, bibEntry: string) => void;
   onOpenPdf: (slug: string) => void;
   sourcePdfDirectory: string;
+  onOpenNodeLink?: (href: string) => boolean;
 }
 
-export function PaperDetail({ paper, onSave, onOpenPdf, sourcePdfDirectory }: Props) {
+export function PaperDetail({ paper, onSave, onOpenPdf, sourcePdfDirectory, onOpenNodeLink }: Props) {
   const [localSlug, setLocalSlug] = useState(paper.slug);
   const [sourceUrl, setSourceUrl] = useState(() => parseSourceUrl(paper.mdSection));
   const [description, setDescription] = useState(() => parseDescription(paper.mdSection));
@@ -312,6 +313,7 @@ export function PaperDetail({ paper, onSave, onOpenPdf, sourcePdfDirectory }: Pr
           ) : description ? (
             <MarkdownPreview
               content={description}
+              onOpenNodeLink={onOpenNodeLink}
               style={{ padding: '8px 10px', border: '1px solid var(--vscode-panel-border)', borderRadius: 3, flex: 1 }}
             />
           ) : (

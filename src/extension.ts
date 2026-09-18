@@ -17,6 +17,9 @@ export function activate(context: vscode.ExtensionContext): void {
   output.appendLine(`[activate] Extension ${context.extension.packageJSON.version ?? 'unknown'} loaded.`);
   output.appendLine(`[activate] Workspace: ${workspaceRoot.fsPath}`);
   provider = new WebviewProvider(context, workspaceRoot, output);
+  void provider.start().catch((error: unknown) => {
+    output.appendLine(`[startup] Failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 
   const openDashboard = vscode.commands.registerCommand(
     'research-assistant.openDashboard',
@@ -49,5 +52,6 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
+  provider?.dispose();
   provider = undefined;
 }

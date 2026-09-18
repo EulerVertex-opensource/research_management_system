@@ -1,31 +1,42 @@
-import React, { useState } from 'react';
-import { ResearchNode, NodeStatus } from '../../src/models/types';
+import React, { useEffect, useState } from 'react';
+import { ResearchNode, ResearchStatus } from '../../src/models/types';
 import { StatusBadge } from './StatusBadge';
 
 interface Props {
   nodes: ResearchNode[];
   selectedId: string | null;
   onSelect: (node: ResearchNode) => void;
-  filterType?: string; // 'idea' | asset types | undefined = all
+  filterType?: string; // 'idea' | 'plan' | asset types | undefined = all
+  definitionPath?: string;
 }
 
-const STATUS_ORDER: NodeStatus[] = ['approved', 'draft', 'deprecated', 'archived'];
+const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'approved', 'draft', 'deprecated', 'archived'];
 
-export function NodeList({ nodes, selectedId, onSelect, filterType }: Props) {
+export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions' }: Props) {
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<NodeStatus | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<ResearchStatus | 'record' | 'all'>('all');
+  useEffect(() => setStatusFilter('all'), [filterType]);
 
   const filtered = nodes.filter((n) => {
+    const isDefinition = n.filePath.startsWith(`${definitionPath}/`);
     if (filterType === 'idea' && n.type !== 'idea') return false;
-    if (filterType === 'asset' && n.type === 'idea') return false;
-    if (statusFilter !== 'all' && n.status !== statusFilter) return false;
+    if (filterType === 'plan' && n.type !== 'plan' && n.type !== 'proof_record') return false;
+    if (filterType === 'definition' && !isDefinition) return false;
+    if (filterType === 'asset' && (n.type === 'idea' || n.type === 'plan' || n.type === 'proof_record' || isDefinition)) return false;
+    if (statusFilter !== 'all' && (statusFilter === 'record' ? n.type !== 'proof_record' : n.status !== statusFilter)) return false;
     if (search && !n.title.toLowerCase().includes(search.toLowerCase()) && !n.tags.join(' ').toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
 
   const sorted = [...filtered].sort((a, b) => {
-    const sa = STATUS_ORDER.indexOf(a.status);
-    const sb = STATUS_ORDER.indexOf(b.status);
+    if (filterType === 'asset' || filterType === 'definition') {
+      const orderA = /^(\d{3,})\. /.exec(a.title);
+      const orderB = /^(\d{3,})\. /.exec(b.title);
+      if (orderA && orderB) return Number(orderA[1]) - Number(orderB[1]) || a.id.localeCompare(b.id);
+      if (orderA || orderB) return orderA ? -1 : 1;
+    }
+    const sa = a.status ? STATUS_ORDER.indexOf(a.status) : STATUS_ORDER.length;
+    const sb = b.status ? STATUS_ORDER.indexOf(b.status) : STATUS_ORDER.length;
     if (sa !== sb) return sa - sb;
     return a.title.localeCompare(b.title);
   });
@@ -50,7 +61,7 @@ export function NodeList({ nodes, selectedId, onSelect, filterType }: Props) {
         />
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as NodeStatus | 'all')}
+          onChange={(e) => setStatusFilter(e.target.value as ResearchStatus | 'record' | 'all')}
           style={{
             padding: '4px 6px',
             background: 'var(--vscode-dropdown-background)',
@@ -61,10 +72,14 @@ export function NodeList({ nodes, selectedId, onSelect, filterType }: Props) {
           }}
         >
           <option value="all">All status</option>
-          <option value="approved">Approved</option>
-          <option value="draft">Draft</option>
-          <option value="deprecated">Deprecated</option>
-          <option value="archived">Archived</option>
+          {filterType === 'idea' ? <>
+            <option value="draft">Draft</option><option value="archived">Archived</option>
+          </> : filterType === 'plan' ? <>
+            <option value="pending">Pending</option><option value="failed">Failed</option><option value="record">Proof records</option>
+          </> : <>
+            <option value="approved">Approved</option><option value="draft">Draft</option>
+            <option value="deprecated">Deprecated</option><option value="archived">Archived</option>
+          </>}
         </select>
       </div>
 
@@ -93,9 +108,9 @@ export function NodeList({ nodes, selectedId, onSelect, filterType }: Props) {
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
               <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                {node.type}
+                {node.type === 'idea' ? 'idea' : node.type === 'plan' ? 'plan' : node.type}
               </span>
-              <StatusBadge status={node.status} />
+              {node.status && <StatusBadge status={node.status} />}
             </div>
             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>{node.title}</div>
             {node.tags.length > 0 && (

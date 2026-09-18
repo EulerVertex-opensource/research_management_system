@@ -49,6 +49,42 @@ export class SkillInstallerService {
           )
         )
       );
+      if (skillName === 'order-assets' || skillName === 'order-definitions') {
+        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'order-assets.cjs'));
+        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
+          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
+          await vscode.workspace.fs.createDirectory(destination);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, skillName === 'order-assets' ? 'order-assets.cjs' : 'order-definitions.cjs'), script);
+        }));
+      }
+      if (skillName === 'extract-definitions') {
+        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'migrate-definitions.cjs'));
+        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
+          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
+          await vscode.workspace.fs.createDirectory(destination);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'migrate-definitions.cjs'), script);
+        }));
+      }
+      if (skillName === 'link-research-nodes') {
+        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'link-research-nodes.cjs'));
+        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
+          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
+          await vscode.workspace.fs.createDirectory(destination);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'link-research-nodes.cjs'), script);
+        }));
+      }
+      if (skillName === 'convert-proof-ideas') {
+        const [script, migration] = await Promise.all([
+          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'sync-proof-ideas.cjs')),
+          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'migrate-idea-plans.cjs')),
+        ]);
+        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
+          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
+          await vscode.workspace.fs.createDirectory(destination);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'sync-proof-ideas.cjs'), script);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'migrate-idea-plans.cjs'), migration);
+        }));
+      }
     }
   }
 

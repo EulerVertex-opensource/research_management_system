@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { NodeFrontmatter, NodeType, NodeStatus, NodeSource, LayoutMode, ResearchNode, PaperEntry } from '../../src/models/types';
+import { NodeFrontmatter, NodeType, NodeStatus, IdeaStatus, NodeSource, LayoutMode, ResearchNode, PaperEntry } from '../../src/models/types';
 import { MarkdownEditor } from './MarkdownEditor';
 import { PaperIdInput } from './PaperIdInput';
 import { NodeTagInput } from './NodeTagInput';
 
 const ASSET_TYPES: NodeType[] = [
-  'theorem', 'lemma', 'proposition', 'definition',
+  'theorem', 'lemma', 'proposition',
   'example', 'construction', 'remark',
 ];
 const STATUS_OPTIONS: NodeStatus[] = ['draft', 'approved', 'deprecated', 'archived'];
+const IDEA_STATUS_OPTIONS: IdeaStatus[] = ['pending', 'failed'];
 const SOURCE_KINDS: NodeSource['kind'][] = ['paper', 'self_proved'];
 
 interface Props {
@@ -19,6 +20,7 @@ interface Props {
   splitRatio: number;
   metadataHeight: number;
   allNodes: ResearchNode[];
+  definitionPath: string;
   allPapers: PaperEntry[];
   sourcePdfDirectory: string;
   onLayoutChange: (mode: LayoutMode) => void;
@@ -27,6 +29,8 @@ interface Props {
   onSave: (id: string, frontmatter: NodeFrontmatter, body: string) => void;
   onOpenInEditor: () => void;
   onOpenPdf: (slug: string) => void;
+  onNavigateNode: (node: ResearchNode) => void;
+  onOpenNodeLink: (href: string) => boolean;
 }
 
 export function NodeDetail({
@@ -37,6 +41,7 @@ export function NodeDetail({
   splitRatio,
   metadataHeight,
   allNodes,
+  definitionPath,
   allPapers,
   sourcePdfDirectory,
   onLayoutChange,
@@ -45,7 +50,12 @@ export function NodeDetail({
   onSave,
   onOpenInEditor,
   onOpenPdf,
+  onNavigateNode,
+  onOpenNodeLink,
 }: Props) {
+  const isDefinition = initialFm.type === 'definition';
+  const definitions = allNodes.filter((node) => node.filePath.startsWith(`${definitionPath}/`));
+  const assets = allNodes.filter((node) => ASSET_TYPES.includes(node.type) && !node.filePath.startsWith(`${definitionPath}/`));
   const [fm, setFm] = useState<NodeFrontmatter>(initialFm);
   const [body, setBody] = useState(initialBody);
   const [dirty, setDirty] = useState(false);
@@ -139,6 +149,9 @@ export function NodeDetail({
   }, [onMetadataHeightChange]);
 
   const isIdea = fm.type === 'idea';
+  const isPlan = fm.type === 'plan';
+  const isProofFile = isIdea || isPlan || fm.type === 'proof_record';
+  const ideas = allNodes.filter((node) => node.type === 'idea');
   const isPaperSource = fm.source?.kind === 'paper';
 
   const inp: React.CSSProperties = {
@@ -177,20 +190,20 @@ export function NodeDetail({
         <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
           <div style={{ flex: 1 }}>
             <label style={lbl}>Type</label>
-            {isIdea ? (
-              <div style={{ ...inp, opacity: 0.55, cursor: 'default' }}>idea</div>
+            {isProofFile || isDefinition ? (
+              <div style={{ ...inp, opacity: 0.55, cursor: 'default' }}>{fm.type}</div>
             ) : (
               <select value={fm.type} onChange={(e) => update('type', e.target.value as NodeType)} style={inp}>
                 {ASSET_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
             )}
           </div>
-          <div style={{ flex: 1 }}>
+          {fm.type !== 'proof_record' && <div style={{ flex: 1 }}>
             <label style={lbl}>Status</label>
-            <select value={fm.status} onChange={(e) => update('status', e.target.value as NodeStatus)} style={inp}>
-              {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+            <select value={fm.status ?? ''} onChange={(e) => update('status', e.target.value as NodeStatus | IdeaStatus)} style={inp}>
+              {(isIdea ? ['draft', 'archived'] : isPlan ? IDEA_STATUS_OPTIONS : STATUS_OPTIONS).map((s) => <option key={s} value={s} disabled={s === 'failed' && !/^## Failure\s*\n\s*\S/m.test(body)}>{s}</option>)}
             </select>
-          </div>
+          </div>}
         </div>
 
         {/* Tags */}
@@ -205,7 +218,7 @@ export function NodeDetail({
         </div>
 
         {/* Asset fields */}
-        {!isIdea && (
+        {!isProofFile && (
           <>
             {/* Source kind + location row */}
             <div style={{ marginBottom: 4 }}>
@@ -250,34 +263,53 @@ export function NodeDetail({
               <NodeTagInput
                 values={fm.depends_on}
                 onChange={(v) => update('depends_on', v)}
-                nodes={allNodes}
+                nodes={isDefinition ? definitions : assets}
                 excludeId={id}
+                onNavigateNode={onNavigateNode}
               />
             </div>
 
+            {!isDefinition && (
+              <div style={{ marginBottom: 8 }}>
+                <label style={lbl}>Uses definitions</label>
+                <NodeTagInput values={fm.uses_definitions} onChange={(v) => update('uses_definitions', v)} nodes={definitions} onNavigateNode={onNavigateNode} />
+              </div>
+            )}
+
             {/* Used in */}
-            <div>
+            {!isDefinition && <div>
               <label style={lbl}>Used in</label>
               <NodeTagInput
                 values={fm.used_in}
                 onChange={(v) => update('used_in', v)}
                 nodes={allNodes}
                 excludeId={id}
+                onNavigateNode={onNavigateNode}
               />
-            </div>
+            </div>}
           </>
         )}
 
-        {/* Idea: related assets */}
-        {isIdea && (
+        {isIdea && <div>
+          <label style={lbl}>Related assets (optional)</label>
+          <NodeTagInput values={fm.related_assets} onChange={(v) => update('related_assets', v)} nodes={assets} onNavigateNode={onNavigateNode} />
+        </div>}
+
+        {(isPlan || fm.type === 'proof_record') && (
           <div>
-            <label style={lbl}>Related assets</label>
-            <NodeTagInput
-              values={fm.related_assets}
-              onChange={(v) => update('related_assets', v)}
-              nodes={allNodes}
-              excludeId={id}
-            />
+            <label style={lbl}>Target asset</label>
+            <select value={fm.target_asset ?? ''} onChange={(e) => update('target_asset', e.target.value)} style={inp}>
+              <option value="">Choose an asset</option>
+              {assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.title}</option>)}
+            </select>
+            {fm.target_asset && <button type="button" onClick={() => { const asset = assets.find((n) => n.id === fm.target_asset); if (asset) onNavigateNode(asset); }}>Open target asset</button>}
+            <label style={lbl}>Inspired by ideas (optional)</label>
+            <NodeTagInput values={fm.inspired_by ?? []} onChange={(v) => update('inspired_by', v)} nodes={ideas} onNavigateNode={onNavigateNode} />
+            {isPlan && <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>Add a Failure section with the obstruction before choosing failed. After putting a successful proof in the asset, add an Outcome section to convert this attempt to a proof record.</div>}
+            {isPlan && <button type="button" disabled={!/^## Outcome\s*\n\s*\S/m.test(body)} title="Add an Outcome section after incorporating the proof into the asset" onClick={() => {
+              setFm((current) => ({ ...current, type: 'proof_record', status: undefined }));
+              setDirty(true);
+            }}>Convert to proof record after adding proof to asset</button>}
           </div>
         )}
       </div>
@@ -331,6 +363,7 @@ export function NodeDetail({
       <div style={{ flex: 1, overflow: 'hidden' }}>
         <MarkdownEditor
           value={body}
+          onOpenNodeLink={onOpenNodeLink}
           onChange={(v) => { setBody(v); setDirty(true); }}
           layoutMode={layoutMode}
           splitRatio={splitRatio}

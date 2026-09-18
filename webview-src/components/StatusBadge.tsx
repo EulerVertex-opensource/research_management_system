@@ -1,15 +1,17 @@
 import React from 'react';
-import { NodeStatus } from '../../src/models/types';
+import { ResearchStatus } from '../../src/models/types';
 
-const COLORS: Record<NodeStatus, string> = {
+const COLORS: Record<ResearchStatus, string> = {
   draft: '#6c757d',
   approved: '#28a745',
   deprecated: '#dc3545',
   archived: '#856404',
+  pending: '#6c757d',
+  failed: '#dc3545',
 };
 
 interface Props {
-  status: NodeStatus;
+  status: ResearchStatus;
 }
 
 export function StatusBadge({ status }: Props) {

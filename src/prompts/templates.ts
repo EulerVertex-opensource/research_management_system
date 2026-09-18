@@ -12,15 +12,16 @@ export const RESEARCH_WORKFLOWS: Record<string, ResearchWorkflow> = {
   extract_theorems: {
     label: 'Extract theorem nodes from paper notes',
     purpose: 'Turn a paper transcription or notes into provenance-preserving draft research nodes.',
-    instructions: `From the notes or paper excerpt below, extract all theorem-like results (theorems, lemmas, propositions, definitions, examples).
+    instructions: `From the notes or paper excerpt below, extract theorem-like results (theorems, lemmas, propositions, examples). Put important definitions in separate definition files.
 
 For each result, provide:
 - Suggested node id (snake_case, descriptive)
-- Type: theorem | lemma | proposition | definition | example
+- Type: theorem | lemma | proposition | example
 - Title
 - Statement (verbatim or paraphrased)
 - Source: theorem number or location in the paper
 - Dependencies (other results this relies on, if known)
+- Definition IDs used, if known
 - Suggested tags (mathematical area keywords)
 - Status: draft
 
@@ -52,7 +53,7 @@ Section topic:
 
 Rules:
 1. Follow all configured macro and preamble files — do not introduce new \\newcommand without checking them.
-2. Follow the configured notation file when present — do not change notation silently.
+2. Follow linked approved definitions first, then the configured notation file when present — do not change notation silently.
 3. Use the theorem and proof environments defined by the project.
 4. Reference theorems by their node id in a comment: % [node_id]
 5. Mark unclear steps with % TODO.
@@ -64,12 +65,12 @@ Section to draft:
   check_notation: {
     label: 'Check notation consistency',
     purpose: 'Find undefined or inconsistent mathematical notation.',
-    instructions: `Compare the LaTeX content below against the configured notation file provided in context.
+    instructions: `Compare the LaTeX content below against linked approved definitions first, then configured macros and the notation file provided in context.
 
 Report:
-1. Any notation used in the LaTeX that is not defined in the configured notation file
+1. Any notation used in the LaTeX that is not defined locally or by an approved definition
 2. Any notation used inconsistently (same symbol for different things, or different symbols for the same thing)
-3. Suggested additions to the configured notation file
+3. Missing definition links or conflicts with the configured notation file
 
 LaTeX content to check:
 `,

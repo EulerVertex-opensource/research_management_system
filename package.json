@@ -4,13 +4,17 @@
   "description": "Shared AI-assisted mathematical research context for Overleaf Git projects in VS Code",
   "version": "0.0.3",
   "publisher": "tianhao",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TianhaoW/research_management_system.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -31,6 +35,7 @@
   "scripts": {
     "build": "node esbuild.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "test:asset-order": "npm run build && node --test tests/*.test.cjs",
     "watch": "node esbuild.js --watch",
     "vscode:prepublish": "node esbuild.js"
   },
@@ -40,12 +45,14 @@
     "katex": "^0.17.0",
     "marked": "^18.0.4",
     "pdfjs-dist": "^4.10.38",
+    "remark-parse": "^11.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "unified": "^11.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

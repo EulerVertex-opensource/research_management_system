@@ -11,6 +11,7 @@ import { PaperDetail } from './components/PaperDetail';
 import { AddPaperButton } from './components/AddPaperButton';
 import { CreateNodeModal } from './components/CreateNodeModal';
 import { ManuscriptView } from './components/ManuscriptView';
+import { resolvePaperPdfLink, resolveResearchNodeLink } from './researchLinks';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -170,6 +171,33 @@ export function App() {
     send({ type: 'getNodeContent', id: node.id });
   };
 
+  const handleNavigateNode = (node: ResearchNode) => {
+    const view: SidebarView = node.type === 'idea' ? 'ideas' : node.type === 'plan' || node.type === 'proof_record' ? 'plans'
+      : node.filePath.startsWith(`${state.paths?.definitions ?? 'research/definitions'}/`) ? 'definitions' : 'assets';
+    dispatch({ type: 'SET_VIEW', view });
+    dispatch({ type: 'SELECT_NODE', id: node.id });
+    send({ type: 'getNodeContent', id: node.id });
+  };
+
+  const handleOpenResearchLink = (sourcePath: string, href: string): boolean => {
+    if (/\.pdf(?:[?#]|$)/i.test(href)) {
+      const pdfPath = resolvePaperPdfLink(sourcePath, href, state.paths?.localSourcePdfs ?? 'research-local/raw_papers');
+      if (pdfPath) {
+        send({ type: 'openFile', filePath: pdfPath });
+      } else {
+        dispatch({ type: 'SET_ERROR', message: `Paper PDF link must point directly into the configured local PDF folder: ${href}` });
+      }
+      return true;
+    }
+    const target = resolveResearchNodeLink(sourcePath, href, state.nodes);
+    if (target) {
+      handleNavigateNode(target);
+      return true;
+    }
+    dispatch({ type: 'SET_ERROR', message: `Research link target not found: ${href}` });
+    return true;
+  };
+
   const handleSaveNode = (id: string, frontmatter: NodeFrontmatter, body: string) => {
     send({ type: 'saveNode', id, frontmatter, body });
   };
@@ -178,8 +206,8 @@ export function App() {
     send({ type: 'saveProjectMd', content });
   };
 
-  const handleCreateNode = (nodeType: NodeType, title: string) => {
-    send({ type: 'createNode', nodeType, title });
+  const handleCreateNode = (nodeType: NodeType, title: string, targetAsset?: string) => {
+    send({ type: 'createNode', nodeType, title, targetAsset });
     dispatch({ type: 'TOGGLE_CREATE_MODAL' });
   };
 
@@ -252,9 +280,11 @@ export function App() {
 
   const filterType =
     state.activeView === 'assets' ? 'asset' :
-    state.activeView === 'ideas' ? 'idea' : undefined;
+    state.activeView === 'definitions' ? 'definition' :
+    state.activeView === 'ideas' ? 'idea' :
+    state.activeView === 'plans' ? 'plan' : undefined;
 
-  const showNodeList = state.activeView === 'assets' || state.activeView === 'ideas';
+  const showNodeList = state.activeView === 'assets' || state.activeView === 'definitions' || state.activeView === 'ideas' || state.activeView === 'plans';
   const showPaperList = state.activeView === 'papers';
   const showListColumn = showNodeList || showPaperList;
 
@@ -284,7 +314,7 @@ export function App() {
                 }}
               >
                 <span style={{ fontWeight: 600, fontSize: 13 }}>
-                  {state.activeView === 'assets' ? 'Assets' : state.activeView === 'ideas' ? 'Ideas' : 'Papers'}
+                  {state.activeView === 'assets' ? 'Assets' : state.activeView === 'definitions' ? 'Definitions' : state.activeView === 'ideas' ? 'Ideas' : state.activeView === 'plans' ? 'Plans' : 'Papers'}
                 </span>
                 {showNodeList && (
                   <button
@@ -307,6 +337,7 @@ export function App() {
                   selectedId={state.selectedNodeId}
                   onSelect={handleSelectNode}
                   filterType={filterType}
+                  definitionPath={state.paths?.definitions ?? 'research/definitions'}
                 />
               )}
               {showPaperList && (
@@ -348,6 +379,7 @@ export function App() {
               onLayoutChange={handleLayoutChange}
               onSplitRatioChange={handleSplitRatioChange}
               onSave={handleSaveProjectMd}
+              onOpenNodeLink={(href) => handleOpenResearchLink(state.paths?.projectMd ?? 'research/project.md', href)}
               onInitProject={() => send({ type: 'initProject' })}
               onRefreshProject={() => send({ type: 'refreshProject' })}
             />
@@ -359,6 +391,7 @@ export function App() {
                 onSave={handleSavePaper}
                 onOpenPdf={handleOpenPdf}
                 sourcePdfDirectory={state.paths?.localSourcePdfs ?? 'research-local/raw_papers'}
+                onOpenNodeLink={(href) => handleOpenResearchLink(state.paths?.paperIndex ?? 'research/papers.md', href)}
               />
             ) : (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>
@@ -376,6 +409,7 @@ export function App() {
                 splitRatio={splitRatio}
                 metadataHeight={metadataHeight}
                 allNodes={state.nodes}
+                definitionPath={state.paths?.definitions ?? 'research/definitions'}
                 allPapers={state.papers}
                 sourcePdfDirectory={state.paths?.localSourcePdfs ?? 'research-local/raw_papers'}
                 onLayoutChange={handleLayoutChange}
@@ -384,6 +418,8 @@ export function App() {
                 onSave={handleSaveNode}
                 onOpenInEditor={handleOpenInEditor}
                 onOpenPdf={handleOpenPdf}
+                onNavigateNode={handleNavigateNode}
+                onOpenNodeLink={(href) => handleOpenResearchLink(selectedNode.filePath, href)}
               />
             ) : selectedNode ? (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Loading…</div>
@@ -406,10 +442,15 @@ export function App() {
 
       {state.showCreateModal && (
         <CreateNodeModal
+          assets={state.nodes.filter((node) => ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark'].includes(node.type) && node.filePath.startsWith(`${state.paths?.assets ?? 'research/assets'}/`))}
           allowedTypes={
             state.activeView === 'ideas'
               ? ['idea']
-              : ['theorem', 'lemma', 'proposition', 'definition', 'example', 'construction', 'remark']
+              : state.activeView === 'plans'
+                ? ['plan']
+              : state.activeView === 'definitions'
+                ? ['definition']
+                : ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark']
           }
           onConfirm={handleCreateNode}
           onCancel={() => dispatch({ type: 'TOGGLE_CREATE_MODAL' })}

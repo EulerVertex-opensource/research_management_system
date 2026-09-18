@@ -35,8 +35,10 @@ overleaf-project/
     README.md                     ← generated locally; ignored
     project.md                     ← problem, goals, known results, open questions
     papers.md                      ← paper index keyed by BibTeX slug
-    assets/                        ← theorem/lemma/definition/etc. nodes
-    ideas/                         ← idea nodes
+    assets/                        ← theorem/lemma/etc. nodes
+    definitions/                   ← definitions and their notation
+    ideas/                         ← freeform research ideas
+    plans/                         ← executable plans and proof records
     papers/<slug>/                 ← shared metadata and working transcriptions
 
   research-local/                  ← local only; ignored by Git
@@ -61,7 +63,7 @@ Commit these files:
 
 - LaTeX, BibTeX, figures required by the manuscript, and project-specific class/style files.
 - `.research-assistant.json` and the managed `.gitignore`.
-- Authored research files: `research/project.md`, `research/papers.md`, nodes in `research/assets/` and `research/ideas/`, and metadata/transcriptions in `research/papers/`.
+- Authored research files: `research/project.md`, `research/papers.md`, nodes in `research/assets/`, `research/definitions/`, `research/ideas/`, and `research/plans/`, and metadata/transcriptions in `research/papers/`.
 - Project skills under `.agents/skills/` or `.claude/skills/` whose names do not match an extension-bundled skill.
 
 Do not normally commit:
@@ -116,7 +118,9 @@ The default generated `.research-assistant.json` is:
     "project": "research/project.md",
     "paperIndex": "research/papers.md",
     "assets": "research/assets",
+    "definitions": "research/definitions",
     "ideas": "research/ideas",
+    "plans": "research/plans",
     "papers": "research/papers",
     "localSourcePdfs": "research-local/raw_papers"
   }
@@ -125,7 +129,7 @@ The default generated `.research-assistant.json` is:
 
 All paths must remain within the workspace. LaTeX paths are relative to `latex.projectRoot`; research paths are workspace-relative. Macro files may be an empty array and `notations` may be `null` for projects without dedicated files.
 
-Existing workspaces using `manuscript/`, root `assets/`, root `ideas/`, and `raw_papers/` are detected as `legacy` and continue to work without moving files.
+Existing workspaces using `manuscript/`, root `assets/`, root `ideas/`, and `raw_papers/` are detected as `legacy`. Their plans folder defaults to root `plans/`. Existing plans in `ideas/` remain readable until migrated.
 
 ## Local manuscript build and preview
 
@@ -156,11 +160,13 @@ Overleaf still compiles the tracked source independently. Do not push `.latex-ou
 |---|---|
 | **Project** | Edit and preview the configured project description; initialize or refresh shared setup |
 | **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
-| **Assets** | Browse and edit theorem, lemma, proposition, definition, example, construction, and remark nodes |
-| **Ideas** | Browse and edit research ideas |
+| **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and remark nodes |
+| **Definitions** | Browse and edit dependency ordered definitions and their notation |
+| **Ideas** | Browse and edit freeform research ideas |
+| **Plans** | Browse and edit executable proof plans and retained proof records |
 | **Manuscript** | Compile the configured main TeX file and read the generated PDF inside Research Assistant |
 
-Node changes are reflected live. New or materially changed nodes remain `draft`; only a researcher should promote them to `approved`.
+Node changes are reflected live. New or materially changed assets and definitions remain `draft`; only a researcher should promote them to `approved`. New directions start `draft`, and new proof plans start `pending`.
 
 ## Node format
 
@@ -177,6 +183,8 @@ source:
   location: Theorem 3.1
 depends_on:
   - frobenius_conjugacy_class
+uses_definitions:
+  - subgroup
 used_in:
   - main_counting_argument
 tags:
@@ -190,7 +198,46 @@ $$
 $$
 ```
 
-Ideas always use `type: idea` and may reference `related_assets`. Source kinds are `paper` and `self_proved`. Relationship values are exact filenames without `.md`.
+A `type: idea` file in `research/ideas/` is a freeform intuition, possible approach, gap, or test case. It uses `status: draft` or `archived` and can name zero or more `related_assets`; it needs no checklist or target asset. A `type: plan` file in `research/plans/` uses `status: pending` or `failed`, one `target_asset`, and optional `inspired_by` idea IDs. Its body has `## Goal`, `## Plan` with ordered checkboxes (`1. [ ] ...`), and `## Verification`; a failed plan also explains the obstruction under `## Failure`. Failure of one approach does not declare the asset false.
+
+```yaml
+---
+type: plan
+title: Prove the bound by induction
+status: pending
+target_asset: main_bound
+inspired_by: []
+tags: [induction]
+---
+```
+
+A direction keeps its prose freeform and may have no related assets:
+
+```yaml
+---
+type: idea
+title: Explore prelimit toral collapse
+status: draft
+related_assets: [cfg_nilpotent_killing_structure, local_to_global_kernel_separation]
+tags: [collapse, holonomy]
+---
+```
+
+Create a new proof plan when an idea becomes actionable; keep the original idea. The plan can cite several origins through `inspired_by`. Assets list pending and failed proof plans, proof records, and draft and archived ideas separately. Ideas get a managed Markdown list linking back to their related assets, and plans link to their target and inspiring ideas. When a plan succeeds, incorporate its proof in the asset and change the retained plan file to status-free `type: proof_record` with an `## Outcome`, preserving its target and origins. Asset approval is a separate researcher decision.
+
+Use the bundled `convert-proof-ideas` skill to classify legacy files conservatively and preserve their mathematical content. Existing files with `target_asset` and `pending` or `failed` status are recognized as plans before conversion. After refreshing project setup, preview the folder migration with `node .agents/skills/convert-proof-ideas/scripts/migrate-idea-plans.cjs --preview`, then run it with `--apply` after reviewing the moves. It converts legacy types, moves plans into the configured plans folder, rebases relative Markdown links, and rebuilds managed sections. To refresh links later, use `node .agents/skills/convert-proof-ideas/scripts/sync-proof-ideas.cjs --apply`. The extension also updates managed links when idea or plan files change.
+
+Definitions live in `research/definitions/<id>.md`, one concept per file. A definition has `type: definition`, a title such as `001. Definition (subgroup)`, `status`, `depends_on` listing other definition IDs, optional source and tags, and a Markdown body with its statement and notation. Asset `depends_on` lists assets; `uses_definitions` lists definitions. Approved definitions are the primary source for notation checks; `notations.tex` remains a supplementary LaTeX reference.
+
+Definition titles are reordered when definition files change. After refreshing project setup, use `node .agents/skills/order-definitions/scripts/order-definitions.cjs --definitions --preview` to inspect their dependency order and `--apply` to update titles manually.
+
+Asset and definition bodies can link verified prose mentions with ordinary relative Markdown links. For example, an asset can link the term `subgroup` to `../definitions/subgroup.md` and `Subgroup Lemma` to `./subgroup_lemma.md`. The dashboard opens these links in the corresponding node tab, and relationship ID chips are clickable. After refreshing project setup, run `node .agents/skills/link-research-nodes/scripts/link-research-nodes.cjs --preview` to inspect a backfill across assets and definitions, then use `--apply` for the reviewed changes. Add `--file research/assets/<id>.md` to limit a run to one node. The linker skips math, code, headings, existing links, and ambiguous matches; it reports mentions without a verified relationship ID for review. Agents run this step after creating or materially revising nodes. The extension does not rewrite body links on every file change.
+
+Markdown can also link to a local paper PDF. From `research/assets/theorem.md`, use a Markdown link with text `source paper` and target `../../research-local/raw_papers/lang_weil.pdf` to open the PDF in VS Code's viewer when clicked in the dashboard preview. The path is relative to the Markdown file; use the configured `localSourcePdfs` folder if it differs from the default. PDFs stay local and ignored by Git. Links must point directly to a PDF in that folder; missing files show an error in the dashboard.
+
+After refreshing project setup, preview migration of older `type: definition` files from assets with `node .agents/skills/extract-definitions/scripts/migrate-definitions.cjs --preview`. Inspect the reported moves, converted links, and review items, then run `--apply`. The command preserves approval status and stops on collisions or dependencies it cannot map safely. New extracted definitions start as drafts. Agents run `check-notation` when they create or materially revise assets; ordinary dashboard edits do not launch an automatic language model review.
+
+Draft and approved asset titles are numbered in dependency order using `depends_on` (for example, `001. Chebotarev Density Theorem`). Filenames remain stable IDs. The Assets panel displays numbered results in that order, and the extension watches asset files after VS Code startup, including when the dashboard is closed. Missing IDs, cycles, or dependencies on deprecated or archived assets stop ordering and are reported in the Research Assistant output. To preview or apply the same ordering from a project root, use `node .agents/skills/order-assets/scripts/order-assets.cjs --preview` or `--apply` after refreshing agent setup. The script reads the configured asset path from `.research-assistant.json`.
 
 ## Paper format
 
@@ -209,7 +256,7 @@ The local file line is shared as a convention, but the PDF itself is ignored by 
 
 ## AI setup
 
-The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The bundled skills cover paper import, theorem extraction, section planning, LaTeX drafting, notation review, node search, and node summaries. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. The dashboard keeps its prompt templates for in-panel chat. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
+The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The bundled skills cover paper import, theorem and definition extraction, asset and definition ordering, proof idea conversion, research node interlinks, section planning, LaTeX drafting, notation review, node search, and node summaries. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. The dashboard keeps its prompt templates for in-panel chat. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
 
 Generated instructions are deliberately compact and deterministic. They point agents to canonical node and paper files instead of duplicating every node body, reducing Git noise and merge conflicts.
 

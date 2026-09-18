@@ -9,6 +9,7 @@ interface Props {
   splitRatio: number;
   onLayoutChange: (mode: LayoutMode) => void;
   onSplitRatioChange: (ratio: number) => void;
+  onOpenNodeLink?: (href: string) => boolean;
 }
 
 const MODES: LayoutMode[] = ['editor', 'split', 'preview'];
@@ -20,6 +21,7 @@ export function MarkdownEditor({
   splitRatio,
   onLayoutChange,
   onSplitRatioChange,
+  onOpenNodeLink,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +68,7 @@ export function MarkdownEditor({
   const previewPane = (
     <MarkdownPreview
       content={value}
+      onOpenNodeLink={onOpenNodeLink}
       style={{ height: '100%', overflow: 'auto', padding: '12px 18px' }}
     />
   );

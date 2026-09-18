@@ -6,9 +6,10 @@ interface Props {
   onChange: (values: string[]) => void;
   nodes: ResearchNode[];
   excludeId?: string;
+  onNavigateNode?: (node: ResearchNode) => void;
 }
 
-export function NodeTagInput({ values, onChange, nodes, excludeId }: Props) {
+export function NodeTagInput({ values, onChange, nodes, excludeId, onNavigateNode }: Props) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
 
@@ -87,9 +88,17 @@ export function NodeTagInput({ values, onChange, nodes, excludeId }: Props) {
                 flexShrink: 0,
               }}
             >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {id}
-              </span>
+              {valid && onNavigateNode ? (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={(e) => { e.stopPropagation(); onNavigateNode(node!); }}
+                  title={`Open ${node!.title}`}
+                  style={{ border: 'none', background: 'none', color: 'inherit', textDecoration: 'underline', cursor: 'pointer', padding: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >{id}</button>
+              ) : (
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{id}</span>
+              )}
               <button
                 onMouseDown={(e) => { e.preventDefault(); remove(id); }}
                 style={{

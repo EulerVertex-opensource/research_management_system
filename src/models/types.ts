@@ -6,9 +6,13 @@ export type NodeType =
   | 'example'
   | 'construction'
   | 'remark'
-  | 'idea';
+  | 'idea'
+  | 'plan'
+  | 'proof_record';
 
 export type NodeStatus = 'draft' | 'approved' | 'deprecated' | 'archived';
+export type IdeaStatus = 'pending' | 'failed';
+export type ResearchStatus = NodeStatus | IdeaStatus;
 
 export interface NodeSource {
   kind: 'paper' | 'self_proved' | 'textbook' | 'note';
@@ -19,12 +23,15 @@ export interface NodeSource {
 export interface NodeFrontmatter {
   type: NodeType;
   title: string;
-  status: NodeStatus;
+  status?: ResearchStatus;
   tags: string[];
   source?: NodeSource;
   depends_on: string[];
+  uses_definitions: string[];
   used_in: string[];
   related_assets: string[];
+  target_asset?: string;
+  inspired_by?: string[];
 }
 
 export interface ResearchNode {
@@ -32,12 +39,15 @@ export interface ResearchNode {
   filePath: string;
   type: NodeType;
   title: string;
-  status: NodeStatus;
+  status?: ResearchStatus;
   tags: string[];
   source?: NodeSource;
   depends_on: string[];
+  uses_definitions: string[];
   used_in: string[];
   related_assets: string[];
+  target_asset?: string;
+  inspired_by?: string[];
   body: string;
 }
 
@@ -81,7 +91,9 @@ export interface ResearchAssistantConfig {
     project: string;
     paperIndex: string;
     assets: string;
+    definitions: string;
     ideas: string;
+    plans: string;
     papers: string;
     localSourcePdfs: string;
   };
@@ -99,7 +111,9 @@ export interface ProjectPaths {
   projectMd: string;
   paperIndex: string;
   assets: string;
+  definitions: string;
   ideas: string;
+  plans: string;
   papers: string;
   localSourcePdfs: string;
 }
@@ -114,7 +128,9 @@ export interface ProjectPathSummary {
   projectMd: string;
   paperIndex: string;
   assets: string;
+  definitions: string;
   ideas: string;
+  plans: string;
   papers: string;
   localSourcePdfs: string;
 }

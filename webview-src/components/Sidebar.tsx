@@ -1,12 +1,14 @@
 import React from 'react';
 
-export type SidebarView = 'project' | 'papers' | 'assets' | 'ideas' | 'manuscript';
+export type SidebarView = 'project' | 'papers' | 'assets' | 'definitions' | 'ideas' | 'plans' | 'manuscript';
 
 const ITEMS: { id: SidebarView; label: string }[] = [
   { id: 'project', label: 'Project' },
   { id: 'papers', label: 'Papers' },
   { id: 'assets', label: 'Assets' },
+  { id: 'definitions', label: 'Definitions' },
   { id: 'ideas', label: 'Ideas' },
+  { id: 'plans', label: 'Plans' },
   { id: 'manuscript', label: 'Manuscript' },
 ];
 

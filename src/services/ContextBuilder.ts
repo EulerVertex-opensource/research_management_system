@@ -43,7 +43,7 @@ export class ContextBuilder {
     return nodes
       .map(
         (n) =>
-          `[${n.type.toUpperCase()}] ${n.title} (${n.status})\n${n.body.substring(0, 300)}${n.body.length > 300 ? '...' : ''}`
+          `[${n.type.toUpperCase()}] ${n.title}${n.status ? ` (${n.status})` : ''}\n${n.body.substring(0, 300)}${n.body.length > 300 ? '...' : ''}`
       )
       .join('\n\n');
   }

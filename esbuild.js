@@ -41,6 +41,51 @@ const webviewConfig = {
   },
 };
 
+const assetOrderCliConfig = {
+  entryPoints: ['src/cli/orderAssets.ts'],
+  bundle: true,
+  outfile: 'out/order-assets.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
+const definitionMigrationCliConfig = {
+  entryPoints: ['src/cli/migrateDefinitions.ts'],
+  bundle: true,
+  outfile: 'out/migrate-definitions.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
+const researchInterlinksCliConfig = {
+  entryPoints: ['src/cli/linkResearchNodes.ts'],
+  bundle: true,
+  outfile: 'out/link-research-nodes.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
+const proofIdeasCliConfig = {
+  entryPoints: ['src/cli/syncProofIdeas.ts'],
+  bundle: true,
+  outfile: 'out/sync-proof-ideas.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
+const ideaPlanMigrationCliConfig = {
+  entryPoints: ['src/cli/migrateIdeaPlans.ts'],
+  bundle: true,
+  outfile: 'out/migrate-idea-plans.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
 async function main() {
   await fs.mkdir(path.join('out', 'webview'), { recursive: true });
   await fs.copyFile(
@@ -52,16 +97,26 @@ async function main() {
     path.join('out', 'webview', 'PDFJS-LICENSE')
   );
   if (isWatch) {
-    const [extCtx, webCtx] = await Promise.all([
+    const [extCtx, webCtx, cliCtx, migrationCtx, interlinksCtx, proofIdeasCtx, ideaPlanMigrationCtx] = await Promise.all([
       esbuild.context(extensionConfig),
       esbuild.context(webviewConfig),
+      esbuild.context(assetOrderCliConfig),
+      esbuild.context(definitionMigrationCliConfig),
+      esbuild.context(researchInterlinksCliConfig),
+      esbuild.context(proofIdeasCliConfig),
+      esbuild.context(ideaPlanMigrationCliConfig),
     ]);
-    await Promise.all([extCtx.watch(), webCtx.watch()]);
+    await Promise.all([extCtx.watch(), webCtx.watch(), cliCtx.watch(), migrationCtx.watch(), interlinksCtx.watch(), proofIdeasCtx.watch(), ideaPlanMigrationCtx.watch()]);
     console.log('Watching for changes...');
   } else {
     await Promise.all([
       esbuild.build(extensionConfig),
       esbuild.build(webviewConfig),
+      esbuild.build(assetOrderCliConfig),
+      esbuild.build(definitionMigrationCliConfig),
+      esbuild.build(researchInterlinksCliConfig),
+      esbuild.build(proofIdeasCliConfig),
+      esbuild.build(ideaPlanMigrationCliConfig),
     ]);
     console.log('Build complete.');
   }

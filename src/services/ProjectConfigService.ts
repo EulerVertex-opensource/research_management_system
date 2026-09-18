@@ -12,7 +12,9 @@ const SHARED_RESEARCH_DEFAULTS: ResearchAssistantConfig['research'] = {
   project: 'research/project.md',
   paperIndex: 'research/papers.md',
   assets: 'research/assets',
+  definitions: 'research/definitions',
   ideas: 'research/ideas',
+  plans: 'research/plans',
   papers: 'research/papers',
   localSourcePdfs: 'research-local/raw_papers',
 };
@@ -22,7 +24,9 @@ const LEGACY_RESEARCH_DEFAULTS: ResearchAssistantConfig['research'] = {
   project: 'project.md',
   paperIndex: 'papers.md',
   assets: 'assets',
+  definitions: 'definitions',
   ideas: 'ideas',
+  plans: 'plans',
   papers: 'papers',
   localSourcePdfs: 'raw_papers',
 };
@@ -102,7 +106,9 @@ export class ProjectConfigService {
       projectMd: normalizeRelative(config.research.project, 'research/project.md'),
       paperIndex: normalizeRelative(config.research.paperIndex, 'research/papers.md'),
       assets: normalizeRelative(config.research.assets, 'research/assets'),
+      definitions: normalizeRelative(config.research.definitions, 'research/definitions'),
       ideas: normalizeRelative(config.research.ideas, 'research/ideas'),
+      plans: normalizeRelative(config.research.plans, path.posix.join(path.posix.dirname(config.research.ideas), 'plans')),
       papers: normalizeRelative(config.research.papers, 'research/papers'),
       localSourcePdfs: normalizeRelative(config.research.localSourcePdfs, 'research-local/raw_papers'),
     };
@@ -183,6 +189,7 @@ export class ProjectConfigService {
       : { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [] as string[], notations: null, sections: 'sections' };
     const latex = raw.latex ?? latexDefaults;
     const research = raw.research ?? researchDefaults;
+    const ideaPath = normalizeRelative(research.ideas, researchDefaults.ideas);
 
     return {
       version: 1,
@@ -204,7 +211,9 @@ export class ProjectConfigService {
         project: normalizeRelative(research.project, researchDefaults.project),
         paperIndex: normalizeRelative(research.paperIndex, researchDefaults.paperIndex),
         assets: normalizeRelative(research.assets, researchDefaults.assets),
-        ideas: normalizeRelative(research.ideas, researchDefaults.ideas),
+        definitions: normalizeRelative(research.definitions, researchDefaults.definitions),
+        ideas: ideaPath,
+        plans: normalizeRelative(research.plans, path.posix.join(path.posix.dirname(ideaPath), 'plans')),
         papers: normalizeRelative(research.papers, researchDefaults.papers),
         localSourcePdfs: normalizeRelative(research.localSourcePdfs, researchDefaults.localSourcePdfs),
       },

@@ -1,7 +1,8 @@
 import * as path from 'path';
 import matter from 'gray-matter';
-import { ResearchNode, NodeType, NodeStatus, NodeFrontmatter, ProjectPaths } from '../models/types';
+import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, ProjectPaths } from '../models/types';
 import { FileService } from './FileService';
+import { hasSectionContent, resolveIdeaType } from './ProofIdeas';
 
 const NODE_TEMPLATES: Record<string, string> = {
   theorem: `---
@@ -13,6 +14,7 @@ source:
   paper_id: ""
   location: ""
 depends_on: []
+uses_definitions: []
 tags: []
 used_in: []
 ---
@@ -28,6 +30,7 @@ source:
   paper_id: ""
   location: ""
 depends_on: []
+uses_definitions: []
 tags: []
 used_in: []
 ---
@@ -43,6 +46,7 @@ source:
   paper_id: ""
   location: ""
 depends_on: []
+uses_definitions: []
 tags: []
 used_in: []
 ---
@@ -51,18 +55,15 @@ Write the proposition statement here.
 `,
   definition: `---
 type: definition
-title: {title}
+title: "Definition ({title})"
 status: draft
 source:
-  kind: paper
-  paper_id: ""
-  location: ""
+  kind: self_proved
 depends_on: []
 tags: []
-used_in: []
 ---
 
-Write the definition here.
+Write the defining statement and the notation it introduces here.
 `,
   example: `---
 type: example
@@ -71,6 +72,7 @@ status: draft
 source:
   kind: self_proved
 depends_on: []
+uses_definitions: []
 tags: []
 used_in: []
 ---
@@ -84,6 +86,7 @@ status: draft
 source:
   kind: self_proved
 depends_on: []
+uses_definitions: []
 tags: []
 used_in: []
 ---
@@ -95,11 +98,35 @@ type: remark
 title: {title}
 status: draft
 depends_on: []
+uses_definitions: []
 tags: []
 used_in: []
 ---
 
 Write the remark here.
+`,
+  plan: `---
+type: plan
+title: {title}
+status: pending
+target_asset: {target_asset}
+inspired_by: []
+tags: []
+---
+
+## Goal
+
+Target: [asset]({target_link})
+
+Prove the claim stated in the target asset.
+
+## Plan
+
+1. [ ] Describe the first mathematical step.
+
+## Verification
+
+Explain how to check that the steps prove the asset's statement.
 `,
   idea: `---
 type: idea
@@ -109,10 +136,7 @@ related_assets: []
 tags: []
 ---
 
-Describe the idea here.
-
-Possible strategy:
-1. ...
+Describe the intuition, possible approach, open gap, or test case here.
 `,
 };
 
@@ -124,6 +148,8 @@ function slugify(title: string): string {
     .substring(0, 64);
 }
 
+const ASSET_TYPES = new Set<NodeType>(['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark']);
+
 function parseNode(relativePath: string, raw: string): ResearchNode | null {
   try {
     const { data, content } = matter(raw);
@@ -131,14 +157,17 @@ function parseNode(relativePath: string, raw: string): ResearchNode | null {
     return {
       id,
       filePath: relativePath,
-      type: (data.type as NodeType) ?? 'remark',
+      type: (resolveIdeaType(data) as NodeType | undefined) ?? (data.type as NodeType) ?? 'remark',
       title: data.title ?? id,
-      status: (data.status as NodeStatus) ?? 'draft',
+      status: data.type === 'proof_record' ? undefined : (data.status as ResearchStatus) ?? (resolveIdeaType(data) === 'plan' ? 'pending' : 'draft'),
       tags: Array.isArray(data.tags) ? data.tags : [],
       source: data.source,
       depends_on: Array.isArray(data.depends_on) ? data.depends_on : [],
+      uses_definitions: Array.isArray(data.uses_definitions) ? data.uses_definitions : [],
       used_in: Array.isArray(data.used_in) ? data.used_in : [],
       related_assets: Array.isArray(data.related_assets) ? data.related_assets : [],
+      target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
+      inspired_by: Array.isArray(data.inspired_by) ? data.inspired_by : [],
       body: content.trim(),
     };
   } catch {
@@ -158,9 +187,11 @@ export class NodeIndexService {
     this.nodes.clear();
 
     const assetPaths = await this.fileService.listFiles(this.paths.assets, '.md');
+    const definitionPaths = await this.fileService.listFiles(this.paths.definitions, '.md');
     const ideaPaths = await this.fileService.listFiles(this.paths.ideas, '.md');
+    const planPaths = await this.fileService.listFiles(this.paths.plans, '.md');
 
-    for (const filePath of [...assetPaths, ...ideaPaths]) {
+    for (const filePath of [...assetPaths, ...definitionPaths, ...ideaPaths, ...planPaths]) {
       try {
         const raw = await this.fileService.readFile(filePath);
         const node = parseNode(filePath, raw);
@@ -183,14 +214,25 @@ export class NodeIndexService {
     return this.nodes.get(id);
   }
 
-  async createNode(nodeType: NodeType, title: string): Promise<ResearchNode> {
-    const slug = slugify(title) || 'untitled';
-    const folder = nodeType === 'idea' ? this.paths.ideas : this.paths.assets;
+  async createNode(nodeType: NodeType, title: string, targetAsset?: string): Promise<ResearchNode> {
+    if (nodeType === 'proof_record') throw new Error('Proof records are created by converting successful plans.');
+    const concept = nodeType === 'definition' ? title.replace(/^Definition \((.*)\)$/, '$1') : title;
+    const slug = slugify(concept) || 'untitled';
+    const folder = nodeType === 'idea' ? this.paths.ideas : nodeType === 'plan' ? this.paths.plans : nodeType === 'definition' ? this.paths.definitions : this.paths.assets;
     const filename = `${slug}.md`;
     const relativePath = `${folder}/${filename}`;
+    if (this.nodes.has(slug) || await this.fileService.exists(relativePath)) {
+      throw new Error(`Node ID already exists: ${slug}`);
+    }
 
+    if (nodeType === 'plan' && (!targetAsset || !this.isTargetAsset(targetAsset))) {
+      throw new Error('Choose an existing target asset for the proof plan.');
+    }
     const template = NODE_TEMPLATES[nodeType] ?? NODE_TEMPLATES.remark;
-    const content = template.replace('{title}', title);
+    const targetLink = targetAsset ? path.posix.relative(path.posix.dirname(relativePath), `${this.paths.assets}/${targetAsset}.md`) : '';
+    const content = nodeType === 'definition'
+      ? template.replace('"Definition ({title})"', JSON.stringify(`Definition (${concept})`))
+      : template.replace('{title}', concept).replace(/\{target_link\}/g, targetLink.startsWith('.') ? targetLink : `./${targetLink}`).replace(/\{target_asset\}/g, targetAsset ?? '');
 
     await this.fileService.writeFile(relativePath, content);
 
@@ -200,7 +242,7 @@ export class NodeIndexService {
     return node;
   }
 
-  async updateStatus(id: string, status: NodeStatus): Promise<void> {
+  async updateStatus(id: string, status: ResearchStatus): Promise<void> {
     const node = this.nodes.get(id);
     if (!node) {
       throw new Error(`Node not found: ${id}`);
@@ -209,6 +251,13 @@ export class NodeIndexService {
     const raw = await this.fileService.readFile(node.filePath);
     const parsed = matter(raw);
 
+    if (node.type === 'proof_record') throw new Error('Proof records have no status.');
+    if (node.type === 'idea' ? !['draft', 'archived'].includes(status) : node.type === 'plan' ? !['pending', 'failed'].includes(status) : !['draft', 'approved', 'deprecated', 'archived'].includes(status)) {
+      throw new Error(`Invalid status ${status} for ${node.type}.`);
+    }
+    if (node.type === 'plan' && status === 'failed' && !hasSectionContent(parsed.content, 'Failure')) {
+      throw new Error('Failed plans need a Failure explanation.');
+    }
     parsed.data.status = status;
 
     // Rebuild the file: stringify frontmatter + preserve body
@@ -227,14 +276,17 @@ export class NodeIndexService {
     const { data, content } = matter(raw);
     return {
       frontmatter: {
-        type: (data.type as NodeType) ?? node.type,
+        type: node.type,
         title: data.title ?? node.title,
-        status: (data.status as NodeStatus) ?? node.status,
+        status: data.type === 'proof_record' ? undefined : (data.status as ResearchStatus) ?? node.status,
         tags: Array.isArray(data.tags) ? data.tags : [],
         source: data.source,
         depends_on: Array.isArray(data.depends_on) ? data.depends_on : [],
+        uses_definitions: Array.isArray(data.uses_definitions) ? data.uses_definitions : [],
         used_in: Array.isArray(data.used_in) ? data.used_in : [],
         related_assets: Array.isArray(data.related_assets) ? data.related_assets : [],
+        target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
+        inspired_by: Array.isArray(data.inspired_by) ? data.inspired_by : [],
       },
       body: content.trim(),
     };
@@ -246,10 +298,56 @@ export class NodeIndexService {
       throw new Error(`Node not found: ${id}`);
     }
     // matter.stringify(body, data) → produces "---\n<yaml>\n---\n<body>"
+    const data: Record<string, unknown> = { ...frontmatter };
+    delete data.kind;
+    if (frontmatter.type === 'idea') {
+      if (!['draft', 'archived'].includes(frontmatter.status ?? '')) throw new Error('Idea status must be draft or archived.');
+      delete data.target_asset;
+      delete data.inspired_by;
+      delete data.depends_on;
+      delete data.uses_definitions;
+      delete data.used_in;
+    } else if (frontmatter.type === 'plan' || frontmatter.type === 'proof_record') {
+      if (!frontmatter.target_asset || !this.isTargetAsset(frontmatter.target_asset)) {
+        throw new Error('Choose an existing target asset.');
+      }
+      if (frontmatter.type === 'plan' && !['pending', 'failed'].includes(frontmatter.status ?? '')) throw new Error('Proof plan status must be pending or failed.');
+      if (frontmatter.type === 'plan' && frontmatter.status === 'failed' && !hasSectionContent(body, 'Failure')) {
+        throw new Error('Failed plans need a Failure explanation.');
+      }
+      if (node.type !== 'proof_record' && frontmatter.type === 'proof_record' && !hasSectionContent(body, 'Outcome')) {
+        throw new Error('Proof records need an Outcome section explaining where the proof was incorporated.');
+      }
+      const targetPath = path.posix.relative(path.posix.dirname(node.filePath), `${this.paths.assets}/${frontmatter.target_asset}.md`);
+      const targetLine = `Target: [asset](${targetPath.startsWith('.') ? targetPath : `./${targetPath}`})`;
+      if (/^Target: \[asset\]\([^)]+\)$/m.test(body)) body = body.replace(/^Target: \[asset\]\([^)]+\)$/m, targetLine);
+      else body = body.replace(/^## Goal\s*$/m, `## Goal\n\n${targetLine}`);
+      if (!body.includes(targetLine)) body = `${targetLine}\n\n${body}`;
+      if (frontmatter.type === 'proof_record') delete data.status;
+      delete data.related_assets;
+      delete data.depends_on;
+      delete data.uses_definitions;
+      delete data.used_in;
+    } else {
+      delete data.target_asset;
+      delete data.kind;
+      delete data.inspired_by;
+    }
+    if (frontmatter.type === 'definition') {
+      delete data.uses_definitions;
+      delete data.used_in;
+      delete data.related_assets;
+    }
+    for (const [key, value] of Object.entries(data)) if (value === undefined) delete data[key];
     const fileContent = matter.stringify(
       '\n' + body,
-      frontmatter as unknown as Record<string, unknown>
+      data
     );
     await this.fileService.writeFile(node.filePath, fileContent);
+  }
+
+  private isTargetAsset(id: string): boolean {
+    const node = this.nodes.get(id);
+    return Boolean(node && node.filePath.startsWith(`${this.paths.assets}/`) && ASSET_TYPES.has(node.type));
   }
 }

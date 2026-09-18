@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { NodeType } from '../../src/models/types';
+import { ResearchNode } from '../../src/models/types';
 
 const ASSET_TYPES: NodeType[] = [
   'theorem', 'lemma', 'proposition', 'definition',
@@ -8,20 +9,22 @@ const ASSET_TYPES: NodeType[] = [
 
 interface Props {
   allowedTypes: NodeType[];
-  onConfirm: (nodeType: NodeType, title: string) => void;
+  assets: ResearchNode[];
+  onConfirm: (nodeType: NodeType, title: string, targetAsset?: string) => void;
   onCancel: () => void;
 }
 
-export function CreateNodeModal({ allowedTypes, onConfirm, onCancel }: Props) {
+export function CreateNodeModal({ allowedTypes, assets, onConfirm, onCancel }: Props) {
   const [nodeType, setNodeType] = useState<NodeType>(allowedTypes[0]);
   const [title, setTitle] = useState('');
+  const [targetAsset, setTargetAsset] = useState('');
 
   const singleType = allowedTypes.length === 1;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (title.trim()) {
-      onConfirm(nodeType, title.trim());
+    if (title.trim() && (nodeType !== 'plan' || targetAsset)) {
+      onConfirm(nodeType, title.trim(), nodeType === 'plan' ? targetAsset : undefined);
     }
   };
 
@@ -80,7 +83,7 @@ export function CreateNodeModal({ allowedTypes, onConfirm, onCancel }: Props) {
             <input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder={singleType ? 'e.g. Use Frobenius cycle to count patterns' : 'e.g. Chebotarev Density Theorem'}
+              placeholder={singleType && allowedTypes[0] === 'definition' ? 'e.g. subgroup' : singleType ? 'e.g. Use Frobenius cycle to count patterns' : 'e.g. Chebotarev Density Theorem'}
               autoFocus
               style={{
                 width: '100%',
@@ -93,6 +96,14 @@ export function CreateNodeModal({ allowedTypes, onConfirm, onCancel }: Props) {
               }}
             />
           </div>
+
+          {nodeType === 'plan' && <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>Target asset</label>
+            <select value={targetAsset} onChange={(e) => setTargetAsset(e.target.value)} required style={{ width: '100%', padding: '6px 10px' }}>
+              <option value="">Choose an asset</option>
+              {assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.title}</option>)}
+            </select>
+          </div>}
 
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button
@@ -112,7 +123,7 @@ export function CreateNodeModal({ allowedTypes, onConfirm, onCancel }: Props) {
             </button>
             <button
               type="submit"
-              disabled={!title.trim()}
+              disabled={!title.trim() || (nodeType === 'plan' && !targetAsset)}
               style={{
                 padding: '6px 14px',
                 background: 'var(--vscode-button-background)',
