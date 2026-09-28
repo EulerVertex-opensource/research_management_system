@@ -25,6 +25,9 @@ export const STATE_PATH = `${STATE_DIR}/state.json`;
 export const EVENTS_PATH = `${STATE_DIR}/events.jsonl`;
 export const SNAPSHOT_PATH = `${STATE_DIR}/snapshot.json`;
 export const BRIDGE_PATH = `${STATE_DIR}/bridge.json`;
+/** The current stage's compiled context pack and its manifest (files it covers, token estimate). */
+export const CONTEXT_PACK_PATH = `${STATE_DIR}/context/current.md`;
+export const CONTEXT_MANIFEST_PATH = `${STATE_DIR}/context/current.json`;
 /** Local sync bookkeeping (conflict in progress, last prepare); never committed. */
 export const SYNC_PATH = `${STATE_DIR}/sync.json`;
 /**

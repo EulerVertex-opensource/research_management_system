@@ -5,7 +5,7 @@ description: Try to refute one draft research asset before proving it, and indep
 
 # Falsify an asset
 
-Input: the asset ID; for verification also the candidate example ID. Read the asset's statement, its `uses_definitions` (note which are draft), and its direct `depends_on` statements only.
+Input: the context pack from `research-loop next`: the asset's statement, its `uses_definitions` (note which are draft), its direct `depends_on` statements, and earlier checks' limitations; for verification also the candidate example. Read only the pack; for anything else run `research-loop show <id> [--section Heading]`. Do not read the asset's `## Proof`: refute the statement, not an argument for it.
 
 ## Falsify
 
@@ -18,6 +18,6 @@ A failed proof attempt, doubt, or a gap in a draft definition is not a counterex
 
 ## Verify
 
-Reread the statement and the example from the files, not from memory. Recheck every assumption and every calculation step and try to break the example. Add `## Verdict` to the example: `confirmed` or `rejected` with the reason. Rejected: set the example `status: archived`. Confirmed: leave it `draft`; the loop asks the researcher to confirm it and parks the asset meanwhile. Never edit the refuted asset.
+Reread the statement and the example from the context pack, not from memory or the falsify stage's reasoning. Recheck every assumption and every calculation step and try to break the example. Add `## Verdict` to the example: `confirmed` or `rejected` with the reason. Rejected: set the example `status: archived`. Confirmed: leave it `draft`; the loop asks the researcher to confirm it and parks the asset meanwhile. Never edit the refuted asset.
 
 Report `confirmed` or `rejected`. Never set `status: approved`.

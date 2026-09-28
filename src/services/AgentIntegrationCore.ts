@@ -17,7 +17,9 @@ function quote(value: string): string { return `"${value.replace(/(["\\])/g, '\\
 
 export function hookEntries(scriptPath: string, provider: AgentProvider): Record<string, HookEntry[]> {
   const command = (event: string) => `node ${quote(scriptPath)} hook ${event}`;
+  const reads = AGENT_PROVIDERS[provider].readToolMatcher;
   return {
+    ...(reads ? { PostToolUse: [{ matcher: reads, hooks: [{ type: 'command' as const, command: command('PostToolUse'), timeout: 10 }] }] } : {}),
     SessionStart: [{ matcher: 'startup|resume|clear|compact', hooks: [{ type: 'command', command: command('SessionStart'), timeout: 20 }] }],
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: command('UserPromptSubmit'), timeout: 20 }] }],
     PreToolUse: [{ matcher: AGENT_PROVIDERS[provider].writeToolMatcher, hooks: [{ type: 'command', command: command('PreToolUse'), timeout: 20 }] }],
@@ -92,4 +94,36 @@ export function upsertCodexMcpTable(existingToml: string, mcpScriptPath: string)
   while (end < lines.length && (!header(lines[end]) || ours(lines[end]))) end++;
   while (end > start + 1 && lines[end - 1].trim() === '') end--;
   return [...lines.slice(0, start), table, ...lines.slice(end)].join('\n');
+}
+
+export const WORKER_TIERS = ['light', 'deep'] as const;
+export type WorkerTier = typeof WORKER_TIERS[number];
+const WORKER_MARK = '<!-- research-assistant:generated worker -->';
+
+export function workerAgentName(tier: WorkerTier): string { return `research-worker-${tier}`; }
+
+/**
+ * A research-loop stage worker as a Claude Code subagent. Light runs the
+ * bookkeeping stages on a cheaper model; deep keeps the session's model for
+ * the mathematics. A file the researcher edited (no marker) is left alone:
+ * returns undefined.
+ */
+export function buildWorkerAgent(tier: WorkerTier, existingText: string, skillsDir: string, loopCommand: string): string | undefined {
+  if (existingText.trim() && !existingText.includes(WORKER_MARK)) return undefined;
+  const stages = tier === 'light' ? 'scaffold and sources' : 'falsify, verify_counterexample, plan, and execute';
+  return `---
+name: ${workerAgentName(tier)}
+description: Runs one research-loop stage (${stages}) from its compiled context pack and returns a short summary. Used by the research-loop driver only.
+tools: Read, Write, Edit, Bash
+model: ${tier === 'light' ? 'sonnet' : 'inherit'}
+---
+${WORKER_MARK}
+
+You run exactly one research-loop stage. The driver gives you the stage, the asset, the stage skill, and the context pack path.
+
+1. Read the context pack (\`.research-assistant-loop/context/current.md\`) and \`${skillsDir}/<stage skill>/SKILL.md\`. Nothing else up front.
+2. Need more? Run \`${loopCommand} show <id> [--section Heading]\` for that one node or section. Do not list or read research folders directly.
+3. Do the stage's work in the files, following the skill. Never set \`status: approved\`; never run \`report\`, \`next\`, or git commands. The driver does that.
+4. Reply with at most five lines: the outcome (for example \`none\`, \`candidate --counterexample <id>\`, \`complete --plan <id>\`, \`proved\`, \`failed\`, or \`question: ...\`), the files you wrote, and the key mathematical reason.
+`;
 }

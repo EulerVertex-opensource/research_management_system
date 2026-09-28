@@ -1,0 +1,15 @@
+---
+name: execute-proof
+description: Execute one pending proof plan for a draft asset; on success put the proof in the asset and convert the plan to a proof record, on obstruction mark the plan failed. Used by the research loop's execute stage.
+---
+
+# Execute a proof plan
+
+Input: the context pack from `research-loop next` (the plan, the frozen target statement, dependency statements, definitions). Read only the pack; for anything else run `research-loop show <id> [--section Heading]`, for example a dependency's proof only when a step genuinely needs its argument.
+
+- Follow the checklist in order; tick a box only when the step is established in writing.
+- Success: put the complete proof under `## Proof` in the target asset (statement unchanged, status stays `draft`), then convert the plan to `type: proof_record` (remove `status`, keep `target_asset` and `inspired_by`) with `## Outcome` naming where the proof lives and what is still assumed. Run `check-notation` and `link-research-nodes`. Report `proved --assumed-definitions a,b` when draft definitions were used.
+- Obstruction: leave the asset untouched, set the plan `status: failed`, write `## Failure` with the exact obstruction (which step, why it cannot be completed, what would be needed). Report `failed`.
+- Unclear statement or missing definition: report `question --question "..."`.
+
+A failed plan says nothing about the truth of the statement. Only the plan file and the target's `## Proof` may change. Never set `status: approved`.

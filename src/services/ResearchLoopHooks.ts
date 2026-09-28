@@ -12,6 +12,8 @@ export interface HookInput {
   tool_input?: Record<string, unknown>;
   stop_hook_active?: boolean;
   prompt?: string;
+  /** SessionStart: startup | resume | clear | compact. */
+  source?: string;
 }
 
 export interface StopDecision { block: boolean; reason?: string; capReached?: boolean }
@@ -31,7 +33,7 @@ export function stopDecision(state: LoopState | undefined, input: HookInput, ins
   const record = state.autopilot.sessions[session] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
   if (record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
-  const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it. ${instruction ?? ''}`.trim();
+  const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it; earlier stages are summarized in its context pack, so do not reread their files. ${instruction ?? ''}`.trim();
   return { block: true, reason };
 }
 
@@ -59,6 +61,31 @@ function under(target: string, folder: string, root?: string): boolean {
   const normalized = target.replace(/\\/g, '/');
   const relative = root && normalized.startsWith(root.replace(/\\/g, '/') + '/') ? normalized.slice(root.length + 1) : normalized;
   return relative === folder || relative.startsWith(`${folder}/`) || relative.includes(`/${folder}/`);
+}
+
+/**
+ * Research files (or folders) a read-type tool call touches, relative to the
+ * project root. Used only to audit reads outside the context pack.
+ */
+export function researchReads(paths: ProjectPaths, input: HookInput, root?: string): string[] {
+  const tool = input.tool_input ?? {};
+  const raw: string[] = [];
+  for (const key of ['file_path', 'path', 'pattern', 'glob']) if (typeof tool[key] === 'string') raw.push(tool[key] as string);
+  const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
+  if (command) for (const match of command.matchAll(/[\w./-]+/g)) raw.push(match[0]);
+  const shared = sharedFolders(paths.researchRoot);
+  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks];
+  const result = new Set<string>();
+  for (const value of raw) {
+    let relative = value.replace(/\\/g, '/');
+    if (root && relative.startsWith(root.replace(/\\/g, '/') + '/')) relative = relative.slice(root.length + 1);
+    relative = relative.replace(/^\.\//, '').replace(/\/+$/, '');
+    const folder = folders.find((item) => relative === item || relative.startsWith(`${item}/`));
+    if (!folder) continue;
+    // A glob or a folder is recorded as the folder itself.
+    result.add(/[*?[{]/.test(relative) ? folder : relative);
+  }
+  return [...result];
 }
 
 /** Deny agent writes that would forge an approval or touch loop-internal files. */

@@ -5,7 +5,7 @@ import { LOOP_COMMAND } from './AgentProviders';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
-  AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
+  AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
   MAX_FAILED_PLANS, PROVABLE_TYPES, QuestionKind, SNAPSHOT_PATH, STATE_PATH, StageReport, hasSection, isApproved, isWaitingForHuman, newState,
   projectSection, proofText, requiredAssetIds, researchDigest, sectionContent, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
@@ -13,8 +13,11 @@ import { approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writ
 import { LoopGit } from './LoopGit';
 import {
   CheckInfo, DecisionInfo, DecisionKind, Provenance, checkMarkdown, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
-  failuresSinceDirection, handoffMarkdown, parseCheck, parseDecision, parseHandoff, stamp, stampCheck,
+  failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampCheck,
 } from './ResearchRecords';
+import {
+  ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, renderContext, renderShow,
+} from './ResearchContext';
 
 export interface CoreOptions {
   now?: () => string;
@@ -25,10 +28,12 @@ export interface CoreOptions {
   /** Who performs researcher actions on this machine; defaults to git user.email. */
   identity?: string;
   extensionVersion?: string;
+  /** Per-stage token budgets for context packs, overriding DEFAULT_CONTEXT_BUDGETS. */
+  contextBudgets?: Partial<Record<LoopStage, number>>;
 }
 export interface NextResult { stage: LoopStage; instruction: string; brief: Record<string, unknown>; blocked?: string }
 export interface ValidationResult { problems: string[]; fixed: string[] }
-interface AssetInfo { id: string; raw: string; data: Record<string, any>; body: string }
+type AssetInfo = ContextNode;
 type Selection =
   | { stage: 'discuss_goals' | 'draft_project' | 'review_project' | 'ready'; note?: string }
   | { stage: 'scaffold'; missing: string[]; incomplete: string[] }
@@ -50,6 +55,7 @@ export class ResearchLoopCore {
   private readonly git: LoopGit | undefined;
   private identity: string | undefined;
   private readonly extensionVersion: string | undefined;
+  private readonly contextBudgets: Partial<Record<LoopStage, number>>;
 
   constructor(private readonly files: LoopFiles, private paths: ProjectPaths, options: CoreOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -58,6 +64,7 @@ export class ResearchLoopCore {
     this.git = options.git;
     this.identity = options.identity;
     this.extensionVersion = options.extensionVersion;
+    this.contextBudgets = { ...DEFAULT_CONTEXT_BUDGETS, ...options.contextBudgets };
   }
 
   setPaths(paths: ProjectPaths): void { this.paths = paths; }
@@ -688,7 +695,7 @@ export class ResearchLoopCore {
     const nodes = new Map<string, AssetInfo>();
     for (const file of await this.files.listFiles(folder)) {
       const raw = await this.files.readFile(file);
-      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), raw, data: parsed.data, body: parsed.content }); } catch { /* skip unparsable */ }
+      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), file, raw, data: parsed.data, body: parsed.content }); } catch { /* skip unparsable */ }
     }
     return nodes;
   }
@@ -701,34 +708,6 @@ export class ResearchLoopCore {
 
   private async pendingPlan(assetId: string): Promise<string | undefined> {
     return (await this.plans()).find((plan) => plan.data.type === 'plan' && plan.data.target_asset === assetId && plan.data.status === 'pending')?.id;
-  }
-
-  /** Required results plus their transitive dependencies in dependency order; missing IDs are reported, not thrown. */
-  private closure(required: string[], assets: Map<string, AssetInfo>): { order: string[]; missing: string[]; cycle?: string } {
-    const order: string[] = []; const missing: string[] = []; const visiting = new Set<string>(); const visited = new Set<string>(); let cycle: string | undefined;
-    const visit = (id: string) => {
-      if (visited.has(id)) return;
-      if (visiting.has(id)) { cycle = id; return; }
-      const asset = assets.get(id);
-      if (!asset) { if (!missing.includes(id)) missing.push(id); return; }
-      visiting.add(id);
-      for (const dep of Array.isArray(asset.data.depends_on) ? asset.data.depends_on : []) if (typeof dep === 'string') visit(dep);
-      visiting.delete(id); visited.add(id); order.push(id);
-    };
-    required.forEach(visit);
-    return { order, missing, cycle };
-  }
-
-  private definitionClosure(order: string[], assets: Map<string, AssetInfo>, definitions: Map<string, AssetInfo>): string[] {
-    const seen = new Set<string>();
-    const visit = (id: string) => {
-      if (seen.has(id)) return;
-      seen.add(id);
-      const definition = definitions.get(id);
-      for (const dep of Array.isArray(definition?.data.depends_on) ? definition!.data.depends_on : []) if (typeof dep === 'string') visit(dep);
-    };
-    for (const id of order) for (const definition of Array.isArray(assets.get(id)?.data.uses_definitions) ? assets.get(id)!.data.uses_definitions : []) if (typeof definition === 'string') visit(definition);
-    return [...seen];
   }
 
   private async computeSelection(): Promise<Selection> {
@@ -756,7 +735,7 @@ export class ResearchLoopCore {
       state.researcherInput = { kind: 'project', text: `Required result(s) ${inactive.join(', ')} were deprecated or archived. Revise the goals and required results; give a revised statement a new asset ID.`, at: this.now() };
       return { stage: 'draft_project', note: state.researcherInput.text };
     }
-    const { order, missing, cycle } = this.closure(required, assets);
+    const { order, missing, cycle } = assetClosure(required, assets);
     if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.` };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
     const incomplete = order.filter((id) => assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
@@ -805,13 +784,13 @@ export class ResearchLoopCore {
       if (!candidate) candidate = { stage: this.isFalsified(id, asset.raw, checks) ? 'plan' : 'falsify', assetId: id };
     }
     if (candidate) return candidate;
-    const definitionIds = this.definitionClosure(order, assets, definitions);
+    const definitionIds = definitionClosure(order, assets, definitions);
     const unapproved = definitionIds.filter((id) => !(definitions.get(id)?.data.status === 'approved' && isApproved(approvals, 'definition', id, definitions.get(id)!.raw)));
     for (const id of unapproved) if (definitions.has(id)) await this.enqueueApproval('definition', id, 'Definition used by an approved or proved result.');
     const allApproved = order.every((id) => settled.has(id) && assets.get(id)!.data.status === 'approved');
     if (allApproved && !unapproved.length && !order.some((id) => state.parked[id]) && !examples.some((example) => example.data.status === 'draft' && order.includes(example.data.refutes))) {
       if (state.extension) {
-        const baseline = new Set(this.closure(state.extension.baselineRequired, assets).order);
+        const baseline = new Set(assetClosure(state.extension.baselineRequired, assets).order);
         state.extension.newResults = order.filter((id) => !baseline.has(id));
       }
       return { stage: 'ready' };
@@ -846,7 +825,102 @@ export class ResearchLoopCore {
       if (selection.stage === 'waiting') state.lastError = selection.reason;
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
     }
-    return this.result();
+    const result = this.result();
+    if (!hasContextPack(state.stage)) return result;
+    const pack = await this.contextPack();
+    result.brief.context = { file: CONTEXT_PACK_PATH, tokens: pack.tokens, items: pack.included.map((item) => `${item.id}${Array.isArray(item.view) ? `#${item.view.join(',')}` : item.view === 'all' ? '' : `#${item.view}`}`), omitted: pack.omitted.map((item) => item.id) };
+    if (pack.manifest.worker) result.brief.worker = pack.manifest.worker;
+    result.instruction += `\nContext pack (~${pack.tokens} tokens): ${CONTEXT_PACK_PATH}. Read it instead of the research folders; for anything else run ${LOOP_COMMAND} show <id> [--section Heading] and say why.${pack.manifest.worker ? ` Subagent: research-worker-${pack.manifest.worker}.` : ''}`;
+    return result;
+  }
+
+  // ---------- context packs ----------
+
+  private async contextSources(): Promise<ContextSources> {
+    const events = await this.recentEvents(400);
+    return {
+      project: await this.files.readFile(this.paths.projectMd).catch(() => ''), projectFile: this.paths.projectMd,
+      paperIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''), paperIndexFile: this.paths.paperIndex,
+      assets: await this.collect(this.paths.assets), definitions: await this.collect(this.paths.definitions),
+      plans: await this.collect(this.paths.plans), ideas: await this.collect(this.paths.ideas), checks: await this.collect(this.shared.checks),
+      reports: events.filter((event) => event.type === 'report').map((event) => event as ContextSources['reports'][number]),
+    };
+  }
+
+  /**
+   * Compile the current stage's context pack, write it (and its manifest) to
+   * the loop folder, and return it. Deterministic: same files, same pack.
+   */
+  async contextPack(budget?: number): Promise<RenderedContext & { manifest: ContextManifest }> {
+    const state = this.require();
+    const sources = await this.contextSources();
+    const assetId = state.current.assetId;
+    const manifest = planContext({
+      stage: state.stage, assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId,
+      missing: state.scaffoldBrief?.missing, incomplete: state.scaffoldBrief?.incomplete, researcherInput: state.researcherInput?.text,
+      changesRequested: assetId ? state.progress[assetId]?.changesRequested : undefined,
+      direction: assetId ? latestDirection(await this.decisions(), assetId)?.text : undefined,
+    }, sources, budget ?? this.contextBudgets[state.stage] ?? 8000);
+    const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
+    await this.files.writeFile(CONTEXT_PACK_PATH, rendered.text);
+    await this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id) }, null, 2) + '\n');
+    return { ...rendered, manifest };
+  }
+
+  /** One node (or paper transcription) on request, optionally only some sections; recorded so packs can be tuned. */
+  async show(id: string, sections: string[] = [], full = false): Promise<string> {
+    if (id === 'project') {
+      const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
+      await this.event('context_request', { id, sections, stage: this.state?.stage });
+      return sections.length ? sections.map((heading) => `## ${heading}\n\n${projectSection(project, heading)}`).join('\n\n') : project;
+    }
+    const folders: Array<[string, string]> = [['asset', this.paths.assets], ['definition', this.paths.definitions], ['plan', this.paths.plans], ['idea', this.paths.ideas], ['check', this.shared.checks]];
+    for (const [kind, folder] of folders) {
+      const file = `${folder}/${id}.md`;
+      const raw = await this.files.readFile(file).catch(() => undefined);
+      if (raw === undefined) continue;
+      const parsed = parseMarkdown(raw);
+      await this.event('context_request', { id, kind, sections, stage: this.state?.stage });
+      return renderShow({ id, file, raw, data: parsed.data, body: parsed.content }, sections, kind);
+    }
+    const paper = `${this.paths.papers}/${id}/paper.md`;
+    const raw = await this.files.readFile(paper).catch(() => undefined);
+    if (raw !== undefined) {
+      await this.event('context_request', { id, kind: 'paper', sections, full, stage: this.state?.stage });
+      if (full) return raw;
+      let parsed: { data: Record<string, any>; content: string } = { data: {}, content: raw };
+      try { parsed = parseMarkdown(raw); } catch { /* transcription without frontmatter */ }
+      return renderShow({ id, file: paper, raw, data: parsed.data, body: parsed.content }, sections, 'paper');
+    }
+    throw new Error(`No node or paper named ${id}.`);
+  }
+
+  /** How this stage used context: pack size, explicit requests, and research files read outside the pack. */
+  async contextAudit(): Promise<{ tokens?: number; budget?: number; requests: string[]; outside: string[] }> {
+    const state = this.state;
+    const manifest = JSON.parse(await this.files.readFile(CONTEXT_MANIFEST_PATH).catch(() => '{}')) as { tokens?: number; budget?: number; stageStartedAt?: string };
+    if (!state || manifest.stageStartedAt !== state.current.stageStartedAt) return { requests: [], outside: [] };
+    const since = state.current.stageStartedAt;
+    const events = (await this.recentEvents(400)).filter((event) => String(event.at ?? '') >= since);
+    const requests = events.filter((event) => event.type === 'context_request').map((event) => `${String(event.id)}${Array.isArray(event.sections) && event.sections.length ? `#${(event.sections as string[]).join(',')}` : ''}`);
+    const outside = [...new Set(events.filter((event) => event.type === 'context_outside_read').map((event) => String(event.file)))];
+    return { tokens: manifest.tokens, budget: manifest.budget, requests, outside };
+  }
+
+  /** Record a research file the agent read outside the current pack (audit only; nothing is blocked). */
+  async noteRead(file: string, tool: string): Promise<boolean> {
+    const state = this.state;
+    if (!state || state.status !== 'running' || !hasContextPack(state.stage)) return false;
+    const manifest = JSON.parse(await this.files.readFile(CONTEXT_MANIFEST_PATH).catch(() => '{}')) as { files?: string[]; stageStartedAt?: string };
+    if (manifest.stageStartedAt !== state.current.stageStartedAt || !manifest.files) return false;
+    if (manifest.files.includes(file)) return false;
+    // Files the agent wrote this stage are its own work, not extra context.
+    const snapshot = JSON.parse(await this.files.readFile(SNAPSHOT_PATH).catch(() => '{}')) as Record<string, string>;
+    const raw = await this.files.readFile(file).catch(() => undefined);
+    const isFolder = raw === undefined;
+    if (!isFolder && snapshot[file] !== crypto.createHash('sha256').update(raw).digest('hex')) return false;
+    await this.event('context_outside_read', { file, tool, stage: state.stage, assetId: state.current.assetId });
+    return true;
   }
 
   private result(blocked?: string): NextResult {
@@ -883,10 +957,10 @@ export class ResearchLoopCore {
         return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
         const requested = state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined;
-        return `Stage plan for asset ${asset}. Use the prove-asset skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID).`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report('complete --plan <id>|question')}`;
+        return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID).`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report('complete --plan <id>|question')}`;
       }
       case 'execute':
-        return `Stage execute plan ${state.current.planId} for asset ${asset}. Follow the checklist; tick boxes only for established steps. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft) and convert the plan to type proof_record (no status) with ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
+        return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft) and convert the plan to type proof_record (no status) with ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
       case 'waiting':
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
@@ -1258,7 +1332,7 @@ export class ResearchLoopCore {
     }
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);
-    const { cycle } = this.closure([...assets.keys()], assets);
+    const { cycle } = assetClosure([...assets.keys()], assets);
     if (cycle) problems.push(`Dependency cycle at ${cycle}.`);
     for (const file of await approvalFiles(this.files, this.paths.researchRoot)) {
       const raw = await this.files.readFile(file).catch(() => '');

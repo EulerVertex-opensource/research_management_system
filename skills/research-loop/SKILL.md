@@ -25,12 +25,12 @@ Claude Code has the identical copy under `.claude/skills/research-loop/scripts/`
 
 ## One iteration
 
-1. `next` prints the stage and its instruction. Read only the files it names.
-2. Do the stage. Heavy stages (`scaffold`, `sources`, `falsify`, `verify_counterexample`, `plan`, `execute`) run in a subagent when the harness offers one (Claude Code: the Agent tool with the stage skill; Codex: spawn an agent). Give the subagent only the brief from `next` and the skill name, and require a short summary back. Without a subagent, do the stage inline.
+1. `next` prints the stage, its instruction, and writes the stage's **context pack** to `.research-assistant-loop/context/current.md` (the loop picks the nodes and sections the stage needs, within a token budget). The pack is the stage's whole reading list: do not list or browse research folders. For anything missing run `show <id> [--section Heading]` (a paper slug without `--section` shows its outline) and say why.
+2. Do the stage. Heavy stages (`scaffold`, `sources`, `falsify`, `verify_counterexample`, `plan`, `execute`) run in a subagent when the harness offers one: Claude Code uses the subagent `next` names (`research-worker-light` for scaffold and sources, `research-worker-deep` for the rest); Codex spawns an agent. Give the subagent only the stage, asset, plan, the stage skill, and the pack path, and require at most five lines back. Without a subagent, do the stage inline from the pack. Do not reread what the subagent read.
 3. `report <outcome> --summary "<= 5 lines" [--plan ID] [--counterexample ID]`. It validates every file written during the stage against the stage rules and advances the state. If it fails, fix exactly what it lists and report again; never work around it.
 4. Repeat until `next` says `waiting`, `ready`, or `paused`, or the autopilot cap pauses the loop. Then tell the researcher in three lines or fewer what is waiting on them. At `ready` after an extension, `next` names the new results; update the existing manuscript for those only.
 
-Stage skills: `falsify-asset` for `falsify` and `verify_counterexample`; `prove-asset` for `plan` and `execute`. `scaffold` and `sources` use `extract-theorems`, `extract-definitions`, `import-math-paper`, `order-assets`, `order-definitions`, `link-research-nodes`, and `check-notation`.
+Stage skills: `falsify-asset` for `falsify` and `verify_counterexample`; `plan-proof` for `plan`; `execute-proof` for `execute`. `scaffold` and `sources` use `extract-theorems`, `extract-definitions`, `import-math-paper`, `order-assets`, `order-definitions`, `link-research-nodes`, and `check-notation`.
 
 Rules the validator enforces:
 
@@ -74,5 +74,5 @@ Research files are shared through git; the loop's run state is not. Use only the
 - Never invent a paper, theorem, location, proof step, or researcher answer.
 - A failed plan is not a falsification. Only a verified counterexample confirmed by the researcher refutes a statement, and only the researcher deprecates an asset.
 - Do not change a statement while proving it; a revised statement gets a new asset ID.
-- Load only the files the stage brief names.
+- Load only the context pack and what you request with `show`; earlier stages live in the pack's report summaries, not in rereading their files.
 - If you stop while the loop is running, the Stop hook asks you to continue; that is expected. It stops asking when the loop waits for the researcher, is paused, or reaches its per-session cap.

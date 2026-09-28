@@ -369,3 +369,20 @@ test('shared records rebuild parked assets, falsification, and failure counts wh
   await fresh.start('claude', { force: true });
   assert.equal(fresh.current.stage, 'falsify');
 });
+
+test('next attaches the stage context pack and worker tier to the brief', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  const next = await f.core.next();
+  assert.equal(next.stage, 'plan');
+  assert.equal(next.brief.worker, 'deep');
+  assert.ok(next.brief.context.items.includes('main_theorem#statement'));
+  assert.match(next.instruction, /plan-proof skill/);
+  assert.match(next.instruction, /research-worker-deep/);
+  const pack = f.map.get('.research-assistant-loop/context/current.md');
+  assert.match(pack, /For every natural number n, n = n\./);
+  assert.match(pack, /falsify → none: No counterexample/);
+  const manifest = JSON.parse(f.map.get('.research-assistant-loop/context/current.json'));
+  assert.equal(manifest.stageStartedAt, f.core.current.current.stageStartedAt);
+  assert.ok(manifest.files.includes('research/assets/main_theorem.md'));
+});

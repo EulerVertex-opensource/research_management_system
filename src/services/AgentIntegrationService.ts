@@ -4,8 +4,8 @@ import * as os from 'os';
 import * as fs from 'fs/promises';
 import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
-import { buildHooksFile, buildProjectMcpJson, upsertCodexMcpTable } from './AgentIntegrationCore';
-import { AGENT_PROVIDERS, MCP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, loopScriptPath } from './AgentProviders';
+import { WORKER_TIERS, buildHooksFile, buildProjectMcpJson, buildWorkerAgent, upsertCodexMcpTable, workerAgentName } from './AgentIntegrationCore';
+import { AGENT_PROVIDERS, LOOP_COMMAND, MCP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, loopScriptPath } from './AgentProviders';
 
 /**
  * Writes each agent's hook and MCP configuration for the research loop, driven
@@ -34,6 +34,14 @@ export class AgentIntegrationService {
       const mcp = spec.mcp;
       if (mcp.kind === 'project-json') await upsert(mcp.file, (existing) => buildProjectMcpJson(existing, loopScriptPath(root, id, MCP_SCRIPT), root, mcp.file));
       else await this.registerCodexServer();
+      if (spec.agentsDir) {
+        for (const tier of WORKER_TIERS) {
+          const file = `${spec.agentsDir}/${workerAgentName(tier)}.md`;
+          const existing = await this.fileService.readFile(file).catch(() => '');
+          const content = buildWorkerAgent(tier, existing, spec.skillsDir, LOOP_COMMAND);
+          if (content !== undefined && content !== existing) { await this.fileService.writeFile(file, content); written.push(file); }
+        }
+      }
     }
     if (written.length) this.output.appendLine(`[agents] Wrote ${written.join(', ')}`);
     return written;

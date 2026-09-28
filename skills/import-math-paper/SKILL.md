@@ -33,4 +33,5 @@ Read `.research-assistant.json` and keep the untouched PDF in its configured `lo
 - Do not claim that OCR accuracy establishes mathematical correctness.
 - Do not mark the transcription or extracted nodes as reviewed or approved without explicit researcher confirmation.
 - Prefer the Markdown for search and broad reading; return to the PDF for exact notation and citation.
+- To cite the local PDF from Markdown, link its configured `localSourcePdfs/<slug>.pdf` path relative to the Markdown file; the dashboard opens it in VS Code's PDF viewer.
 - Do not install converters, OCR engines, or other dependencies without user authorization.

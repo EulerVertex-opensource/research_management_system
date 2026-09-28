@@ -2,8 +2,9 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
-import { BRIDGE_PATH, DRIVER_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { HookInput, contextOutput, denyOutput, preToolUseDecision, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
+import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, LoopStage, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { HookInput, contextOutput, denyOutput, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
+import { hasContextPack } from '../services/ResearchContext';
 import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
@@ -36,6 +37,8 @@ const USAGE = `Usage: research-loop <command> [options]
   extend --goal "..." [--provider claude|codex] [--session ID] [--force]   (add a new goal to an approved project)
   resume [--session ID] [--provider claude|codex] [--force] | pause | stop
   next [--json]
+  context [--json] [--budget N]   (compile the current stage's context pack; next does this too)
+  show <id|paper_slug|project> [--section Heading]... [--full]   (one node or paper part on request)
   report <complete|none|candidate|confirmed|rejected|proved|failed|question> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
@@ -47,7 +50,7 @@ const USAGE = `Usage: research-loop <command> [options]
   sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
   migrate-approvals   (split research/approvals.json into one file per approved target)
   restore-approvals   (re-apply status: approved where the researcher's approval record still matches the content)
-  hook <SessionStart|UserPromptSubmit|PreToolUse|Stop|SubagentStop>   (reads hook JSON on stdin)
+  hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop>   (reads hook JSON on stdin)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
 async function readStdin(): Promise<string> {
@@ -79,9 +82,19 @@ function staleDriver(root: string): string | undefined {
 async function openCore(root: string, iterationCap?: number, git?: LoopGit): Promise<ResearchLoopCore> {
   const paths = await loadProjectPaths(root);
   const sync = await loadSyncConfig(root).catch(() => undefined);
-  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, identity: sync?.identity, extensionVersion: EXTENSION_VERSION });
+  const contextBudgets = await loadContextBudgets(root);
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, identity: sync?.identity, extensionVersion: EXTENSION_VERSION, contextBudgets });
   await core.load();
   return core;
+}
+
+/** Optional `contextBudgets: { <stage>: tokens }` in .research-assistant.json. */
+async function loadContextBudgets(root: string): Promise<Partial<Record<LoopStage, number>> | undefined> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(root, '.research-assistant.json'), 'utf8')) as { contextBudgets?: Record<string, unknown> };
+    const budgets = Object.entries(raw.contextBudgets ?? {}).filter(([, value]) => typeof value === 'number' && value > 0);
+    return budgets.length ? Object.fromEntries(budgets) as Partial<Record<LoopStage, number>> : undefined;
+  } catch { return undefined; }
 }
 
 function describePreview(preview: PublishPreview): string {
@@ -196,9 +209,19 @@ async function runHook(event: string, args: Args): Promise<void> {
         const sync = JSON.parse(fs.readFileSync(path.join(root, SYNC_PATH), 'utf8')) as { phase?: string; conflicted?: string[] };
         if (sync.phase === 'conflict') brief += `\nGit sync stopped on conflicts in ${sync.conflicted?.join(', ') ?? 'research files'}; the researcher resolves them, then run sync pull --continue. Do not resolve mathematical conflicts yourself.`;
       } catch { /* no sync yet */ }
+      if (event === 'SessionStart' && state.status === 'running' && hasContextPack(state.stage) && fs.existsSync(path.join(root, CONTEXT_PACK_PATH))) {
+        brief += `\nThe current stage's context is compiled in ${CONTEXT_PACK_PATH}${input.source === 'compact' || input.source === 'clear' ? ' (the chat was compacted or cleared: rebuild from the files, not from memory)' : ''}. Earlier stages are summarized there; do not reread their files.`;
+      }
       process.stdout.write(contextOutput(event, brief) + '\n');
       await core.consumeAnswers();
       await core.touch(session);
+      return;
+    }
+    case 'PostToolUse': {
+      // Audit only: note research files read outside the current context pack.
+      if (!state || state.status !== 'running') return;
+      const paths = await loadProjectPaths(root);
+      for (const file of researchReads(paths, input, root)) await core.noteRead(file, input.tool_name ?? '');
       return;
     }
     case 'PreToolUse': {
@@ -215,7 +238,7 @@ async function runHook(event: string, args: Args): Promise<void> {
       try { const next = await core.next(); instruction = next.blocked ? undefined : next.instruction; } catch { instruction = undefined; }
       const decision = stopDecision(core.current, input, instruction);
       if (decision.capReached) {
-        await core.pause(`Autopilot stopped after ${state.autopilot.iterationCap} automatic continuations in this session. Resume from the status bar or with research-loop resume.`);
+        await core.pause(`Autopilot stopped after ${state.autopilot.iterationCap} automatic continuations in this session. To shed accumulated context, resume in a fresh chat (Claude Code: /clear; Codex: a new thread) with the research-loop skill; the loop rebuilds from the files.`);
         return;
       }
       if (!decision.block) { await core.touch(session); return; }
@@ -256,7 +279,11 @@ async function main(): Promise<void> {
     case 'status': {
       if (json) out(core.statusSummary());
       else if (args.flags.brief) out(core.briefStatus());
-      else { out(core.briefStatus()); const events = await core.recentEvents(8); if (events.length) out('Recent events:\n' + events.map((event) => `- ${String(event.at)} ${String(event.type)}${event.stage ? ` ${String(event.stage)}` : ''}${event.assetId ? ` ${String(event.assetId)}` : ''}${event.summary ? ` — ${String(event.summary)}` : ''}`).join('\n')); }
+      else {
+        out(core.briefStatus());
+        const audit = await core.contextAudit();
+        if (audit.tokens !== undefined) out(`Context: pack ~${audit.tokens}/${audit.budget} tokens; ${audit.requests.length} show request(s)${audit.requests.length ? ` (${audit.requests.join(', ')})` : ''}; ${audit.outside.length} read(s) outside the pack${audit.outside.length ? ` (${audit.outside.slice(0, 8).join(', ')})` : ''}.`);
+        const events = await core.recentEvents(8); if (events.length) out('Recent events:\n' + events.map((event) => `- ${String(event.at)} ${String(event.type)}${event.stage ? ` ${String(event.stage)}` : ''}${event.assetId ? ` ${String(event.assetId)}` : ''}${event.summary ? ` — ${String(event.summary)}` : ''}`).join('\n')); }
       return;
     }
     case 'start': {
@@ -281,6 +308,20 @@ async function main(): Promise<void> {
       const next = await core.next();
       if (json) out({ stage: next.stage, blocked: next.blocked, instruction: next.instruction, brief: next.brief });
       else out(`Stage: ${next.stage}\n${next.instruction}`);
+      return;
+    }
+    case 'context': {
+      const state = core.current;
+      if (!state) throw new Error('No research loop has been started.');
+      if (!hasContextPack(state.stage)) { out(json ? { stage: state.stage, context: null } : `Stage ${state.stage} has no context pack; run next.`); return; }
+      const budget = typeof args.flags.budget === 'string' ? Number(args.flags.budget) : undefined;
+      const pack = await core.contextPack(budget && budget > 0 ? budget : undefined);
+      out(json ? { file: CONTEXT_PACK_PATH, tokens: pack.tokens, manifest: pack.manifest, files: pack.files, omitted: pack.omitted } : pack.text);
+      return;
+    }
+    case 'show': {
+      const id = text(sub, 'id');
+      out(await core.show(id, args.lists.section ?? [], args.flags.full === true));
       return;
     }
     case 'report': {

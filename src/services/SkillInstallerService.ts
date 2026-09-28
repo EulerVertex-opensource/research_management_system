@@ -5,6 +5,8 @@ import { AGENT_PROVIDERS, LOOP_SCRIPT, LOOP_SKILL, MCP_SCRIPT, PROVIDER_IDS } fr
 import { DRIVER_PATH } from './ResearchLoopModel';
 
 const SKILL_DESTINATIONS = PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].skillsDir);
+/** Bundled skills that were replaced; their installed copies are removed so agents do not load stale instructions. */
+const RETIRED_SKILLS = ['prove-asset'];
 
 /**
  * Installs the extension's bundled, agent-neutral skills into each supported
@@ -61,6 +63,11 @@ export class SkillInstallerService {
 
   async installBundledSkills(skillNames: string[]): Promise<void> {
     const sourceRoot = vscode.Uri.joinPath(this.extensionUri, 'skills');
+    for (const retired of RETIRED_SKILLS) {
+      for (const destinationRoot of SKILL_DESTINATIONS) {
+        await vscode.workspace.fs.delete(this.fileService.resolve(destinationRoot, retired), { recursive: true }).then(undefined, () => undefined);
+      }
+    }
 
     for (const skillName of skillNames) {
       const sourceSkill = vscode.Uri.joinPath(sourceRoot, skillName);

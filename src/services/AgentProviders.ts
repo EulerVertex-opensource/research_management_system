@@ -21,6 +21,10 @@ export interface AgentProviderSpec {
   hooksFile: string;
   /** PreToolUse matcher covering the agent's file-writing and shell tools. */
   writeToolMatcher: string;
+  /** PostToolUse matcher for read tools, to audit reads outside the context pack; absent where the agent has no verified PostToolUse hook. */
+  readToolMatcher?: string;
+  /** Subagent definitions folder; absent where the agent has no project-level subagent files. */
+  agentsDir?: string;
   /** Whether the hooks file also carries permission allow rules (Claude settings). */
   hooksFileHasPermissions: boolean;
   /** How the MCP bridge is registered: a project `.mcp.json`, or Codex's user config via `codex mcp add`. */
@@ -37,6 +41,8 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     skillsDir: '.claude/skills',
     hooksFile: '.claude/settings.local.json',
     writeToolMatcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash',
+    readToolMatcher: 'Read|Grep|Glob|Bash',
+    agentsDir: '.claude/agents',
     hooksFileHasPermissions: true,
     mcp: { kind: 'project-json', file: '.mcp.json' },
   },

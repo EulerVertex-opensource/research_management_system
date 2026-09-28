@@ -247,7 +247,7 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
       '/.vscode/settings.json',
       '/.vscode/extensions.json',
       '/.research-assistant-loop/',
-      ...PROVIDER_IDS.flatMap((id) => { const spec = AGENT_PROVIDERS[id]; return [`/${spec.hooksFile}`, ...(spec.mcp.kind === 'project-json' ? [`/${spec.mcp.file}`] : [])]; }),
+      ...PROVIDER_IDS.flatMap((id) => { const spec = AGENT_PROVIDERS[id]; return [`/${spec.hooksFile}`, ...(spec.mcp.kind === 'project-json' ? [`/${spec.mcp.file}`] : []), ...(spec.agentsDir ? [`/${spec.agentsDir}/research-worker-*.md`] : [])]; }),
       ...(paths.researchRoot !== '.' ? [`/${paths.researchRoot}/README.md`] : []),
       GITIGNORE_END,
     ].join('\n');

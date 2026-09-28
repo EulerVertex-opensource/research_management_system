@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { ProjectPaths, ResearchNode } from '../models/types';
 import { FileService } from './FileService';
-import { RESEARCH_WORKFLOWS } from '../prompts/templates';
 
 const INSTRUCTIONS_PATH = '.github/copilot-instructions.md';
 const CODEX_AGENTS_PATH = 'AGENTS.md';
@@ -118,6 +117,36 @@ Each \`## <slug>\` section in \`${paths.paperIndex}\` may record a local ignored
 `;
 }
 
+/**
+ * Always-loaded guidance for Claude Code (CLAUDE.md) and Codex (AGENTS.md):
+ * only the invariants every task needs. Paths live in the config file, skills
+ * are discovered by the agents themselves, and stage rules live in the skills,
+ * so none of that is repeated here (it would cost context in every turn and in
+ * every subagent).
+ */
+function agentGuidance(paths: ProjectPaths): string {
+  return `# Mathematical Research Workspace
+
+Overleaf-compatible LaTeX project plus a shared research knowledge base. Folder paths are in \`${paths.config}\`; tracked research Markdown, BibTeX, and LaTeX are the shared source of truth. The bundled skills carry the detailed rules; load the one the task needs.
+
+## Invariants
+
+- Approval is a researcher action: never write \`status: approved\`, never edit approval records; use the research loop's \`request_approval\`.
+- New or materially changed assets and definitions stay \`status: draft\`; new ideas \`draft\`, new plans \`pending\`.
+- Never change a statement while proving it; a revised statement gets a new asset ID. A failed plan is not a falsification.
+- Never invent a node ID, paper, theorem location, citation, or proof step; verify IDs from the files.
+- IDs in \`depends_on\`, \`uses_definitions\`, \`used_in\`, \`related_assets\` are exact filenames without \`.md\`. Block \`$$\` go on their own lines.
+- After changing assets or definitions: \`order-assets\` / \`order-definitions\`, then \`link-research-nodes\` and \`check-notation\`.
+- Only approved nodes support manuscript arguments; write one section at a time with \`manuscript-writing\` / \`draft-latex\`.
+- Share research through the research loop's \`sync\` commands, not raw git pull/push. Do not rename shared files; never commit source PDFs (\`${paths.localSourcePdfs}/\`) or LaTeX build output.
+
+## Reading context
+
+- Read only what the task needs. In the research loop, the stage's context pack (\`.research-assistant-loop/context/current.md\`) is the reading list; request more with \`research-loop show <id> [--section Heading]\`.
+- Prefer a node's statement or one section over whole files, and a paper's outline and one section over its full transcription. Do not scan whole research folders.
+`;
+}
+
 function upsertGeneratedSection(existing: string, generated: string): string {
   const section = `${GENERATED_START}\n${generated.trim()}\n${GENERATED_END}`;
   const start = existing.indexOf(GENERATED_START);
@@ -138,27 +167,7 @@ export async function generateAgentInstructions(
     await vscode.workspace.fs.createDirectory(fileService.resolve('.github'));
   } catch { /* already exists */ }
 
-  const skillList = Object.entries(RESEARCH_WORKFLOWS)
-    .map(([id, workflow]) => `- \`${id.replace(/_/g, '-')}\`: ${workflow.purpose}`)
-    .concat('- `order-assets`: Validate dependencies and number draft and approved asset titles.')
-    .concat('- `order-definitions`: Validate dependencies and number draft and approved definition titles.')
-    .concat('- `extract-definitions`: Extract and migrate definitions, and link assets to them.')
-    .concat('- `link-research-nodes`: Link verified asset and definition mentions in Markdown bodies.')
-    .concat('- `convert-proof-ideas`: Classify legacy ideas and plans, migrate plans to their own folder, and synchronize Markdown links.')
-    .concat('- `plan-manuscript`: Agree on presentation order and write the shared outline and section briefs.')
-    .concat('- `manuscript-writing`: Validate section sources, create missing TeX sections, and preview/apply input order.')
-    .concat('- `research-loop`: Drive the human-in-the-loop research loop from the chat (goals, project.md, scaffold, sources, falsify, plan, prove, researcher approval).')
-    .concat('- `falsify-asset`: Search for and independently verify a counterexample to one draft result.')
-    .concat('- `prove-asset`: Write and execute one proof plan for a draft result; convert success into a proof record.')
-    .join('\n');
-  const agentsContent = `${sharedGuidance(paths)}
-
-## Available skills
-
-${skillList}
-
-For importing or transcribing a paper, use the \`import-math-paper\` skill. Bundled skills are registered for Codex under \`.agents/skills/\` and for Claude Code under \`.claude/skills/\`.
-`;
+  const agentsContent = agentGuidance(paths);
 
   const existingAgents = await fileService.readFile(CODEX_AGENTS_PATH).catch(() => '');
   const existingClaude = await fileService.readFile(CLAUDE_INSTRUCTIONS_PATH).catch(() => '');
