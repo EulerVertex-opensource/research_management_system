@@ -60,6 +60,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   const loopCommands = [
     loop('start', () => provider!.loopHost.startCommand()),
+    loop('extend', () => provider!.loopHost.extendCommand()),
     loop('pause', () => provider!.loopHost.pauseCommand()),
     loop('resume', () => provider!.loopHost.resumeCommand()),
     loop('stop', () => provider!.loopHost.stopCommand()),

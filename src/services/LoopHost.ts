@@ -249,8 +249,9 @@ export class LoopHost implements vscode.Disposable {
     const waiting = Boolean(state.pendingQuestion) || state.stage === 'waiting' || state.approvalQueue.length > 0;
     this.statusBar.text = state.status === 'paused' ? '$(debug-pause) Loop: paused'
       : waiting ? `$(bell) Loop: waiting for you${state.approvalQueue.length ? ` (${state.approvalQueue.length})` : ''}`
-      : state.stage === 'ready' ? '$(check) Loop: ready for the manuscript'
+      : state.stage === 'ready' ? '$(check) Loop: ready for the manuscript (click to extend)'
       : `$(beaker) Loop: ${state.stage}${state.current.assetId ? ` · ${state.current.assetId}` : ''}`;
+    this.statusBar.command = state.stage === 'ready' && state.status === 'running' && !waiting ? 'research-assistant.loop.extend' : 'research-assistant.loop.openChat';
     this.statusBar.tooltip = new vscode.MarkdownString(this.core.briefStatus().replace(/\n/g, '  \n'));
     this.statusBar.show();
   }
@@ -286,6 +287,15 @@ export class LoopHost implements vscode.Disposable {
     await this.openChat(picked.provider);
     const hint = picked.provider === 'claude' ? 'Type /research-loop in the Claude Code chat.' : 'Type $research-loop in the Codex chat.';
     void vscode.window.showInformationMessage(`Research loop started. ${hint}`);
+  }
+
+  async extendCommand(): Promise<void> {
+    const goal = await vscode.window.showInputBox({ title: 'Extend the research project', prompt: 'Describe the new goal or conjecture to add. Existing approved results are kept.', ignoreFocusOut: true });
+    if (!goal?.trim()) return;
+    const state = await this.withCore(async (core) => { await core.extend(goal, { provider: core.current?.provider ?? this.preferredProvider(), force: true }); return core.current; });
+    await this.openChat(state?.provider);
+    const hint = state?.provider === 'codex' ? 'Type $research-loop in the Codex chat.' : 'Type /research-loop in the Claude Code chat.';
+    void vscode.window.showInformationMessage(`Research loop reopened to add the new goal. ${hint}`);
   }
 
   async pauseCommand(): Promise<void> { await this.withCore((core) => core.pause('Paused by the researcher.')); }

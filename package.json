@@ -37,6 +37,10 @@
         "title": "Research Assistant: Start Research Loop"
       },
       {
+        "command": "research-assistant.loop.extend",
+        "title": "Research Assistant: Extend Research Project (Add a Goal)"
+      },
+      {
         "command": "research-assistant.loop.pause",
         "title": "Research Assistant: Pause Research Loop"
       },

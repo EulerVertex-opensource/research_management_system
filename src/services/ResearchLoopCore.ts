@@ -93,10 +93,49 @@ export class ResearchLoopCore {
     this.state = state;
     if (options.sessionId) state.lock = { sessionId: options.sessionId, provider, acquiredAt: this.now(), heartbeatAt: this.now() };
     await this.adoptExistingApprovals();
+    // A goal given to an already approved project extends it instead of being dropped.
+    if (options.goal?.trim()) await this.markExtension(options.goal.trim());
     await this.save();
     await this.event('started', { provider });
     await this.next();
     return state;
+  }
+
+  /** Add a new goal to an approved project: reopen project.md for new required results, keeping the existing ones. */
+  async extend(goal: string, options: { provider?: AgentProvider; sessionId?: string; force?: boolean } = {}): Promise<LoopState> {
+    if (!goal.trim()) throw new Error('Describe the new goal to add.');
+    if (!(await this.isProjectApproved())) throw new Error('project.md is not approved yet; finish or revise the current project instead of extending it.');
+    const state = this.state;
+    if (!state || state.status === 'stopped' || state.status === 'idle') return this.start(options.provider ?? state?.provider ?? 'claude', { goal, sessionId: options.sessionId, force: true });
+    if (options.provider) state.provider = options.provider;
+    if (options.sessionId && !this.heartbeat(options.sessionId, options.force)) throw new Error(`Another session (${state.lock?.sessionId}) is driving this loop. Pass --force to take over.`);
+    state.status = 'running';
+    state.lastError = null;
+    state.researcherInput = { kind: 'goals', text: goal.trim(), at: this.now() };
+    await this.markExtension(goal.trim());
+    await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined });
+    return state;
+  }
+
+  private async markExtension(goal: string): Promise<void> {
+    const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
+    if (!project || !(await this.isProjectApproved(project))) return;
+    const state = this.require();
+    state.extension = { goal, at: this.now(), baselineRequired: requiredAssetIds(project) };
+    await this.event('extended', { goal, baselineRequired: state.extension.baselineRequired });
+  }
+
+  /** While extending, project.md may only gain required results. */
+  private extensionProblems(project: string): string[] {
+    const extension = this.state?.extension;
+    if (!extension || extension.projectApproved) return [];
+    const required = requiredAssetIds(project);
+    const removed = extension.baselineRequired.filter((id) => !required.includes(id));
+    const added = required.filter((id) => !extension.baselineRequired.includes(id));
+    const problems: string[] = [];
+    if (removed.length) problems.push(`project.md: keep the existing required results ${removed.join(', ')}; extending only adds results (deprecate an asset to retire it).`);
+    if (!added.length) problems.push('project.md: add the new goal as a new asset ID under ## Required Results.');
+    return problems;
   }
 
   async pause(reason?: string): Promise<void> {
@@ -529,7 +568,13 @@ export class ResearchLoopCore {
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     const approvals = (await this.approvals()).records;
     const required = requiredAssetIds(project);
-    if (!isApproved(approvals, 'project', 'project', project)) {
+    const projectApproved = isApproved(approvals, 'project', 'project', project);
+    if (projectApproved && state.extension && !state.extension.projectApproved) {
+      // The approved project still lacks the new goal: draft it first. Once it includes a new result, the extension is approved.
+      if (!required.some((id) => !state.extension!.baselineRequired.includes(id))) return { stage: 'draft_project' };
+      state.extension.projectApproved = true;
+    }
+    if (!projectApproved) {
       if (required.length && projectSection(project, 'Main Problem')) {
         await this.enqueueApproval('project', 'project', 'Review the goals and required results in project.md.');
         return { stage: 'review_project' };
@@ -595,7 +640,13 @@ export class ResearchLoopCore {
     const unapproved = definitionIds.filter((id) => !(definitions.get(id)?.data.status === 'approved' && isApproved(approvals, 'definition', id, definitions.get(id)!.raw)));
     for (const id of unapproved) if (definitions.has(id)) await this.enqueueApproval('definition', id, 'Definition used by an approved or proved result.');
     const allApproved = order.every((id) => settled.has(id) && assets.get(id)!.data.status === 'approved');
-    if (allApproved && !unapproved.length && !order.some((id) => state.parked[id]) && !examples.some((example) => example.data.status === 'draft' && order.includes(example.data.refutes))) return { stage: 'ready' };
+    if (allApproved && !unapproved.length && !order.some((id) => state.parked[id]) && !examples.some((example) => example.data.status === 'draft' && order.includes(example.data.refutes))) {
+      if (state.extension) {
+        const baseline = new Set(this.closure(state.extension.baselineRequired, assets).order);
+        state.extension.newResults = order.filter((id) => !baseline.has(id));
+      }
+      return { stage: 'ready' };
+    }
     const reasons = [
       state.approvalQueue.length ? `${state.approvalQueue.length} approval request(s) waiting: ${state.approvalQueue.map((item) => `${item.kind} ${item.target}`).join(', ')}` : '',
       Object.keys(state.parked).length ? `parked: ${Object.entries(state.parked).map(([id, info]) => `${id} (${info.reason})`).join(', ')}` : '',
@@ -634,7 +685,7 @@ export class ResearchLoopCore {
     const brief: Record<string, unknown> = {
       stage: state.stage, assetId: state.current.assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId,
       researcherInput: state.researcherInput?.text, changesRequested: state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined,
-      parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: (state as any).scaffoldBrief,
+      parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: (state as any).scaffoldBrief, extension: state.extension,
       paths: { project: this.paths.projectMd, assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, papers: this.paths.paperIndex, bibliography: this.paths.bibliography },
     };
     return { stage: state.stage, instruction: blocked ?? this.instruction(state), brief, blocked };
@@ -648,7 +699,7 @@ export class ResearchLoopCore {
       case 'discuss_goals':
         return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: research-loop question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
-        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only: fill ## Main Problem, ## Background, ## Current Goals, ## Required Results (one bullet per stable snake_case asset ID, "- id: role"), ## Known Results, ## Open Questions. Do not claim approval.${input}${report('complete|question')}`;
+        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only: fill ## Main Problem, ## Background, ## Current Goals, ## Required Results (one bullet per stable snake_case asset ID, "- id: role"), ## Known Results, ## Open Questions. Do not claim approval.${state.extension && !state.extension.projectApproved ? ` This extends an approved project: keep every existing bullet under ## Required Results (${state.extension.baselineRequired.join(', ')}) and leave approved statements unchanged; add the new goal as new asset ID(s) and update ## Current Goals.` : ''}${input}${report('complete|question')}`;
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: research-loop next`;
       case 'scaffold': {
@@ -670,7 +721,8 @@ export class ResearchLoopCore {
       case 'waiting':
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
-        return 'Stage ready. Every required result and dependency is approved. Tell the researcher the project is ready for the plan-manuscript skill.';
+        if (state.extension?.newResults?.length) return `Stage ready. Every required result and dependency is approved, including the new result(s) ${state.extension.newResults.join(', ')}. If a manuscript already exists, use the plan-manuscript skill to place only these into the existing outline (new or adjusted section briefs), then redraft only the affected sections; keep the other briefs and TeX files. Otherwise tell the researcher the project is ready for the plan-manuscript skill.`;
+        return 'Stage ready. Every required result and dependency is approved. Tell the researcher the project is ready for the plan-manuscript skill. To add a new result later, run: research-loop extend --goal "..."';
       default:
         return 'Run: research-loop next';
     }
@@ -828,6 +880,8 @@ export class ResearchLoopCore {
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs ## Required Results with asset IDs.');
+        const extensionProblems = this.extensionProblems(project);
+        if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
         state.researcherInput = undefined;
         return finish('project.md drafted; request the researcher\'s approval with request_approval(kind: "project").', 'review_project');

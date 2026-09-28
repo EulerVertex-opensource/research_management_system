@@ -60,6 +60,21 @@ async function driveToPlan(f) {
   assert.equal(f.core.current.stage, 'plan');
 }
 
+// Unique proof text per run: gray-matter caches parses by content, and approval mutates the cached data.
+async function driveToReady(f) {
+  await driveToPlan(f);
+  f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
+  await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
+  f.map.set('research/assets/main_theorem.md', asset(`\n## Proof\n\nEquality is reflexive (run ${++counter}).\n`));
+  f.map.set('research/plans/attempt_1.md', record('attempt_1'));
+  await f.core.report({ outcome: 'proved', summary: 'Proved' });
+  const approval = f.core.current.approvalQueue.find((item) => item.kind === 'asset' && item.target === 'main_theorem');
+  await f.core.resolveApproval(approval.id, 'approved', '', 'test');
+  assert.equal((await f.core.next()).stage, 'ready');
+}
+
+const extendedProject = project.replace('- main_theorem: the central claim\n', '- main_theorem: the central claim\n- second_theorem: the new conjecture\n');
+
 test('required results, digests, and validators', () => {
   assert.deepEqual(requiredAssetIds(project), ['main_theorem']);
   assert.notEqual(researchDigest(asset(), 'asset'), researchDigest(asset('\n## Proof\n\nNew proof.\n'), 'asset'));
@@ -91,6 +106,49 @@ test('happy path: goals, approval gates, proof record, ready, and invalidation o
   assert.deepEqual(await f.core.reconcile('main_theorem'), ['main_theorem']);
   assert.equal(matter(f.map.get('research/assets/main_theorem.md')).data.status, 'draft');
   assert.equal((await f.core.next()).stage, 'waiting');
+});
+
+test('ready offers extend; an extension adds a goal and keeps approved results', async () => {
+  const f = fixture();
+  await driveToReady(f);
+  assert.match((await f.core.next()).instruction, /research-loop extend/);
+  await f.core.extend('Also prove the second theorem.');
+  assert.equal(f.core.current.stage, 'draft_project');
+  const drafting = await f.core.next();
+  assert.equal(drafting.stage, 'draft_project');
+  assert.match(drafting.instruction, /keep every existing bullet.*main_theorem/);
+  assert.match(drafting.instruction, /Also prove the second theorem/);
+  await assert.rejects(() => f.core.report({ outcome: 'complete', summary: 'No change' }), /add the new goal as a new asset ID/);
+  f.map.set(paths.projectMd, extendedProject.replace('- main_theorem: the central claim\n', ''));
+  await assert.rejects(() => f.core.report({ outcome: 'complete', summary: 'Replaced' }), /keep the existing required results main_theorem/);
+  f.map.set(paths.projectMd, extendedProject);
+  await f.core.report({ outcome: 'complete', summary: 'Added second_theorem' });
+  assert.equal(f.core.current.stage, 'review_project');
+  const request = f.core.current.approvalQueue.find((item) => item.kind === 'project');
+  await f.core.resolveApproval(request.id, 'approved', '', 'test');
+  assert.equal((await f.core.next()).stage, 'scaffold');
+  assert.deepEqual(f.core.current.scaffoldBrief.missing, ['second_theorem']);
+  assert.equal(matter(f.map.get('research/assets/main_theorem.md')).data.status, 'approved');
+  f.map.set('research/assets/second_theorem.md', asset('', { title: 'Second theorem' }));
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await f.core.next()).stage, 'falsify');
+  assert.equal(f.core.current.current.assetId, 'second_theorem');
+  f.map.set('research/assets/second_theorem.md', asset('\n## Proof\n\nSecond proof by reflexivity.\n', { title: 'Second theorem' }));
+  await f.core.approve('asset', 'second_theorem', 'test');
+  const ready = await f.core.next();
+  assert.equal(ready.stage, 'ready');
+  assert.deepEqual(f.core.current.extension.newResults, ['second_theorem']);
+  assert.match(ready.instruction, /new result\(s\) second_theorem.*plan-manuscript/);
+});
+
+test('starting with a goal on an approved project extends it instead of returning to ready', async () => {
+  const f = fixture();
+  await driveToReady(f);
+  await f.core.start('claude', { goal: 'Add a new conjecture.', force: true });
+  assert.equal(f.core.current.stage, 'draft_project');
+  assert.deepEqual(f.core.current.extension.baselineRequired, ['main_theorem']);
+  assert.equal((await f.core.next()).stage, 'draft_project');
 });
 
 test('execution may not change the statement, and failed plans need a difference section', async () => {
@@ -239,5 +297,22 @@ test('CLI drives the state machine and validates files on disk', () => {
     assert.equal(p.run(['validate']).status, 1);
     assert.equal(p.run(['validate', '--fix']).status, 0);
     assert.match(p.read('research/assets/forged.md'), /status: draft/);
+  } finally { p.cleanup(); }
+});
+
+test('CLI extend reopens an approved project for a new goal', () => {
+  const p = tempProject();
+  try {
+    p.write('research/project.md', project);
+    assert.equal(p.run(['extend', '--goal', 'New conjecture']).status, 1);
+    p.write('research/approvals.json', JSON.stringify({ version: 1, records: [{ kind: 'project', target: 'project', digest: researchDigest(project, 'project'), approvedAt: 'now' }] }));
+    const extended = p.run(['extend', '--goal', 'New conjecture', '--provider', 'codex']);
+    assert.equal(extended.status, 0, extended.stderr);
+    assert.match(extended.stdout, /draft_project/);
+    assert.match(extended.stdout, /keep every existing bullet/);
+    p.write('research/project.md', extendedProject);
+    const drafted = p.run(['report', 'complete', '--summary', 'Added']);
+    assert.equal(drafted.status, 0, drafted.stderr);
+    assert.match(drafted.stdout, /review_project/);
   } finally { p.cleanup(); }
 });

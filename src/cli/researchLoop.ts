@@ -25,6 +25,7 @@ function parseArgs(argv: string[]): Args {
 const USAGE = `Usage: research-loop <command> [options]
   status [--brief] [--json]
   start --provider claude|codex [--goal "..."] [--session ID] [--force]
+  extend --goal "..." [--provider claude|codex] [--session ID] [--force]   (add a new goal to an approved project)
   resume [--session ID] [--provider claude|codex] [--force] | pause | stop
   next [--json]
   report <complete|none|candidate|confirmed|rejected|proved|failed|question> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
@@ -138,6 +139,13 @@ async function main(): Promise<void> {
       await core.start(provider, { goal: typeof args.flags.goal === 'string' ? args.flags.goal : undefined, sessionId: session, force: args.flags.force === true });
       const next = await core.next();
       out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Started (${provider}). ${next.instruction}`);
+      return;
+    }
+    case 'extend': {
+      const provider = args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined;
+      await core.extend(text(args.flags.goal, 'goal'), { provider, sessionId: session, force: args.flags.force === true });
+      const next = await core.next();
+      out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Extending the project. ${next.instruction}`);
       return;
     }
     case 'resume': { await core.resume({ sessionId: session, provider: args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined, force: args.flags.force === true }); const next = await core.next(); out(json ? { ...core.statusSummary(), instruction: next.instruction } : next.instruction); return; }
