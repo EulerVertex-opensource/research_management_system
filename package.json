@@ -14,7 +14,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -29,8 +31,73 @@
       {
         "command": "research-assistant.showOutput",
         "title": "Research Assistant: Show Output"
+      },
+      {
+        "command": "research-assistant.loop.start",
+        "title": "Research Assistant: Start Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.pause",
+        "title": "Research Assistant: Pause Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.resume",
+        "title": "Research Assistant: Resume Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.stop",
+        "title": "Research Assistant: Stop Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.answerQuestion",
+        "title": "Research Assistant: Answer Pending Loop Question"
+      },
+      {
+        "command": "research-assistant.loop.approve",
+        "title": "Research Assistant: Review Pending Approvals"
+      },
+      {
+        "command": "research-assistant.loop.captureIdea",
+        "title": "Research Assistant: Capture Research Idea"
+      },
+      {
+        "command": "research-assistant.loop.openChat",
+        "title": "Research Assistant: Open Agent Chat"
+      },
+      {
+        "command": "research-assistant.loop.refreshIntegration",
+        "title": "Research Assistant: Refresh Agent Hooks and MCP Setup"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Research Assistant",
+      "properties": {
+        "researchAssistant.loop.questionTimeoutSeconds": {
+          "type": "number",
+          "default": 240,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "How long a research-loop question popup waits for you before the agent continues in auto mode."
+        },
+        "researchAssistant.loop.iterationCap": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Automatic continuations the Stop hook allows per chat session before pausing the loop."
+        },
+        "researchAssistant.loop.provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "claude",
+            "codex"
+          ],
+          "default": "auto",
+          "description": "Which agent chat the status bar and commands open."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "node esbuild.js",
@@ -45,13 +112,13 @@
     "katex": "^0.17.0",
     "marked": "^18.0.4",
     "pdfjs-dist": "^4.10.38",
-    "remark-parse": "^11.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "remark-parse": "^11.0.0",
     "unified": "^11.0.0"
   },
   "devDependencies": {

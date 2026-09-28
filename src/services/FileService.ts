@@ -11,6 +11,10 @@ const PROJECT_TEMPLATE = `# Project
 
 ## Current Goals
 
+## Required Results
+
+List one stable asset ID per bullet, for example main_theorem. The research loop uses this list to decide manuscript readiness.
+
 ## Known Results
 
 ## Open Questions
@@ -224,6 +228,10 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
       '/CLAUDE.md',
       '/.vscode/settings.json',
       '/.vscode/extensions.json',
+      '/.research-assistant-loop/',
+      '/.claude/settings.local.json',
+      '/.mcp.json',
+      '/.codex/hooks.json',
       ...(paths.researchRoot !== '.' ? [`/${paths.researchRoot}/README.md`] : []),
       GITIGNORE_END,
     ].join('\n');

@@ -85,6 +85,18 @@ export class SkillInstallerService {
           await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'migrate-idea-plans.cjs'), migration);
         }));
       }
+      if (skillName === 'research-loop') {
+        const [loop, mcp] = await Promise.all([
+          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'research-loop.cjs')),
+          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'research-loop-mcp.cjs')),
+        ]);
+        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
+          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
+          await vscode.workspace.fs.createDirectory(destination);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'research-loop.cjs'), loop);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'research-loop-mcp.cjs'), mcp);
+        }));
+      }
       if (skillName === 'manuscript-writing') {
         const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'manuscript-writing.cjs'));
         await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {

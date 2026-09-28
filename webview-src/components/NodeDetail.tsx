@@ -295,6 +295,14 @@ export function NodeDetail({
           <NodeTagInput values={fm.related_assets} onChange={(v) => update('related_assets', v)} nodes={assets} onNavigateNode={onNavigateNode} />
         </div>}
 
+        {fm.type === 'example' && <div style={{ marginTop: 8 }}>
+          <label style={lbl}>Refutes asset (counterexample only)</label>
+          <select value={fm.refutes ?? ''} onChange={(e) => update('refutes', e.target.value || undefined)} style={inp}>
+            <option value="">Not a counterexample</option>
+            {assets.filter((asset) => asset.id !== id).map((asset) => <option key={asset.id} value={asset.id}>{asset.title}</option>)}
+          </select>
+        </div>}
+
         {(isPlan || fm.type === 'proof_record') && (
           <div>
             <label style={lbl}>Target asset</label>

@@ -13,6 +13,8 @@ import { ManuscriptBuildService } from '../services/ManuscriptBuildService';
 import { orderAssets } from '../services/AssetOrderService';
 import { syncProofIdeaLinks } from '../services/ProofIdeas';
 import { requirePaperPdfPath } from '../services/PaperPdfPath';
+import { AgentIntegrationService } from '../services/AgentIntegrationService';
+import { LoopHost } from '../services/LoopHost';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
 
@@ -35,6 +37,9 @@ export class WebviewProvider {
   private paperIndex: PaperIndexService | undefined;
   private paths: ProjectPaths | undefined;
   private readonly skillInstaller: SkillInstallerService;
+  private readonly agentIntegration: AgentIntegrationService;
+  readonly loopHost: LoopHost;
+  private integrationEnsured = false;
   private readonly context: vscode.ExtensionContext;
   private readonly manuscriptBuildService: ManuscriptBuildService;
   private manuscriptPhase: ManuscriptBuildPhase = 'idle';
@@ -47,6 +52,8 @@ export class WebviewProvider {
     this.fileService = new FileService(workspaceRoot);
     this.configService = new ProjectConfigService(this.fileService);
     this.skillInstaller = new SkillInstallerService(context.extensionUri, this.fileService);
+    this.agentIntegration = new AgentIntegrationService(this.fileService, context.extensionUri.fsPath, output);
+    this.loopHost = new LoopHost(this.fileService, output);
     this.manuscriptBuildService = new ManuscriptBuildService(this.fileService, workspaceRoot);
   }
 
@@ -64,6 +71,7 @@ export class WebviewProvider {
     if (this.proofIdeasTimer) clearTimeout(this.proofIdeasTimer);
     this.watchers.forEach((watcher) => watcher.dispose());
     this.watchers = [];
+    this.loopHost.dispose();
   }
 
   async open(): Promise<void> {
@@ -123,6 +131,9 @@ export class WebviewProvider {
 
       await this.skillInstaller.installBundledSkills(bundledSkillNames);
       this.output.appendLine('[refresh] Installed bundled agent skills');
+      await this.agentIntegration.ensure(paths);
+      this.integrationEnsured = true;
+      this.output.appendLine('[refresh] Ensured Claude Code and Codex hooks and MCP configuration');
 
       this.configureServices(paths);
       await this.tryOrderAssets();
@@ -164,6 +175,10 @@ export class WebviewProvider {
     const config = await this.configService.loadOrDiscover();
     const paths = this.configService.resolvePaths(config);
     this.configureServices(paths);
+    if (initialized && !this.integrationEnsured) {
+      this.integrationEnsured = true;
+      await this.agentIntegration.ensure(paths).catch((error: unknown) => this.output.appendLine(`[agents] ${String(error)}`));
+    }
     await this.tryOrderAssets();
     await this.tryOrderDefinitions();
     await this.queueProofIdeaSync();
@@ -193,6 +208,7 @@ export class WebviewProvider {
     this.paths = paths;
     this.nodeIndex = new NodeIndexService(this.fileService, paths);
     this.paperIndex = new PaperIndexService(this.fileService, paths);
+    this.loopHost.configure(paths);
   }
 
   private async trySyncProofIdeas(): Promise<void> {
@@ -318,6 +334,8 @@ export class WebviewProvider {
 
     const onNodeFileChange = async (uri: vscode.Uri) => {
       try {
+        const changedId = uri.path.split('/').pop()?.replace(/\.md$/, '');
+        if (changedId && (uri.path.includes(`/${paths.assets}/`) || uri.path.includes(`/${paths.definitions}/`))) await this.loopHost.reconcile(changedId);
         const nodes = await this.nodeIndex!.refresh();
         this.send({ type: 'nodesUpdated', nodes });
         generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
@@ -343,10 +361,13 @@ export class WebviewProvider {
 
     const [assetWatcher, definitionWatcher, ideaWatcher, planWatcher] = nodeWatchers;
     assetWatcher.onDidChange(() => this.scheduleAssetOrder());
+    assetWatcher.onDidChange((uri) => { void onNodeFileChange(uri); });
     assetWatcher.onDidCreate(() => this.scheduleAssetOrder());
+    assetWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); });
     assetWatcher.onDidDelete(() => this.scheduleAssetOrder());
+    assetWatcher.onDidDelete(() => { void onNodeFileDelete(); });
     assetWatcher.onDidCreate(() => this.scheduleProofIdeaSync());
-    definitionWatcher.onDidChange(() => this.scheduleDefinitionOrder());
+    definitionWatcher.onDidChange((uri) => { this.scheduleDefinitionOrder(); void onNodeFileChange(uri); });
     definitionWatcher.onDidCreate(() => this.scheduleDefinitionOrder());
     definitionWatcher.onDidDelete(() => this.scheduleDefinitionOrder());
     ideaWatcher.onDidChange((uri) => { void onNodeFileChange(uri); this.scheduleProofIdeaSync(); });
@@ -539,6 +560,7 @@ export class WebviewProvider {
         case 'saveNode': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.nodeIndex.saveNode(msg.id, msg.frontmatter, msg.body);
+          if (msg.frontmatter.status === 'approved') await this.loopHost.recordApprovalIfHuman(msg.id, 'dashboard');
           await this.queueProofIdeaSync();
           await this.refreshNodes();
           const updated = await this.nodeIndex.getNodeDetail(msg.id);
@@ -589,6 +611,7 @@ export class WebviewProvider {
         case 'updateStatus': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           await this.nodeIndex.updateStatus(msg.id, msg.status as ResearchStatus);
+          if (msg.status === 'approved') await this.loopHost.recordApprovalIfHuman(msg.id, 'dashboard');
           await this.queueProofIdeaSync();
           await this.refreshNodes();
           break;

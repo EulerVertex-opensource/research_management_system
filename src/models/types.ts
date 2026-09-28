@@ -32,6 +32,7 @@ export interface NodeFrontmatter {
   related_assets: string[];
   target_asset?: string;
   inspired_by?: string[];
+  refutes?: string;
 }
 
 export interface ResearchNode {
@@ -48,6 +49,7 @@ export interface ResearchNode {
   related_assets: string[];
   target_asset?: string;
   inspired_by?: string[];
+  refutes?: string;
   body: string;
 }
 

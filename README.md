@@ -207,6 +207,20 @@ node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs sync --app
 
 For a new document, Research Assistant creates the input markers in `main.tex`. In an adopted document, place `% research-assistant:sections:start` and `% research-assistant:sections:end` on their own lines around the section inputs once. The command changes only the text between them; it refuses to guess an insertion point in an existing manuscript. Review the Git diff and compile after syncing. Use Git changes for coauthor review; [Overleaf warns](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/advanced-git-operations) that Git pushes can displace comments and tracked changes.
 
+## Research loop from the agent chat
+
+The research loop is a human-in-the-loop workflow driven from the Claude Code or Codex chat window; the extension provides the state machine, validation, popups, and approval records. Nothing runs headless.
+
+1. Run **Research Assistant: Start Research Loop**, pick the agent, and optionally type the goal. The extension opens that agent's chat.
+2. Type `/research-loop` in Claude Code or `$research-loop` in Codex. The skill runs `status`, `next`, does the stage (heavy stages in a subagent), and `report`s; the Stop hook keeps the agent going until the loop waits for you, is paused, or reaches the per-session cap (`researchAssistant.loop.iterationCap`).
+3. Questions arrive as VS Code popups (`ask_researcher`). Answer, skip, or pause; after `researchAssistant.loop.questionTimeoutSeconds` the agent continues in auto mode and a late answer is shown to it on its next turn.
+4. Approvals arrive as popups with **Open file / Approve / Request changes / Later** (`request_approval`), and also count when you set `status: approved` in the dashboard or the editor. Only the extension writes `research/approvals.json`; the agent is denied by a PreToolUse hook and `validate --fix` reverts any approved node without a record.
+5. The status bar shows the stage, when the loop waits for you, and opens the chat. Commands: Pause, Resume, Stop, Answer Pending Loop Question, Review Pending Approvals, Capture Research Idea.
+
+Stages: `discuss_goals` → `draft_project` → `review_project` → `scaffold` → `sources` → per result `falsify` → (`verify_counterexample`) → `plan` → `execute` → researcher approval → `ready`. A confirmed counterexample deprecates the refuted asset (the corrected statement gets a new ID) and returns to the project goals. Three failed plans since the last direction park the asset until you give a direction or turn an idea into a plan. Draft definitions may be used while proving but must be approved before `ready`.
+
+Generated locally on refresh and ignored by Git: `.claude/settings.local.json` (hooks, permissions), `.mcp.json`, `.codex/hooks.json`, and `.research-assistant-loop/` (state, events, bridge). Claude Code asks once to trust the project MCP server; Codex asks once to trust the project hooks under `/hooks`. Codex reads MCP servers only from its user config, so refresh registers the bundled bridge once with `codex mcp add research-assistant`; the bridge finds the open project through `~/.research-assistant/bridges.json`, which the extension maintains while it runs. The CLI behind the skill is `node .agents/skills/research-loop/scripts/research-loop.cjs` (`status`, `start`, `next`, `report`, `validate`, `park`, `idea add|convert`, `question`).
+
 ## Dashboard
 
 | Panel | Purpose |
@@ -250,6 +264,8 @@ $$
 \sum_{p \leq x} 1 \sim \frac{x}{\log x}
 $$
 ```
+
+An `example` may refute a result with `refutes: <asset_id>` plus `## Assumptions`, `## Calculation`, and after verification `## Verdict`; `draft` is a candidate, `approved` a researcher-confirmed counterexample (the refuted asset becomes `deprecated`), `archived` a rejected one. Provable assets keep the statement above `## Proof`; the statement is frozen while a plan is executed. Plans written after failures need `## Difference from failed plans` naming each failed plan ID and may list `## Assumed definitions`.
 
 A `type: idea` file in `research/ideas/` is a freeform intuition, possible approach, gap, or test case. It uses `status: draft` or `archived` and can name zero or more `related_assets`; it needs no checklist or target asset. A `type: plan` file in `research/plans/` uses `status: pending` or `failed`, one `target_asset`, and optional `inspired_by` idea IDs. Its body has `## Goal`, `## Plan` with ordered checkboxes (`1. [ ] ...`), and `## Verification`; a failed plan also explains the obstruction under `## Failure`. Failure of one approach does not declare the asset false.
 

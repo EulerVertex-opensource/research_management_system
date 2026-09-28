@@ -74,6 +74,9 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - Before editing LaTeX, read every configured macro/preamble file and the notation reference when present.
 - Cite manuscript use of a node with a \`% [node_id]\` comment.
 - Block Markdown math must put opening and closing \`$$\` on separate lines.
+- Approval is a researcher action: never set \`status: approved\` and never edit \`approvals.json\`; request approval through the research loop's \`request_approval\` tool.
+- A failed proof plan is not a falsification; only a verified counterexample confirmed by the researcher refutes a statement.
+- Do not change a statement while proving it; a revised statement gets a new asset ID. New plans after failures need \`## Difference from failed plans\`.
 `;
 }
 
@@ -144,6 +147,9 @@ export async function generateAgentInstructions(
     .concat('- `convert-proof-ideas`: Classify legacy ideas and plans, migrate plans to their own folder, and synchronize Markdown links.')
     .concat('- `plan-manuscript`: Agree on presentation order and write the shared outline and section briefs.')
     .concat('- `manuscript-writing`: Validate section sources, create missing TeX sections, and preview/apply input order.')
+    .concat('- `research-loop`: Drive the human-in-the-loop research loop from the chat (goals, project.md, scaffold, sources, falsify, plan, prove, researcher approval).')
+    .concat('- `falsify-asset`: Search for and independently verify a counterexample to one draft result.')
+    .concat('- `prove-asset`: Write and execute one proof plan for a draft result; convert success into a proof record.')
     .join('\n');
   const agentsContent = `${sharedGuidance(paths)}
 

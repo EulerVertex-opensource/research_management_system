@@ -86,6 +86,24 @@ const ideaPlanMigrationCliConfig = {
   mainFields: ['module', 'main'],
 };
 
+const researchLoopCliConfig = {
+  entryPoints: ['src/cli/researchLoop.ts'],
+  bundle: true,
+  outfile: 'out/research-loop.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
+const researchLoopMcpConfig = {
+  entryPoints: ['src/cli/researchLoopMcp.ts'],
+  bundle: true,
+  outfile: 'out/research-loop-mcp.cjs',
+  format: 'cjs',
+  platform: 'node',
+  mainFields: ['module', 'main'],
+};
+
 const manuscriptWritingCliConfig = {
   entryPoints: ['src/cli/manuscriptWriting.ts'],
   bundle: true,
@@ -106,7 +124,7 @@ async function main() {
     path.join('out', 'webview', 'PDFJS-LICENSE')
   );
   if (isWatch) {
-    const [extCtx, webCtx, cliCtx, migrationCtx, interlinksCtx, proofIdeasCtx, ideaPlanMigrationCtx, writingCtx] = await Promise.all([
+    const [extCtx, webCtx, cliCtx, migrationCtx, interlinksCtx, proofIdeasCtx, ideaPlanMigrationCtx, writingCtx, loopCtx, mcpCtx] = await Promise.all([
       esbuild.context(extensionConfig),
       esbuild.context(webviewConfig),
       esbuild.context(assetOrderCliConfig),
@@ -115,8 +133,10 @@ async function main() {
       esbuild.context(proofIdeasCliConfig),
       esbuild.context(ideaPlanMigrationCliConfig),
       esbuild.context(manuscriptWritingCliConfig),
+      esbuild.context(researchLoopCliConfig),
+      esbuild.context(researchLoopMcpConfig),
     ]);
-    await Promise.all([extCtx.watch(), webCtx.watch(), cliCtx.watch(), migrationCtx.watch(), interlinksCtx.watch(), proofIdeasCtx.watch(), ideaPlanMigrationCtx.watch(), writingCtx.watch()]);
+    await Promise.all([extCtx.watch(), webCtx.watch(), cliCtx.watch(), migrationCtx.watch(), interlinksCtx.watch(), proofIdeasCtx.watch(), ideaPlanMigrationCtx.watch(), writingCtx.watch(), loopCtx.watch(), mcpCtx.watch()]);
     console.log('Watching for changes...');
   } else {
     await Promise.all([
@@ -128,6 +148,8 @@ async function main() {
       esbuild.build(proofIdeasCliConfig),
       esbuild.build(ideaPlanMigrationCliConfig),
       esbuild.build(manuscriptWritingCliConfig),
+      esbuild.build(researchLoopCliConfig),
+      esbuild.build(researchLoopMcpConfig),
     ]);
     console.log('Build complete.');
   }

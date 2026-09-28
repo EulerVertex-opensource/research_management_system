@@ -168,6 +168,7 @@ function parseNode(relativePath: string, raw: string): ResearchNode | null {
       related_assets: Array.isArray(data.related_assets) ? data.related_assets : [],
       target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
       inspired_by: Array.isArray(data.inspired_by) ? data.inspired_by : [],
+      refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
       body: content.trim(),
     };
   } catch {
@@ -287,6 +288,7 @@ export class NodeIndexService {
         related_assets: Array.isArray(data.related_assets) ? data.related_assets : [],
         target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
         inspired_by: Array.isArray(data.inspired_by) ? data.inspired_by : [],
+        refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
       },
       body: content.trim(),
     };
@@ -304,6 +306,7 @@ export class NodeIndexService {
       if (!['draft', 'archived'].includes(frontmatter.status ?? '')) throw new Error('Idea status must be draft or archived.');
       delete data.target_asset;
       delete data.inspired_by;
+      delete data.refutes;
       delete data.depends_on;
       delete data.uses_definitions;
       delete data.used_in;
@@ -332,6 +335,11 @@ export class NodeIndexService {
       delete data.target_asset;
       delete data.kind;
       delete data.inspired_by;
+      if (frontmatter.type !== 'example') delete data.refutes;
+      if (frontmatter.type === 'example' && frontmatter.refutes) {
+        if (!this.isTargetAsset(frontmatter.refutes)) throw new Error('Counterexample must refute an existing asset.');
+        if (!/^## Assumptions\s*$/m.test(body) || !/^## Calculation\s*$/m.test(body)) throw new Error('Counterexample needs Assumptions and Calculation sections.');
+      }
     }
     if (frontmatter.type === 'definition') {
       delete data.uses_definitions;

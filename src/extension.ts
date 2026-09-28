@@ -48,7 +48,29 @@ export function activate(context: vscode.ExtensionContext): void {
     () => output.show(true)
   );
 
-  context.subscriptions.push(output, openDashboard, refreshAgentSetup, showOutput);
+  const loop = (name: string, action: () => Promise<void>) => vscode.commands.registerCommand(`research-assistant.loop.${name}`, async () => {
+    try {
+      await provider!.start();
+      await action();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      output.appendLine(`[loop:${name}] ${message}`);
+      void vscode.window.showErrorMessage(`Research loop: ${message}`);
+    }
+  });
+  const loopCommands = [
+    loop('start', () => provider!.loopHost.startCommand()),
+    loop('pause', () => provider!.loopHost.pauseCommand()),
+    loop('resume', () => provider!.loopHost.resumeCommand()),
+    loop('stop', () => provider!.loopHost.stopCommand()),
+    loop('answerQuestion', () => provider!.loopHost.answerQuestionCommand()),
+    loop('approve', () => provider!.loopHost.approveCommand()),
+    loop('captureIdea', () => provider!.loopHost.captureIdeaCommand()),
+    loop('openChat', () => provider!.loopHost.openChat()),
+    loop('refreshIntegration', () => provider!.refreshProject(true)),
+  ];
+
+  context.subscriptions.push(output, openDashboard, refreshAgentSetup, showOutput, ...loopCommands);
 }
 
 export function deactivate(): void {
