@@ -25,6 +25,8 @@ export const STATE_PATH = `${STATE_DIR}/state.json`;
 export const EVENTS_PATH = `${STATE_DIR}/events.jsonl`;
 export const SNAPSHOT_PATH = `${STATE_DIR}/snapshot.json`;
 export const BRIDGE_PATH = `${STATE_DIR}/bridge.json`;
+/** Local sync bookkeeping (conflict in progress, last prepare); never committed. */
+export const SYNC_PATH = `${STATE_DIR}/sync.json`;
 /** User-level registry of running extension bridges, so a globally registered MCP server can find the project. */
 export const BRIDGE_REGISTRY = ['.research-assistant', 'bridges.json'];
 export interface BridgeEntry { root: string; port: number; token: string; pid: number; startedAt: string }
@@ -34,6 +36,14 @@ export interface LoopFiles {
   writeFile(relativePath: string, content: string): Promise<void>;
   exists(relativePath: string): Promise<boolean>;
   listFiles(relativeDir: string, extension?: string): Promise<string[]>;
+  deleteFile?(relativePath: string): Promise<void>;
+}
+
+/** Git-tracked folders that carry research meaning which used to live only in local loop state. */
+export interface SharedFolders { checks: string; decisions: string; handoffs: string; approvals: string }
+export function sharedFolders(researchRoot: string): SharedFolders {
+  const join = (child: string) => researchRoot === '.' ? child : path.posix.join(researchRoot, child);
+  return { checks: join('checks'), decisions: join('decisions'), handoffs: join('handoffs'), approvals: join('approvals') };
 }
 
 export interface LoopQuestion {
@@ -62,8 +72,10 @@ export interface LoopState {
   status: LoopStatus;
   stage: LoopStage;
   resumeStage?: LoopStage;
-  current: { assetId?: string; planId?: string; counterexampleId?: string; stageStartedAt: string };
+  current: { assetId?: string; planId?: string; counterexampleId?: string; stageStartedAt: string; baseCommit?: string; statementDigest?: string };
+  /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
   progress: Record<string, { falsifiedAt?: string; changesRequested?: string }>;
+  scaffoldBrief?: { missing?: string[]; incomplete?: string[] };
   parked: Record<string, { reason: string; at: string; note?: string }>;
   pendingQuestion?: LoopQuestion;
   answers: LoopAnswer[];
@@ -78,7 +90,10 @@ export interface LoopState {
   updatedAt: string;
 }
 
-export interface ApprovalRecord { kind: 'project' | 'asset' | 'definition'; target: string; digest: string; approvedAt: string; source?: string }
+export interface ApprovalRecord {
+  kind: 'project' | 'asset' | 'definition'; target: string; digest: string; approvedAt: string; source?: string;
+  statement?: string; performed_by?: string; base_commit?: string; extension_version?: string;
+}
 export interface ApprovalFile { version: 1; records: ApprovalRecord[] }
 
 export interface StageReport {
@@ -91,7 +106,7 @@ export interface StageReport {
   assumedDefinitions?: string[];
 }
 
-export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string }
+export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; checks?: string; decisions?: string; handoffs?: string }
 
 export function requiredAssetIds(project: string): string[] {
   const match = /^## Required Results\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(project);
@@ -164,8 +179,13 @@ export function statementIncomplete(body: string): boolean {
   return !statement.trim() || /Write the .* here\.|Describe the .* here\./.test(statement);
 }
 
-/** Validate one research Markdown file that an agent wrote or changed. */
-export function validateResearchFile(filePath: string, raw: string, folders: ResearchFolders, paperIds: Set<string>): void {
+/**
+ * Validate one research Markdown file. By default it applies the rules for a
+ * file the agent wrote; `committed` accepts researcher-approved nodes and the
+ * loop-written shared records, for whole-workspace checks after a pull.
+ */
+export function validateResearchFile(filePath: string, raw: string, folders: ResearchFolders, paperIds: Set<string>, options: { committed?: boolean } = {}): void {
+  const nodeStatuses = options.committed ? ['draft', 'approved', 'deprecated', 'archived'] : ['draft', 'deprecated', 'archived'];
   if (!filePath.endsWith('.md')) throw new Error(`Research file must be Markdown: ${filePath}`);
   let parsed: matter.GrayMatterFile<string>;
   try { parsed = parseMarkdown(raw); } catch (error) { throw new Error(`${filePath}: invalid YAML frontmatter (${String(error)})`); }
@@ -176,7 +196,7 @@ export function validateResearchFile(filePath: string, raw: string, folders: Res
   const folder = path.posix.dirname(filePath);
   if (folder === folders.assets) {
     if (!ASSET_TYPES.has(data.type)) throw new Error(`${id}: invalid asset type.`);
-    if (!['draft', 'deprecated', 'archived'].includes(data.status)) throw new Error(`${id}: agent-written assets must stay draft; approval is a researcher action.`);
+    if (!nodeStatuses.includes(data.status)) throw new Error(`${id}: agent-written assets must stay draft; approval is a researcher action.`);
     if (data.status === 'draft' && statementIncomplete(content)) throw new Error(`${id}: asset statement is incomplete.`);
     if (data.source?.kind === 'paper' && (!paperIds.has(data.source.paper_id) || !data.source.location)) throw new Error(`${id}: paper source needs an indexed paper and precise location.`);
     if (data.source?.kind !== undefined && !['paper', 'self_proved', 'note'].includes(data.source.kind)) throw new Error(`${id}: source.kind must be paper or self_proved.`);
@@ -184,7 +204,7 @@ export function validateResearchFile(filePath: string, raw: string, folders: Res
       if (typeof data.refutes !== 'string' || !hasSection(content, 'Assumptions') || !hasSection(content, 'Calculation')) throw new Error(`${id}: counterexample needs refutes, Assumptions, and Calculation.`);
     }
   } else if (folder === folders.definitions) {
-    if (data.type !== 'definition' || !['draft', 'deprecated', 'archived'].includes(data.status) || !content.trim()) throw new Error(`${id}: invalid draft definition.`);
+    if (data.type !== 'definition' || !nodeStatuses.includes(data.status) || !content.trim()) throw new Error(`${id}: invalid draft definition.`);
   } else if (folder === folders.ideas) {
     if (data.type !== 'idea' || !['draft', 'archived'].includes(data.status) || !content.trim()) throw new Error(`${id}: invalid idea (type idea, status draft or archived, non-empty body).`);
   } else if (folder === folders.plans) {
@@ -194,6 +214,14 @@ export function validateResearchFile(filePath: string, raw: string, folders: Res
     } else if (data.type === 'proof_record') {
       if (data.status !== undefined || typeof data.target_asset !== 'string' || !sectionContent(content, 'Outcome')) throw new Error(`${id}: invalid proof record (no status, target_asset, ## Outcome).`);
     } else throw new Error(`${id}: plan folder files must be plan or proof_record.`);
+  } else if (folders.checks && folder === folders.checks) {
+    if (data.type !== 'falsification_check' || typeof data.target_asset !== 'string' || !['no_counterexample_found', 'counterexample_rejected'].includes(data.outcome) || !sectionContent(content, 'Cases checked') || !hasSection(content, 'Limitations')) {
+      throw new Error(`${id}: invalid falsification check (type falsification_check, target_asset, outcome no_counterexample_found|counterexample_rejected, ## Cases checked, ## Limitations).`);
+    }
+  } else if (options.committed && folders.decisions && folder === folders.decisions) {
+    if (data.type !== 'decision' || typeof data.target !== 'string' || typeof data.kind !== 'string') throw new Error(`${id}: invalid decision record.`);
+  } else if (options.committed && folders.handoffs && folder === folders.handoffs) {
+    if (data.type !== 'handoff') throw new Error(`${id}: invalid handoff record.`);
   } else throw new Error(`Research loop may not write ${filePath}.`);
 }
 

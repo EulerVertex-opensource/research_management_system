@@ -21,6 +21,7 @@ Claude Code has the identical copy under `.claude/skills/research-loop/scripts/`
 - `extend --goal "..."` when the project is already approved (typically at `ready`) and the researcher wants a new conjecture or end goal. It reopens `draft_project`; approved results stay approved and only the new result and its dependencies go through scaffold, falsify, plan, and prove.
 - `pause` when the researcher says so; `stop` ends the run. Never delete research files.
 - After an interruption, run `validate --fix`, check `git status`, and restore unintended partial edits with `git checkout -- <file>` before continuing.
+- At session start, also run `sync status`. If it reports a conflict, tell the researcher and stop. If `behind` is above 0, run `sync pull` before the next stage, and read its summary to the researcher in a few lines.
 
 ## One iteration
 
@@ -35,10 +36,10 @@ Rules the validator enforces:
 
 - `draft_project`: only `project.md`; `## Required Results` lists one bullet per stable snake_case asset ID (`- id: role`). When extending, keep every existing bullet and add at least one new ID.
 - `scaffold`, `sources`: only new draft assets and definitions, plus appended paper index and BibTeX entries. A paper-sourced node needs `paper_id` and an exact location; a new paper needs a stable URL and a BibTeX entry. Unverifiable sources are never cited.
-- `falsify`: one new draft `example` with `refutes: <asset>`, `## Assumptions`, `## Calculation`.
+- `falsify`: one new draft `example` with `refutes: <asset>`, `## Assumptions`, `## Calculation`; or, for `none`, one new check in `<research>/checks/` (`type: falsification_check`, `target_asset`, `outcome: no_counterexample_found`, `## Cases checked`, `## Limitations`). The loop stamps who checked, the statement digest, and the commit, so collaborators see what was tried and a changed statement is re-checked.
 - `plan`: one new `pending` plan, or execute an existing pending plan first. With failed plans present, `## Difference from failed plans` names every failed plan ID.
 - `execute`: only the plan file and the target asset's `## Proof`. The statement is frozen.
-- Nothing ever sets `status: approved` or touches `approvals.json`.
+- Nothing ever sets `status: approved` or touches `approvals/` (or a legacy `approvals.json`), `decisions/`, or `handoffs/`. The loop writes decisions (directions, change requests, parks) and handoffs itself.
 
 ## Asking the researcher
 
@@ -57,9 +58,15 @@ Rules the validator enforces:
   3. Draft the concrete statement and an executable checklist; confirm with `ask_researcher(kind: "discussion")`.
   4. Write the files, run `order-assets` and `link-research-nodes`, link plan and idea with `idea convert <ideaId> --asset ... --goal ... --steps ... --verification ...`, and `unpark` any asset the idea targets.
 
-## Commit points
+## Sharing with collaborators (git sync)
 
-After project approval, scaffold, sources, each proof record, and each approval the researcher tells you about, run `git status` and offer a commit of the research root. Never push and never rename shared files.
+Research files are shared through git; the loop's run state is not. Use only the sync commands. The PreToolUse hook denies raw `git pull`, `push`, `rebase`, and `merge`.
+
+- `sync status`: ahead/behind, uncommitted research files, unreported stage edits, the latest handoff.
+- `sync pull [--remote NAME]`: only between stages (report first). It fetches, rebases or merges, validates every research file, invalidates approvals whose content or dependencies changed upstream, rebuilds parked assets, change requests, and falsification from the shared records, re-baselines the stage, and prints a research summary. On conflicts it stops and pauses the loop. **Never resolve a conflict in a statement, proof, definition, or decision yourself**: show the researcher both sides; after they resolve it and finish the rebase or merge, run `sync pull --continue`.
+- If `report` says HEAD moved during the stage, run `sync pull --continue` and redo the stage. Never report files git brought in as your own.
+- After project approval, scaffold, sources, each proof record, and each approval the researcher tells you about, run `sync prepare` (add `--latex` when the manuscript changed). Fix every FAIL item. On success it writes a handoff; tell the researcher it is ready and that **they** publish (the "Publish Research to Collaborators" command, or `sync publish`, which asks them to confirm in VS Code). Never try to confirm a publish yourself, never push, and never rename shared files.
+- `handoff --note "..."` when the researcher stops for the day, so the next collaborator knows where to continue.
 
 ## Hard rules
 

@@ -7,10 +7,25 @@ import { ProjectPaths } from '../models/types';
 import {
   AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
   MAX_FAILED_PLANS, PROVABLE_TYPES, QuestionKind, SNAPSHOT_PATH, STATE_PATH, StageReport, hasSection, isApproved, isWaitingForHuman, newState,
-  projectSection, proofText, requiredAssetIds, researchDigest, sectionContent, statementDigest, statementIncomplete, validateResearchFile,
+  projectSection, proofText, requiredAssetIds, researchDigest, sectionContent, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
+import { approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
+import { LoopGit } from './LoopGit';
+import {
+  CheckInfo, DecisionInfo, DecisionKind, Provenance, checkMarkdown, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
+  failuresSinceDirection, handoffMarkdown, parseCheck, parseDecision, parseHandoff, stamp, stampCheck,
+} from './ResearchRecords';
 
-export interface CoreOptions { now?: () => string; id?: () => string; iterationCap?: number }
+export interface CoreOptions {
+  now?: () => string;
+  id?: () => string;
+  iterationCap?: number;
+  /** Git for base-commit tracking and provenance; without it the loop works as before. */
+  git?: LoopGit;
+  /** Who performs researcher actions on this machine; defaults to git user.email. */
+  identity?: string;
+  extensionVersion?: string;
+}
 export interface NextResult { stage: LoopStage; instruction: string; brief: Record<string, unknown>; blocked?: string }
 export interface ValidationResult { problems: string[]; fixed: string[] }
 interface AssetInfo { id: string; raw: string; data: Record<string, any>; body: string }
@@ -21,6 +36,7 @@ type Selection =
   | { stage: 'waiting'; reason: string };
 
 const LOCK_TTL_MS = 10 * 60 * 1000;
+const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
 
 /**
  * Pure research-loop engine. Files are the state; this class only reads and
@@ -31,16 +47,58 @@ export class ResearchLoopCore {
   private readonly now: () => string;
   private readonly id: () => string;
   private readonly iterationCap: number;
+  private readonly git: LoopGit | undefined;
+  private identity: string | undefined;
+  private readonly extensionVersion: string | undefined;
 
   constructor(private readonly files: LoopFiles, private paths: ProjectPaths, options: CoreOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.id = options.id ?? (() => crypto.randomUUID());
     this.iterationCap = options.iterationCap ?? 10;
+    this.git = options.git;
+    this.identity = options.identity;
+    this.extensionVersion = options.extensionVersion;
   }
 
   setPaths(paths: ProjectPaths): void { this.paths = paths; }
   get current(): LoopState | undefined { return this.state; }
-  private approvalsPath(): string { return path.posix.join(this.paths.researchRoot, 'approvals.json'); }
+  get projectPaths(): ProjectPaths { return this.paths; }
+  get shared() { return sharedFolders(this.paths.researchRoot); }
+
+  /** Who did it, when, and on which commit; stamped on approvals and shared records. */
+  async provenance(): Promise<Provenance> {
+    if (!this.identity) this.identity = (await this.git?.userEmail()) ?? 'unknown';
+    const head = await this.git?.head();
+    const result: Provenance = { performed_by: this.identity, created_at: this.now() };
+    if (head) result.base_commit = head;
+    if (this.extensionVersion) result.extension_version = this.extensionVersion;
+    return result;
+  }
+
+  private shortId(): string { return this.id().replace(/-/g, '').slice(0, 6).toLowerCase(); }
+
+  /**
+   * Files the loop itself writes (approvals, decisions, handoffs, checks it
+   * stamps) must not count as the agent's edits in the current stage.
+   */
+  private async refreshSnapshot(files: string[]): Promise<void> {
+    if (!files.length) return;
+    const raw = await this.files.readFile(SNAPSHOT_PATH).catch(() => '');
+    if (!raw.trim()) return;
+    const snapshot = JSON.parse(raw) as Record<string, string>;
+    for (const file of files) {
+      const content = await this.files.readFile(file).catch(() => undefined);
+      if (content === undefined || !content.trim()) delete snapshot[file];
+      else snapshot[file] = crypto.createHash('sha256').update(content).digest('hex');
+    }
+    await this.files.writeFile(SNAPSHOT_PATH, JSON.stringify(snapshot, null, 0) + '\n');
+  }
+
+  /** Write a loop-owned file and keep it out of the current stage's change set. */
+  private async writeOwned(file: string, content: string): Promise<void> {
+    await this.files.writeFile(file, content);
+    await this.refreshSnapshot([file]);
+  }
 
   // ---------- state persistence ----------
 
@@ -80,7 +138,7 @@ export class ResearchLoopCore {
   private async setStage(stage: LoopStage, patch: Partial<LoopState['current']> = {}): Promise<void> {
     const state = this.require();
     state.stage = stage;
-    state.current = { ...state.current, ...patch, stageStartedAt: this.now() };
+    state.current = { ...state.current, ...patch, stageStartedAt: this.now(), baseCommit: await this.git?.head() };
     await this.takeSnapshot();
     await this.save();
     await this.event('stage', { stage, assetId: state.current.assetId, planId: state.current.planId });
@@ -95,6 +153,7 @@ export class ResearchLoopCore {
     this.state = state;
     if (options.sessionId) state.lock = { sessionId: options.sessionId, provider, acquiredAt: this.now(), heartbeatAt: this.now() };
     await this.adoptExistingApprovals();
+    await this.rebuildState();
     // A goal given to an already approved project extends it instead of being dropped.
     if (options.goal?.trim()) await this.markExtension(options.goal.trim());
     await this.save();
@@ -187,22 +246,22 @@ export class ResearchLoopCore {
   // ---------- approvals ----------
 
   async approvals(): Promise<ApprovalFile> {
-    const raw = await this.files.readFile(this.approvalsPath()).catch(() => '');
-    if (!raw.trim()) return { version: 1, records: [] };
-    const parsed = JSON.parse(raw) as ApprovalFile;
-    if (parsed.version !== 1 || !Array.isArray(parsed.records)) throw new Error('Invalid approvals file.');
-    return parsed;
+    return readApprovals(this.files, this.paths.researchRoot);
   }
 
   private async writeApprovals(file: ApprovalFile): Promise<void> {
-    await this.files.writeFile(this.approvalsPath(), JSON.stringify(file, null, 2) + '\n');
+    const touched = await writeApprovals(this.files, this.paths.researchRoot, file);
+    await this.refreshSnapshot(touched);
   }
 
   private async record(kind: ApprovalRecord['kind'], target: string, raw: string, source: string): Promise<void> {
     const file = await this.approvals();
     file.records = file.records.filter((entry) => !(entry.kind === kind && entry.target === target));
-    const record: ApprovalRecord & { statement?: string } = { kind, target, digest: researchDigest(raw, kind), approvedAt: this.now(), source };
+    const provenance = await this.provenance();
+    const record: ApprovalRecord = { kind, target, digest: researchDigest(raw, kind), approvedAt: provenance.created_at, source, performed_by: provenance.performed_by };
     if (kind !== 'project') record.statement = statementDigest(raw);
+    if (provenance.base_commit) record.base_commit = provenance.base_commit;
+    if (provenance.extension_version) record.extension_version = provenance.extension_version;
     file.records.push(record);
     await this.writeApprovals(file);
   }
@@ -218,7 +277,7 @@ export class ResearchLoopCore {
         try { data = parseMarkdown(raw).data; } catch { continue; }
         const id = path.posix.basename(filePath, '.md');
         if (data.status !== 'approved' || file.records.some((record) => record.kind === kind && record.target === id)) continue;
-        file.records.push({ kind, target: id, digest: researchDigest(raw, kind), approvedAt: this.now(), source: 'adopted', ...({ statement: statementDigest(raw) } as object) });
+        file.records.push({ kind, target: id, digest: researchDigest(raw, kind), approvedAt: this.now(), source: 'adopted', statement: statementDigest(raw) });
         adopted.push(id);
       }
     }
@@ -247,12 +306,12 @@ export class ResearchLoopCore {
       const parsed = parseMarkdown(raw);
       parsed.data.status = 'approved';
       const approved = stringifyMarkdown(parsed.content, parsed.data);
-      await this.files.writeFile(file, approved);
+      await this.writeOwned(file, approved);
       await this.record(kind, target, approved, source);
     }
     if (this.state) {
       this.state.approvalQueue = this.state.approvalQueue.filter((item) => !(item.target === target && (item.kind === kind || (kind === 'asset' && (item.kind === 'citation' || item.kind === 'counterexample')))));
-      if (kind === 'asset' && this.state.parked[target]) delete this.state.parked[target];
+      if (kind === 'asset') await this.clearPark(target, `approved (${source})`);
       await this.save();
     }
     await this.event('approved', { kind, target, source });
@@ -268,9 +327,10 @@ export class ResearchLoopCore {
     if (data.status !== 'approved') return false;
     if (isApproved((await this.approvals()).records, kind, target, raw)) return false;
     await this.record(kind, target, raw, source);
+    await this.refreshSnapshot([file]);
     if (this.state) {
       this.state.approvalQueue = this.state.approvalQueue.filter((item) => !(item.target === target && ['asset', 'citation', 'definition', 'counterexample'].includes(item.kind)));
-      delete this.state.parked[target];
+      await this.clearPark(target, `approved (${source})`);
       await this.save();
     }
     await this.event('approved', { kind, target, source });
@@ -288,13 +348,13 @@ export class ResearchLoopCore {
     if (await this.files.exists(targetFile)) {
       const parsed = parseMarkdown(await this.files.readFile(targetFile));
       parsed.data.status = 'deprecated';
-      await this.files.writeFile(targetFile, stringifyMarkdown(parsed.content, parsed.data));
+      await this.writeOwned(targetFile, stringifyMarkdown(parsed.content, parsed.data));
       const approvals = await this.approvals();
       approvals.records = approvals.records.filter((record) => !(record.kind === 'asset' && record.target === target));
       await this.writeApprovals(approvals);
     }
     if (this.state) {
-      delete this.state.parked[target];
+      await this.clearPark(target, `refuted by ${exampleId}`);
       this.state.approvalQueue = this.state.approvalQueue.filter((item) => item.target !== exampleId);
       await this.save();
     }
@@ -307,7 +367,7 @@ export class ResearchLoopCore {
     const parsed = parseMarkdown(await this.files.readFile(file));
     parsed.data.status = 'archived';
     const body = hasSection(parsed.content, 'Verdict') ? parsed.content : `${parsed.content.trimEnd()}\n\n## Verdict\n\nrejected: ${reason || 'rejected by the researcher'}\n`;
-    await this.files.writeFile(file, stringifyMarkdown(body, parsed.data));
+    await this.writeOwned(file, stringifyMarkdown(body, parsed.data));
     if (this.state) {
       const target = parsed.data.refutes as string | undefined;
       if (target && this.state.parked[target]?.reason === 'counterexample_pending') delete this.state.parked[target];
@@ -321,7 +381,7 @@ export class ResearchLoopCore {
    * Revert approvals that no longer match their digest, and invalidate
    * dependants whose approved dependency changed its statement.
    */
-  async reconcile(changedId?: string): Promise<string[]> {
+  async reconcile(changedId?: string, options: { dryRun?: boolean; details?: Array<{ id: string; reason: string }> } = {}): Promise<string[]> {
     const approvals = await this.approvals();
     const reverted: string[] = [];
     const nodes = new Map<string, { kind: 'asset' | 'definition'; file: string; raw: string; data: Record<string, any> }>();
@@ -338,9 +398,11 @@ export class ResearchLoopCore {
       parsed.data.status = 'draft';
       node.raw = stringifyMarkdown(parsed.content, parsed.data);
       node.data = parsed.data;
-      await this.files.writeFile(node.file, node.raw);
       approvals.records = approvals.records.filter((record) => !(record.kind === node.kind && record.target === id));
       reverted.push(id);
+      options.details?.push({ id, reason });
+      if (options.dryRun) return;
+      await this.files.writeFile(node.file, node.raw);
       await this.event('approval_invalidated', { id, reason });
     };
     const candidates = changedId ? [changedId] : [...nodes.keys()];
@@ -359,7 +421,7 @@ export class ResearchLoopCore {
         }
       }
     }
-    if (reverted.length) await this.writeApprovals(approvals);
+    if (reverted.length && !options.dryRun) await this.writeApprovals(approvals);
     return reverted;
   }
 
@@ -389,6 +451,7 @@ export class ResearchLoopCore {
     await this.event('question_answered', { questionId, kind: question.kind, decision, hasText: Boolean(text.trim()) });
     const assetId = question.assetId;
     if (decision === 'answer' && text.trim()) state.researcherInput = { kind: question.kind, text: text.trim(), at: this.now() };
+    if (decision === 'answer' && text.trim() && question.kind === 'discussion') await this.writeDecision('answer', assetId ?? 'project', `${question.prompt}\n\n${text.trim()}`);
     if (question.kind === 'goals') {
       if (decision === 'answer' && text.trim()) await this.setStage('draft_project');
       else if (projectSection(await this.files.readFile(this.paths.projectMd).catch(() => ''), 'Main Problem')) await this.setStage('draft_project');
@@ -396,8 +459,9 @@ export class ResearchLoopCore {
     } else if (question.kind === 'blocked' && assetId) {
       if (decision === 'answer' && text.trim()) {
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
-        (state.progress[assetId] as any).failuresSinceDirection = 0;
         await this.saveIdea(`Direction for ${assetId}`, text, [assetId], 'researcher');
+        // The direction answers every failed plan so far; the shared record resets the failure count on every machine.
+        await this.writeDecision('direction', assetId, text, { failedPlansAtDirection: await this.failedPlans(assetId) });
         delete state.parked[assetId];
         await this.setStage('plan', { assetId, planId: undefined });
       } else {
@@ -463,11 +527,15 @@ export class ResearchLoopCore {
     }
     state.approvalQueue = state.approvalQueue.filter((item) => item.id !== requestId);
     state.researcherInput = { kind: `changes:${request.kind}:${request.target}`, text: text.trim() || 'Revise and resubmit.', at: this.now() };
+    if (request.kind === 'asset') {
+      const raw = await this.files.readFile(`${this.paths.assets}/${request.target}.md`).catch(() => '');
+      await this.writeDecision('changes_requested', request.target, text.trim() || 'Revise the proof.', { digest: raw ? researchDigest(raw, 'asset') : undefined });
+    }
     if (request.kind === 'project') await this.setStage('draft_project');
     else if (request.kind === 'counterexample') await this.rejectCounterexample(request.target, text, source);
     else {
       state.progress[request.target] = { ...state.progress[request.target], changesRequested: text.trim() || 'Revise the proof.' };
-      if (state.parked[request.target]) delete state.parked[request.target];
+      await this.clearPark(request.target, 'changes requested');
       await this.setStage('select');
     }
     return request;
@@ -476,6 +544,7 @@ export class ResearchLoopCore {
   async park(assetId: string, reason: string, note?: string): Promise<void> {
     const state = this.require();
     state.parked[assetId] = { reason, at: this.now(), note };
+    await this.writeDecision('parked', assetId, note ?? '', { reason });
     await this.save();
     await this.event('parked', { assetId, reason });
   }
@@ -483,8 +552,105 @@ export class ResearchLoopCore {
   async unpark(assetId: string): Promise<void> {
     const state = this.require();
     delete state.parked[assetId];
+    await this.writeDecision('unparked', assetId, 'Unparked by the researcher.');
     await this.save();
     await this.event('unparked', { assetId });
+  }
+
+  /** Lift a park; a park that collaborators can see (a decision record) is lifted by a record too. */
+  private async clearPark(assetId: string, why: string): Promise<void> {
+    const entry = this.state?.parked[assetId];
+    if (!entry) return;
+    delete this.state!.parked[assetId];
+    if (entry.reason !== 'counterexample_pending') await this.writeDecision('unparked', assetId, why);
+  }
+
+  // ---------- shared records ----------
+
+  private async writeDecision(kind: DecisionKind, target: string, text: string, extra: { reason?: string; failedPlansAtDirection?: string[]; digest?: string } = {}): Promise<string> {
+    const provenance = await this.provenance();
+    const id = decisionId(kind, target, provenance, this.shortId());
+    await this.writeOwned(`${this.shared.decisions}/${id}.md`, decisionMarkdown(kind, target, text, provenance, extra));
+    return id;
+  }
+
+  async decisions(): Promise<DecisionInfo[]> {
+    const result: DecisionInfo[] = [];
+    for (const file of await this.files.listFiles(this.shared.decisions)) {
+      const info = parseDecision(path.posix.basename(file, '.md'), await this.files.readFile(file).catch(() => ''));
+      if (info) result.push(info);
+    }
+    return result;
+  }
+
+  async checks(): Promise<CheckInfo[]> {
+    const result: CheckInfo[] = [];
+    for (const file of await this.files.listFiles(this.shared.checks)) {
+      const info = parseCheck(path.posix.basename(file, '.md'), await this.files.readFile(file).catch(() => ''));
+      if (info) result.push(info);
+    }
+    return result;
+  }
+
+  /** A falsification check covers the asset's current statement; a changed statement needs a new check. */
+  private isFalsified(assetId: string, raw: string, checks: CheckInfo[]): boolean {
+    const digest = statementDigest(raw);
+    return checks.some((check) => check.target === assetId && check.statementDigest === digest);
+  }
+
+  private async writeCheck(assetId: string, outcome: 'no_counterexample_found' | 'counterexample_rejected', cases: string, limitations: string): Promise<string> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+    const provenance = await this.provenance();
+    const id = `check_${assetId}_${stamp(provenance.created_at)}_${this.shortId()}`;
+    const file = `${this.shared.checks}/${id}.md`;
+    await this.writeOwned(file, checkMarkdown(assetId, outcome, cases, limitations, statementDigest(raw), provenance));
+    return file;
+  }
+
+  private async failuresSinceDirection(assetId: string): Promise<number> {
+    return failuresSinceDirection(await this.failedPlans(assetId), await this.decisions(), assetId).length;
+  }
+
+  /**
+   * Re-derive the research meaning of the local state from the shared records,
+   * so a fresh clone, a deleted state.json, or a pull sees what collaborators
+   * decided. Legacy local-only facts are first written out as records.
+   */
+  async rebuildState(): Promise<{ parked: string[]; changesRequested: string[]; migrated: string[] }> {
+    const state = this.require();
+    const migrated = await this.migrateLocalState();
+    const decisions = await this.decisions();
+    const assets = await this.collect(this.paths.assets);
+    const localPending = Object.fromEntries(Object.entries(state.parked).filter(([, info]) => info.reason === 'counterexample_pending'));
+    state.parked = { ...deriveParked(decisions), ...localPending };
+    const requested = deriveChangesRequested(decisions, (target) => { const raw = assets.get(target)?.raw; return raw ? researchDigest(raw, 'asset') : undefined; });
+    for (const id of Object.keys(state.progress)) if (state.progress[id].changesRequested && !requested[id]) state.progress[id] = { ...state.progress[id], changesRequested: undefined };
+    for (const [id, text] of Object.entries(requested)) state.progress[id] = { ...state.progress[id], changesRequested: text };
+    await this.save();
+    return { parked: Object.keys(state.parked), changesRequested: Object.keys(requested), migrated };
+  }
+
+  /** One-time export of facts that older versions kept only in state.json. */
+  private async migrateLocalState(): Promise<string[]> {
+    const state = this.require();
+    const migrated: string[] = [];
+    const checks = await this.checks();
+    for (const [assetId, progress] of Object.entries(state.progress)) {
+      if (!progress.falsifiedAt) continue;
+      const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+      if (raw && !this.isFalsified(assetId, raw, checks)) {
+        await this.writeCheck(assetId, 'no_counterexample_found', `Recorded by an earlier loop version on ${progress.falsifiedAt}; the cases were not written down.`, 'Unknown: migrated from local loop state. Re-run falsification if in doubt.');
+        migrated.push(`check:${assetId}`);
+      }
+      state.progress[assetId] = { ...progress, falsifiedAt: undefined };
+    }
+    const recorded = deriveParked(await this.decisions());
+    for (const [assetId, info] of Object.entries(state.parked)) {
+      if (info.reason === 'counterexample_pending' || recorded[assetId]) continue;
+      await this.writeDecision('parked', assetId, info.note ?? '', { reason: info.reason });
+      migrated.push(`parked:${assetId}`);
+    }
+    return migrated;
   }
 
   // ---------- ideas ----------
@@ -511,7 +677,7 @@ export class ResearchLoopCore {
     const difference = failed.length ? `\n## Difference from failed plans\n\n${failed.map((id) => `- ${id}: new route from idea ${ideaId}`).join('\n')}\n` : '';
     const raw = stringifyMarkdown(`\n## Goal\n\nTarget: [asset](../assets/${assetId}.md)\n\n${goal.trim()}\n\n## Plan\n\n${checklist}\n\n## Verification\n\n${verification.trim()}\n${difference}`, { type: 'plan', title: goal.trim().slice(0, 80), status: 'pending', target_asset: assetId, inspired_by: [ideaId], tags: [] });
     await this.files.writeFile(`${this.paths.plans}/${planId}.md`, raw);
-    if (this.state?.parked[assetId]) { delete this.state.parked[assetId]; await this.save(); }
+    if (this.state?.parked[assetId]) { await this.clearPark(assetId, `new plan ${planId} from idea ${ideaId}`); await this.save(); }
     await this.event('idea_converted', { ideaId, planId, assetId });
     return planId;
   }
@@ -596,6 +762,7 @@ export class ResearchLoopCore {
     const incomplete = order.filter((id) => assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
     if (incomplete.length) return { stage: 'scaffold', missing: [], incomplete };
     const examples = [...assets.values()].filter((asset) => asset.data.type === 'example' && typeof asset.data.refutes === 'string');
+    const checks = await this.checks();
     const settled = new Set<string>();
     let candidate: { stage: 'falsify' | 'plan'; assetId: string } | undefined;
     for (const id of order) {
@@ -635,7 +802,7 @@ export class ResearchLoopCore {
       }
       const deps = Array.isArray(asset.data.depends_on) ? asset.data.depends_on as string[] : [];
       if (!deps.every((dep) => settled.has(dep))) continue;
-      if (!candidate) candidate = { stage: state.progress[id]?.falsifiedAt ? 'plan' : 'falsify', assetId: id };
+      if (!candidate) candidate = { stage: this.isFalsified(id, asset.raw, checks) ? 'plan' : 'falsify', assetId: id };
     }
     if (candidate) return candidate;
     const definitionIds = this.definitionClosure(order, assets, definitions);
@@ -675,7 +842,7 @@ export class ResearchLoopCore {
       const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined };
       if (selection.stage === 'plan' && 'assetId' in selection) patch.planId = await this.pendingPlan(selection.assetId);
       await this.setStage(selection.stage, patch);
-      if (selection.stage === 'scaffold') (state as any).scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete };
+      if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete };
       if (selection.stage === 'waiting') state.lastError = selection.reason;
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
     }
@@ -687,8 +854,8 @@ export class ResearchLoopCore {
     const brief: Record<string, unknown> = {
       stage: state.stage, assetId: state.current.assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId,
       researcherInput: state.researcherInput?.text, changesRequested: state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined,
-      parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: (state as any).scaffoldBrief, extension: state.extension,
-      paths: { project: this.paths.projectMd, assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, papers: this.paths.paperIndex, bibliography: this.paths.bibliography },
+      parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: state.scaffoldBrief, extension: state.extension,
+      paths: { project: this.paths.projectMd, assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, checks: this.shared.checks, papers: this.paths.paperIndex, bibliography: this.paths.bibliography },
     };
     return { stage: state.stage, instruction: blocked ?? this.instruction(state), brief, blocked };
   }
@@ -705,13 +872,13 @@ export class ResearchLoopCore {
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
-        const brief = (state as any).scaffoldBrief as { missing?: string[]; incomplete?: string[] } | undefined;
+        const brief = state.scaffoldBrief;
         return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind self_proved (unless genuinely sourced), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Do not modify existing assets or definitions. Then run order-assets and link-research-nodes.${input}${report('complete|question')}`;
       }
       case 'sources':
         return `Stage sources. Find results from indexed papers (or a verifiable new paper) that the required results can use. For a new paper append a ## slug section with a stable DOI/arXiv/publisher URL to ${this.paths.paperIndex} and a matching BibTeX entry to ${this.paths.bibliography}; never change existing entries. Create only draft, paper-sourced assets (paper_id and exact location) and draft definitions. If a source cannot be verified, do not cite it: ask the researcher or record an idea. Return none when nothing verifiable exists.${report('complete|none|question')}`;
       case 'falsify':
-        return `Stage falsify for asset ${asset}. Use the falsify-asset skill: try to refute the exact statement. A candidate must be a new draft example in ${this.paths.assets}/ with refutes: ${asset}, ## Assumptions, ## Calculation. Return candidate --counterexample <id>, or none. A failed proof attempt is not a counterexample.${input}${report('candidate|none|question')}`;
+        return `Stage falsify for asset ${asset}. Use the falsify-asset skill: try to refute the exact statement. A candidate must be a new draft example in ${this.paths.assets}/ with refutes: ${asset}, ## Assumptions, ## Calculation; return candidate --counterexample <id>. With no counterexample, write one falsification check ${this.shared.checks}/check_${asset}_<short_slug>.md (type falsification_check, title, target_asset: ${asset}, outcome: no_counterexample_found, ## Cases checked listing each family tried, ## Limitations naming what was not covered) and return none. A failed proof attempt is not a counterexample.${input}${report('candidate|none|question')}`;
       case 'verify_counterexample':
         return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
@@ -739,8 +906,9 @@ export class ResearchLoopCore {
   private async fingerprints(): Promise<Record<string, string>> {
     const map: Record<string, string> = {};
     const add = async (file: string) => { const raw = await this.files.readFile(file).catch(() => undefined); if (raw !== undefined) map[file] = crypto.createHash('sha256').update(raw).digest('hex'); };
-    for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans]) for (const file of await this.files.listFiles(folder)) await add(file);
-    for (const file of [this.paths.projectMd, this.paths.paperIndex, this.paths.bibliography, this.approvalsPath()]) await add(file);
+    const shared = this.shared;
+    for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, shared.checks, shared.decisions, shared.handoffs]) for (const file of await this.files.listFiles(folder)) await add(file);
+    for (const file of [this.paths.projectMd, this.paths.paperIndex, this.paths.bibliography, ...await approvalFiles(this.files, this.paths.researchRoot)]) await add(file);
     return map;
   }
 
@@ -748,12 +916,12 @@ export class ResearchLoopCore {
   async changedFiles(): Promise<{ added: string[]; modified: string[]; before: Record<string, string> }> {
     const before = JSON.parse(await this.files.readFile(SNAPSHOT_PATH).catch(() => '{}')) as Record<string, string>;
     const after = await this.fingerprints();
-    const added = Object.keys(after).filter((file) => !(file in before)).sort();
+    const added = Object.keys(after).filter((file) => !(file in before) && after[file] !== EMPTY_HASH).sort();
     const modified = Object.keys(after).filter((file) => file in before && before[file] !== after[file]).sort();
     return { added, modified, before };
   }
 
-  private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans }; }
+  private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, checks: this.shared.checks, decisions: this.shared.decisions, handoffs: this.shared.handoffs }; }
 
   private async paperIds(): Promise<Set<string>> {
     const index = await this.files.readFile(this.paths.paperIndex).catch(() => '');
@@ -771,6 +939,7 @@ export class ResearchLoopCore {
     const allowedFolders = new Set<string>([folders.ideas]);
     if (stage === 'scaffold' || stage === 'sources') { allowedFolders.add(folders.assets); allowedFolders.add(folders.definitions); }
     if (stage === 'falsify' || stage === 'verify_counterexample') allowedFolders.add(folders.assets);
+    if (stage === 'falsify') allowedFolders.add(folders.checks);
     if (stage === 'plan' || stage === 'execute') allowedFolders.add(folders.plans);
     if (stage === 'execute') allowedFolders.add(folders.assets);
     const allowedFiles = new Set<string>();
@@ -778,8 +947,9 @@ export class ResearchLoopCore {
     if (stage === 'sources') { allowedFiles.add(this.paths.paperIndex); allowedFiles.add(this.paths.bibliography); }
     const paperIds = await this.paperIds();
     for (const file of [...added, ...modified]) {
-      if (file === this.approvalsPath()) { problems.push('approvals.json was modified; only the researcher may approve. Restore it with git.'); continue; }
+      if (isApprovalPath(this.paths.researchRoot, file)) { problems.push(`${file}: approval records were modified; only the researcher may approve. Restore it with git.`); continue; }
       const folder = path.posix.dirname(file);
+      if (folder === folders.decisions || folder === folders.handoffs) { problems.push(`${file}: decisions and handoffs are written only by the loop. Restore it with git.`); continue; }
       if (!allowedFiles.has(file) && !allowedFolders.has(folder)) { problems.push(`${file}: not writable during stage ${stage}.`); continue; }
       if (file === this.paths.paperIndex || file === this.paths.bibliography) continue; // append-only check below
       if (file === this.paths.projectMd) {
@@ -795,6 +965,7 @@ export class ResearchLoopCore {
       if (stage === 'execute' && isIn(file, folders.plans) && file !== `${folders.plans}/${state.current.planId}.md`) problems.push(`${file}: execution may change only its active plan.`);
       if ((stage === 'plan' || stage === 'execute') && isIn(file, folders.plans) && data.target_asset !== state.current.assetId) problems.push(`${file}: plan targets ${data.target_asset}, not ${state.current.assetId}.`);
       if ((stage === 'falsify' || stage === 'verify_counterexample') && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md` && (data.type !== 'example' || data.refutes !== state.current.assetId)) problems.push(`${file}: only a counterexample example refuting ${state.current.assetId} may be written now.`);
+      if (isIn(file, folders.checks) && (stage !== 'falsify' || data.target_asset !== state.current.assetId || data.outcome !== 'no_counterexample_found')) problems.push(`${file}: a falsification check may only record no_counterexample_found for ${state.current.assetId} during falsify.`);
       if (isIn(file, folders.plans) && data.type === 'plan') {
         const failed = (await this.failedPlans(String(data.target_asset))).filter((id) => id !== path.posix.basename(file, '.md'));
         if (failed.length && data.status === 'pending') {
@@ -830,16 +1001,40 @@ export class ResearchLoopCore {
     if (stage === 'execute' && state.current.assetId) {
       const file = `${folders.assets}/${state.current.assetId}.md`;
       const raw = await this.files.readFile(file).catch(() => '');
-      const frozen = (state.current as any).statementDigest as string | undefined;
+      const frozen = state.current.statementDigest;
       if (raw && frozen && statementDigest(raw) !== frozen) problems.push(`${file}: the statement changed during execution. Restore it; a new statement needs a new asset ID.`);
     }
     return { added, modified, problems };
   }
 
-  private async originalFromGitOrSnapshot(_file: string, _before: Record<string, string>): Promise<string | undefined> {
-    // Append-only checks compare against the content recorded at stage start when available.
-    const stash = await this.files.readFile(`${path.posix.dirname(SNAPSHOT_PATH)}/stage-files/${_file.replace(/\//g, '__')}`).catch(() => undefined);
-    return stash;
+  private async originalFromGitOrSnapshot(file: string, _before: Record<string, string>): Promise<string | undefined> {
+    // Append-only checks compare against the content recorded at stage start, else the stage's base commit.
+    const stash = await this.files.readFile(`${path.posix.dirname(SNAPSHOT_PATH)}/stage-files/${file.replace(/\//g, '__')}`).catch(() => undefined);
+    if (stash !== undefined || !this.git) return stash;
+    return this.git.showFile(this.state?.current.baseCommit ?? 'HEAD', file);
+  }
+
+  /**
+   * Refuse to attribute files that git changed during the stage (a pull, a
+   * merge, a collaborator's commit) to the agent. Local commits by this
+   * researcher at a commit point are fine: they do not change the working tree.
+   */
+  private async staleBaseProblem(): Promise<string | undefined> {
+    const base = this.state?.current.baseCommit;
+    if (!this.git || !base) return undefined;
+    const head = await this.git.head();
+    if (!head || head === base) return undefined;
+    const { added, modified } = await this.changedFiles();
+    const touched = [...added, ...modified];
+    if (!touched.length) return undefined;
+    const viaGit = new Set((await this.git.diffNameStatus(base, head, touched).catch(() => [])).map((entry) => entry.path));
+    const overlap = touched.filter((file) => viaGit.has(file));
+    if (!overlap.length) return undefined;
+    const me = (await this.provenance()).performed_by;
+    const authors = await this.git.authors(`${base}..${head}`, overlap);
+    const merges = Number((await this.git.run(['rev-list', '--count', '--merges', `${base}..${head}`])).stdout.trim()) || 0;
+    if (!merges && authors.every((author) => author === me)) return undefined;
+    return `HEAD moved from ${base.slice(0, 8)} to ${head.slice(0, 8)} during stage ${this.state!.stage} and changed ${overlap.join(', ')} (by ${authors.join(', ') || 'unknown'}). These are not this stage's edits. Run \`${LOOP_COMMAND} sync pull --continue\` to re-baseline, then redo the stage.`;
   }
 
   private async stashStageFiles(): Promise<void> {
@@ -853,6 +1048,8 @@ export class ResearchLoopCore {
     const state = this.require();
     if (state.status !== 'running') throw new Error(`The loop is ${state.status}; resume it first.`);
     if (state.pendingQuestion) throw new Error(`Question ${state.pendingQuestion.id} is still pending; answer it (or wait) before reporting.`);
+    const stale = report.outcome === 'question' ? undefined : await this.staleBaseProblem();
+    if (stale) throw new Error(stale);
     const stage = state.stage;
     const finish = async (message: string, next: LoopStage, patch: Partial<LoopState['current']> = {}) => {
       state.lastSummary = { stage, assetId: state.current.assetId, outcome: report.outcome, summary: report.summary, files: [], at: this.now() };
@@ -890,7 +1087,7 @@ export class ResearchLoopCore {
       }
       case 'scaffold': {
         await validated();
-        delete (state as any).scaffoldBrief;
+        delete state.scaffoldBrief;
         await this.stashStageFiles();
         return finish('Scaffold recorded. Next: sources.', 'sources');
       }
@@ -909,7 +1106,10 @@ export class ResearchLoopCore {
           return finish(`Candidate ${candidate} recorded. Next: verify it independently.`, 'verify_counterexample', { counterexampleId: candidate });
         }
         if (report.outcome !== 'none') throw new Error('falsify outcome must be candidate, none, or question.');
-        state.progress[assetId] = { ...state.progress[assetId], falsifiedAt: this.now() };
+        const checkFiles = added.filter((file) => path.posix.dirname(file) === this.shared.checks);
+        if (checkFiles.length !== 1) throw new Error(`none needs exactly one new falsification check in ${this.shared.checks}/ for ${assetId} (## Cases checked, ## Limitations); found ${checkFiles.length}.`);
+        const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+        await this.files.writeFile(checkFiles[0], stampCheck(await this.files.readFile(checkFiles[0]), statementDigest(assetRaw), await this.provenance()));
         return finish(`No counterexample found for ${assetId}. Next: plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
       }
       case 'verify_counterexample': {
@@ -925,7 +1125,7 @@ export class ResearchLoopCore {
         }
         if (report.outcome !== 'rejected') throw new Error('verify_counterexample outcome must be confirmed, rejected, or question.');
         if (example.data.status !== 'archived') throw new Error(`Set ${exampleId} status to archived when rejecting it.`);
-        state.progress[assetId] = { ...state.progress[assetId], falsifiedAt: this.now() };
+        await this.writeCheck(assetId, 'counterexample_rejected', `Candidate ${exampleId} was checked independently and rejected:\n\n${sectionContent(example.content, 'Verdict') || report.summary}`, 'Only this candidate family was examined; no systematic search beyond it is recorded here.');
         return finish(`Candidate rejected. Next: plan for ${assetId}.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
       }
       case 'plan': {
@@ -938,7 +1138,7 @@ export class ResearchLoopCore {
         if (plan.data.type !== 'plan' || plan.data.status !== 'pending' || plan.data.target_asset !== assetId) throw new Error(`${planId} must be a pending plan targeting ${assetId}.`);
         const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
-        (state.current as any).statementDigest = statementDigest(assetRaw);
+        state.current.statementDigest = statementDigest(assetRaw);
         state.researcherInput = undefined;
         return finish(`Plan ${planId} recorded. Next: execute it.`, 'execute', { planId });
       }
@@ -954,15 +1154,13 @@ export class ResearchLoopCore {
           if (asset.data.status !== 'draft') throw new Error(`${assetId} must stay draft until the researcher approves it.`);
           await this.enqueueApproval('asset', assetId, `Proof from ${planId}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
           for (const definition of report.assumedDefinitions ?? []) if (await this.files.exists(`${this.paths.definitions}/${definition}.md`)) await this.enqueueApproval('definition', definition, `Used by the proof of ${assetId}.`);
-          delete (state.current as any).statementDigest;
+          delete state.current.statementDigest;
           return finish(`Proof recorded for ${assetId}. Call request_approval(kind: "asset", target: "${assetId}") and continue with next.`, 'select', { assetId: undefined, planId: undefined });
         }
         if (report.outcome !== 'failed') throw new Error('execute outcome must be proved, failed, or question.');
         if (plan.data.type !== 'plan' || plan.data.status !== 'failed' || !sectionContent(plan.content, 'Failure')) throw new Error(`${planId} must have status failed and a ## Failure section.`);
-        const progress = state.progress[assetId] ?? {};
-        const failures = ((progress as any).failuresSinceDirection ?? 0) + 1;
-        state.progress[assetId] = { ...progress, ...({ failuresSinceDirection: failures } as object) };
-        delete (state.current as any).statementDigest;
+        const failures = await this.failuresSinceDirection(assetId);
+        delete state.current.statementDigest;
         if (failures >= MAX_FAILED_PLANS) {
           await this.setStage('plan', { planId: undefined });
           await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId });
@@ -1002,6 +1200,119 @@ export class ResearchLoopCore {
     if (fixed.length) await this.writeApprovals(approvals);
     if (options.fix) fixed.push(...await this.reconcile());
     return { problems, fixed };
+  }
+
+  // ---------- whole-workspace checks and handoffs (used by sync) ----------
+
+  /** Validate every committed research file, dependency references, and cycles; returns problems without changing files. */
+  async validateAll(): Promise<string[]> {
+    const problems: string[] = [];
+    const folders = this.folders();
+    const paperIds = await this.paperIds();
+    const assets = await this.collect(this.paths.assets);
+    const definitions = await this.collect(this.paths.definitions);
+    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, folders.checks, folders.decisions, folders.handoffs]) {
+      for (const file of await this.files.listFiles(folder)) {
+        const raw = await this.files.readFile(file);
+        if (/^<{7} |^>{7} |^={7}$/m.test(raw)) { problems.push(`${file}: unresolved merge conflict markers.`); continue; }
+        try { validateResearchFile(file, raw, folders, paperIds, { committed: true }); } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); continue; }
+        const data = parseMarkdown(raw).data;
+        for (const dep of Array.isArray(data.depends_on) ? data.depends_on : []) {
+          const known = folder === folders.definitions ? definitions.has(String(dep)) : assets.has(String(dep));
+          if (!known) problems.push(`${file}: unknown dependency ${String(dep)}.`);
+        }
+        for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (!definitions.has(String(definition))) problems.push(`${file}: unknown definition ${String(definition)}.`);
+        if (typeof data.refutes === 'string' && !assets.has(data.refutes)) problems.push(`${file}: refutes unknown asset ${data.refutes}.`);
+        if ((folder === folders.plans || folder === folders.checks) && typeof data.target_asset === 'string' && !assets.has(data.target_asset)) problems.push(`${file}: targets unknown asset ${data.target_asset}.`);
+      }
+    }
+    const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
+    if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);
+    const { cycle } = this.closure([...assets.keys()], assets);
+    if (cycle) problems.push(`Dependency cycle at ${cycle}.`);
+    for (const file of await approvalFiles(this.files, this.paths.researchRoot)) {
+      const raw = await this.files.readFile(file).catch(() => '');
+      if (raw.trim()) try { JSON.parse(raw); } catch { problems.push(`${file}: invalid JSON (merge conflict?).`); }
+    }
+    return problems;
+  }
+
+  /** Approved nodes whose approval no longer matches, without changing anything. */
+  async approvalProblems(): Promise<string[]> {
+    const problems: string[] = [];
+    const records = (await this.approvals()).records;
+    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
+      for (const file of await this.files.listFiles(folder)) {
+        const raw = await this.files.readFile(file);
+        let data: Record<string, any>;
+        try { data = parseMarkdown(raw).data; } catch { continue; }
+        const id = path.posix.basename(file, '.md');
+        if (data.status === 'approved' && !isApproved(records, kind, id, raw)) problems.push(`${file}: status approved without a matching approval record.`);
+      }
+    }
+    const details: Array<{ id: string; reason: string }> = [];
+    await this.reconcile(undefined, { dryRun: true, details });
+    for (const item of details) problems.push(`${item.id}: approval is stale (${item.reason}).`);
+    return [...new Set(problems)];
+  }
+
+  async latestHandoff(): Promise<{ file: string; performedBy?: string; createdAt?: string; workingOn: string[] } | undefined> {
+    const handoffs: Array<{ file: string; performedBy?: string; createdAt?: string; workingOn: string[] }> = [];
+    for (const file of await this.files.listFiles(this.shared.handoffs)) {
+      const info = parseHandoff(await this.files.readFile(file).catch(() => ''));
+      if (info) handoffs.push({ file, ...info });
+    }
+    return handoffs.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).pop();
+  }
+
+  /** Write a handoff that tells the next collaborator what was done, what waits, and where to continue. */
+  async writeHandoff(note?: string): Promise<string> {
+    const provenance = await this.provenance();
+    const previous = await this.latestHandoff();
+    const since = previous?.createdAt ?? '';
+    const state = this.state;
+    const events = (await this.recentEvents(500)).filter((event) => String(event.at ?? '') > since);
+    const completed = events.flatMap((event) => {
+      if (event.type === 'report') return [`${String(event.stage)}${event.assetId ? ` ${String(event.assetId)}` : ''}: ${String(event.outcome)} — ${String(event.summary ?? '').split('\n')[0]}`];
+      if (event.type === 'approved') return [`Approved ${String(event.kind)} ${String(event.target)}.`];
+      if (event.type === 'refuted') return [`${String(event.assetId)} refuted by ${String(event.exampleId)}.`];
+      if (event.type === 'idea_converted') return [`Idea ${String(event.ideaId)} became plan ${String(event.planId)} for ${String(event.assetId)}.`];
+      if (event.type === 'synced') return [`Pulled ${String(event.head ?? '').slice(0, 8)} from ${String(event.remote ?? 'upstream')}.`];
+      return [];
+    });
+    const pending: string[] = [];
+    if (state) {
+      for (const item of state.approvalQueue) pending.push(`${item.kind} ${item.target} waits for researcher approval: ${item.reason}`);
+      if (state.pendingQuestion) pending.push(`Open question (${state.pendingQuestion.kind}${state.pendingQuestion.assetId ? `, ${state.pendingQuestion.assetId}` : ''}): ${state.pendingQuestion.prompt}`);
+      for (const [id, info] of Object.entries(state.parked)) pending.push(`${id} parked (${info.reason})${info.note ? `: ${info.note}` : ''}`);
+    }
+    const next = !state ? `Start the loop: ${LOOP_COMMAND} start --provider claude|codex` : state.stage === 'waiting' ? `Waiting on the researcher: ${state.lastError ?? 'see Pending'}` : `Stage ${state.stage}${state.current.assetId ? ` for ${state.current.assetId}` : ''}${state.current.planId ? ` (plan ${state.current.planId})` : ''}: ${this.instruction(state).split('\n')[0]}`;
+    const file = `${this.shared.handoffs}/handoff_${stamp(provenance.created_at)}_${this.shortId()}.md`;
+    await this.writeOwned(file, handoffMarkdown({ provenance, stage: state?.stage, workingOn: state?.current.assetId ? [state.current.assetId] : [], completed, pending, next, note }));
+    await this.event('handoff', { file });
+    return file;
+  }
+
+  /** After git changed the working tree: re-derive state from the files and start a fresh stage baseline. */
+  async rebaseline(): Promise<void> {
+    if (!this.state) return;
+    await this.adoptExistingApprovals();
+    await this.rebuildState();
+    for (const file of await this.files.listFiles(`${path.posix.dirname(SNAPSHOT_PATH)}/stage-files`, '')) if (this.files.deleteFile) await this.files.deleteFile(file);
+    // Keep requests whose popups may still be open; drop only those a collaborator already settled or removed.
+    const records = (await this.approvals()).records;
+    const keep: ApprovalRequest[] = [];
+    for (const item of this.state.approvalQueue) {
+      const file = item.kind === 'project' ? this.paths.projectMd : `${item.kind === 'definition' ? this.paths.definitions : this.paths.assets}/${item.target}.md`;
+      const raw = await this.files.readFile(file).catch(() => '');
+      if (!raw) continue;
+      const kind = item.kind === 'project' ? 'project' : item.kind === 'definition' ? 'definition' : 'asset';
+      if (isApproved(records, kind, item.target, raw)) continue;
+      if (item.kind !== 'project') { try { if (['deprecated', 'archived'].includes(parseMarkdown(raw).data.status)) continue; } catch { continue; } }
+      keep.push(item);
+    }
+    this.state.approvalQueue = keep;
+    await this.setStage('select', { assetId: undefined, planId: undefined, counterexampleId: undefined, statementDigest: undefined });
   }
 
   // ---------- status ----------

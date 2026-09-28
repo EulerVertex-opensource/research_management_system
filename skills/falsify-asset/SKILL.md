@@ -12,7 +12,7 @@ Input: the asset ID; for verification also the candidate example ID. Read the as
 1. List every hypothesis and quantifier. Look at boundary and degenerate cases, dropped finiteness, compactness, or nondegeneracy assumptions, and known results that conflict.
 2. Search for a concrete object satisfying every hypothesis but violating the conclusion. Compute explicitly.
 3. Found: create `<assets>/<slug>.md` with `type: example`, `status: draft`, `refutes: <asset>`, `source.kind: self_proved`, `## Assumptions` (each hypothesis and why the object satisfies it), and `## Calculation` (why the conclusion fails). Report `candidate --counterexample <slug>`.
-4. Not found: report `none` and summarize what was checked. Never write to the target asset.
+4. Not found: write one check `<research>/checks/check_<asset>_<short_slug>.md` with frontmatter `type: falsification_check`, `title`, `target_asset: <asset>`, `outcome: no_counterexample_found`, then `## Cases checked` (each family of objects or cases tried, one bullet each, with the key computation) and `## Limitations` (what was not covered, e.g. noncompact or degenerate cases). Report `none`. Collaborators rely on this record instead of repeating the search, so be concrete. Never write to the target asset.
 
 A failed proof attempt, doubt, or a gap in a draft definition is not a counterexample; record such observations with `record_idea`.
 

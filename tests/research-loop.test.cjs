@@ -20,6 +20,7 @@ const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliog
 const project = '# Project\n\n## Main Problem\n\nProve A.\n\n## Current Goals\n\nFind a proof.\n\n## Required Results\n\n- main_theorem: the central claim\n\n## Known Results\n\nNone.\n';
 const asset = (proof = '', extra = {}) => matter.stringify(`\n## Statement\n\nFor every natural number n, n = n.\n${proof}`, { type: 'theorem', title: 'Main theorem', status: 'draft', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [], tags: [], ...extra });
 const plan = (id, status = 'pending', difference = '') => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\nProve reflexivity.\n\n## Plan\n\n1. [ ] Apply equality reflexivity.\n\n## Verification\n\nCheck the equality.\n${difference}${status === 'failed' ? '\n## Failure\n\nThis approach cannot establish the needed equality.\n' : ''}`, { type: 'plan', title: id, status, target_asset: 'main_theorem', inspired_by: [], tags: [] });
+const check = (target = 'main_theorem') => matter.stringify('\n## Cases checked\n\n- n = 0 and n = 1\n\n## Limitations\n\nOnly small cases.\n', { type: 'falsification_check', title: `Check ${target}`, target_asset: target, outcome: 'no_counterexample_found' });
 const record = (id) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [x] Apply reflexivity.\n\n## Verification\n\nCheck the equality.\n\n## Outcome\n\nProof incorporated into main_theorem.\n`, { type: 'proof_record', title: id, target_asset: 'main_theorem', inspired_by: [], tags: [] });
 
 function memoryFiles(initial = {}) {
@@ -30,6 +31,7 @@ function memoryFiles(initial = {}) {
     writeFile: async (file, content) => { map.set(file, content); },
     exists: async (file) => map.has(file),
     listFiles: async (folder, extension = '.md') => [...map.keys()].filter((file) => path.posix.dirname(file) === folder && file.endsWith(extension)).sort(),
+    deleteFile: async (file) => { map.delete(file); },
   };
 }
 
@@ -56,7 +58,10 @@ async function driveToPlan(f) {
   await f.core.report({ outcome: 'none', summary: 'No sources' });
   assert.equal((await f.core.next()).stage, 'falsify');
   assert.equal(f.core.current.current.assetId, 'main_theorem');
+  await assert.rejects(f.core.report({ outcome: 'none', summary: 'No counterexample' }), /falsification check/);
+  f.map.set('research/checks/check_main_theorem_small.md', check());
   await f.core.report({ outcome: 'none', summary: 'No counterexample' });
+  assert.match(f.map.get('research/checks/check_main_theorem_small.md'), /statement_digest: /);
   assert.equal(f.core.current.stage, 'plan');
 }
 
@@ -229,7 +234,7 @@ test('confirmed counterexample deprecates the asset and returns to the project g
 test('agent-set approvals are reverted and dependency statement changes invalidate dependants', async () => {
   const f = fixture({ 'research/assets/main_theorem.md': asset('', { status: 'approved', depends_on: ['key_lemma'] }), 'research/assets/key_lemma.md': matter.stringify('\n## Statement\n\nA lemma.\n', { type: 'lemma', title: 'Key lemma', status: 'approved', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [] }) });
   await f.core.start('codex');
-  const adopted = JSON.parse(f.map.get('research/approvals.json')).records.map((entry) => entry.target).sort();
+  const adopted = [...f.map.keys()].filter((file) => file.startsWith('research/approvals/assets/')).map((file) => JSON.parse(f.map.get(file)).target).sort();
   assert.deepEqual(adopted, ['key_lemma', 'main_theorem']);
   f.map.set('research/assets/forged.md', asset('', { status: 'approved' }));
   const result = await f.core.validateWorkspace({ fix: true });
@@ -327,4 +332,40 @@ test('CLI extend reopens an approved project for a new goal', () => {
     assert.equal(drafted.status, 0, drafted.stderr);
     assert.match(drafted.stdout, /review_project/);
   } finally { p.cleanup(); }
+});
+
+test('shared records rebuild parked assets, falsification, and failure counts when state.json is gone', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const difference = attempt > 1 ? `\n## Difference from failed plans\n\n${Array.from({ length: attempt - 1 }, (_, i) => `- attempt_${i + 1}: different route`).join('\n')}\n` : '';
+    f.map.set(`research/plans/attempt_${attempt}.md`, plan(`attempt_${attempt}`, 'pending', difference));
+    await f.core.report({ outcome: 'complete', summary: 'Planned', planId: `attempt_${attempt}` });
+    f.map.set(`research/plans/attempt_${attempt}.md`, plan(`attempt_${attempt}`, 'failed', difference));
+    await f.core.report({ outcome: 'failed', summary: 'Obstructed' });
+  }
+  await f.core.answerQuestion(f.core.current.pendingQuestion.id, 'answer', 'Try a compactness argument.', 'popup');
+  await f.core.park('main_theorem', 'assumption A3 unclear', 'Ask Alice about A3.');
+  // A collaborator's fresh clone: same files, no local loop state.
+  for (const file of [...f.map.keys()]) if (file.startsWith('.research-assistant-loop/')) f.map.delete(file);
+  const fresh = new ResearchLoopCore(f.files, paths, { id: () => `id-${++counter}` });
+  await fresh.load();
+  await fresh.start('claude');
+  assert.deepEqual(fresh.current.parked.main_theorem, { reason: 'assumption A3 unclear', at: fresh.current.parked.main_theorem.at, note: 'Ask Alice about A3.' });
+  assert.equal(fresh.current.stage, 'waiting');
+  await fresh.unpark('main_theorem');
+  // The falsification check still covers the unchanged statement, so the loop plans instead of re-falsifying.
+  assert.equal((await fresh.next()).stage, 'plan');
+  // The direction answered the three failures; one new failure must not re-trigger the blocked question.
+  f.map.set('research/plans/attempt_4.md', plan('attempt_4', 'pending', '\n## Difference from failed plans\n\n- attempt_1, attempt_2, attempt_3: compactness instead\n'));
+  await fresh.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_4' });
+  f.map.set('research/plans/attempt_4.md', plan('attempt_4', 'failed', '\n## Difference from failed plans\n\n- attempt_1, attempt_2, attempt_3: compactness instead\n'));
+  const result = await fresh.report({ outcome: 'failed', summary: 'Obstructed' });
+  assert.match(result.message, /\(1\/3\)/);
+  assert.equal(fresh.current.pendingQuestion, undefined);
+  // A changed statement is no longer covered by the old check.
+  f.map.set('research/assets/main_theorem.md', asset('', { title: 'Main theorem', tags: ['changed'] }).replace('n = n.', 'n + 0 = n.'));
+  await fresh.stop();
+  await fresh.start('claude', { force: true });
+  assert.equal(fresh.current.stage, 'falsify');
 });

@@ -43,6 +43,10 @@ overleaf-project/
       outline.md                  ← ordered manuscript section links
       sections/<id>.md            ← section briefs and asset IDs
     papers/<slug>/                 ← shared metadata and working transcriptions
+    checks/                        ← falsification checks: what was tried, what was not covered
+    decisions/                     ← researcher directions, change requests, parked results (loop-written)
+    handoffs/                      ← where each collaborator stopped and what comes next
+    approvals/                     ← one approval record per approved result (extension-written)
 
   research-local/                  ← local only; ignored by Git
     raw_papers/                    ← authoritative source PDFs
@@ -51,6 +55,7 @@ overleaf-project/
 
   .research-assistant.json         ← committed path configuration
   .gitignore                       ← committed local/generated-file exclusions
+  .gitattributes                   ← union merge for the append-only paper index and BibTeX
   .vscode/                         ← generated local build settings/recommendations
   .github/copilot-instructions.md  ← generated local Copilot guidance
   .agents/skills/                  ← bundled Codex skills local; project skills shared
@@ -67,6 +72,7 @@ Commit these files:
 - LaTeX, BibTeX, figures required by the manuscript, and project-specific class/style files.
 - `.research-assistant.json` and the managed `.gitignore`.
 - Authored research files: `research/project.md`, `research/papers.md`, nodes in `research/assets/`, `research/definitions/`, `research/ideas/`, and `research/plans/`, writing plans in `research/writing/`, and metadata/transcriptions in `research/papers/`.
+- Research loop records: `research/checks/`, `research/decisions/`, `research/handoffs/`, and `research/approvals/`. These carry what the loop learned (which counterexample searches were done, why a result is parked, what direction a researcher gave, who approved which version on which commit), so a collaborator's loop continues from the same point. The loop's run mechanics in `.research-assistant-loop/` (bridge token, session lock, stage snapshot, autopilot counters) stay local.
 - Project skills under `.agents/skills/` or `.claude/skills/` whose names do not match an extension-bundled skill.
 
 Do not normally commit:
@@ -87,18 +93,36 @@ For each paper, share a stable DOI, arXiv, or publisher URL and a checksum when 
 
 ## Collaboration practice
 
-Overleaf Git supports a single remote `master` history. Pull before beginning local work and once more before pushing:
+Use the loop's sync commands instead of raw `git pull`/`push` while the research loop is in use. Plain git stays fine for the manuscript when no loop is running.
 
 ```bash
-git pull --rebase origin master
-# edit in VS Code / Research Assistant
-git add .
-git commit -m "Add research context for theorem X"
-git pull --rebase origin master
-git push origin HEAD:master
+research-loop sync status            # ahead/behind, uncommitted research, latest handoff
+research-loop sync pull              # fetch + rebase, validate, invalidate stale approvals, rebuild loop state, research summary
+research-loop sync prepare [--latex] # pre-share checklist; writes a handoff
+research-loop sync publish           # commit research + manuscript paths only, re-validate after rebase, push; asks the researcher to confirm
 ```
 
-Prefer one node per file so independent results merge cleanly. Avoid renaming files that have active Overleaf comments or tracked changes, because a Git-side rename is represented as delete-and-create by Overleaf.
+(`research-loop` is `node .agents/skills/research-loop/scripts/research-loop.cjs`; the same actions are the **Research Assistant: … (Git)** commands.)
+
+- **Pull** refuses while a stage has unreported edits and while research files are uncommitted. On conflicts it stops, pauses the loop, and never picks a side. When two people changed the same statement, the researchers decide. Resolve, finish the rebase or merge, then `sync pull --continue`. If someone ran a raw `git pull` mid-stage, `report` refuses to count those files as the agent's; `sync pull --continue` re-baselines.
+- **Prepare** checks that:
+  - the stage is reported and every research file is valid
+  - dependencies resolve and there are no cycles
+  - approvals still match their content
+  - cited papers have an index entry, exact location, stable URL, and BibTeX entry
+  - BibTeX keys are unique
+  - the manuscript compiles (with `--latex` and `sync.latexCommand`)
+  - upstream has no newer commits
+- **Publish** needs a fresh prepare and the researcher's confirmation: a VS Code dialog, or `--interactive` in a terminal. Agents cannot confirm it. After pushing to `sync.remote`, it fast-forwards `sync.overleafRemote` when configured and never force-pushes Overleaf.
+
+Recommended topologies:
+
+- **Overleaf only** (small teams): `sync.remote` is the Overleaf remote and `sync.branch` is `master`. Overleaf Git has a single linear `master` history, so publish rebases onto it.
+- **GitHub primary, Overleaf mirror** (several active researchers): each researcher works on a branch and opens pull requests on GitHub for review and CI. After merging to `main`, one designated person publishes with `sync.overleafRemote` set, so Overleaf receives `main` as a fast-forward.
+
+Overleaf [warns](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/advanced-git-operations) that Git pushes can lose or displace comments and tracked changes. Keep research discussion in ideas, decisions, and handoffs, not only in Overleaf comments.
+
+Prefer one node per file so independent results merge cleanly. Approvals are one file per target for the same reason; `research-loop migrate-approvals` (also run on **Refresh Project Setup**) splits a legacy `research/approvals.json`. Avoid renaming files that have active Overleaf comments or tracked changes, because a Git-side rename is represented as delete-and-create by Overleaf.
 
 ## Configuration
 
@@ -129,6 +153,24 @@ The default generated `.research-assistant.json` is:
   }
 }
 ```
+
+An optional `sync` block configures git collaboration. Defaults are shown; `overleafRemote`, `latexCommand`, and `identity` are unset by default:
+
+```json
+"sync": {
+  "remote": "origin",
+  "branch": "main",
+  "overleafRemote": "overleaf",
+  "overleafBranch": "master",
+  "strategy": "rebase",
+  "include": [],
+  "latexCommand": "latexmk -pdf -interaction=nonstopmode main.tex",
+  "signCommits": false,
+  "identity": "alice@example.edu"
+}
+```
+
+`branch` defaults to the current branch. `include` adds paths to publish commits beyond the research folders, the manuscript files, and `.research-assistant.json`. `identity` overrides `git config user.email` as the name recorded on approvals, checks, decisions, and handoffs.
 
 All paths must remain within the workspace. LaTeX paths are relative to `latex.projectRoot`; research paths are workspace-relative. Macro files may be an empty array and `notations` may be `null` for projects without dedicated files.
 
@@ -214,12 +256,12 @@ The research loop is a human-in-the-loop workflow driven from the Claude Code or
 1. Run **Research Assistant: Start Research Loop**, pick the agent, and optionally type the goal. The extension opens that agent's chat.
 2. Type `/research-loop` in Claude Code or `$research-loop` in Codex. The skill runs `status`, `next`, does the stage (heavy stages in a subagent), and `report`s; the Stop hook keeps the agent going until the loop waits for you, is paused, or reaches the per-session cap (`researchAssistant.loop.iterationCap`).
 3. Questions arrive as VS Code popups (`ask_researcher`). Answer, skip, or pause; after `researchAssistant.loop.questionTimeoutSeconds` the agent continues in auto mode and a late answer is shown to it on its next turn. Each tool call returns within about 45 seconds with `status: pending` while the popup is open, and the agent keeps waiting with `await_answer`, so no MCP client timeout can cut a question off.
-4. Approvals arrive as popups with **Open file / Approve / Request changes / Later** (`request_approval`), and also count when you set `status: approved` in the dashboard or the editor. Only the extension writes `research/approvals.json`; the agent is denied by a PreToolUse hook and `validate --fix` reverts any approved node without a record.
+4. Approvals arrive as popups with **Open file / Approve / Request changes / Later** (`request_approval`), and also count when you set `status: approved` in the dashboard or the editor. Only the extension writes `research/approvals/`; each record carries who approved, the approved content and statement digests, the base commit, and the extension version. The agent is denied by a PreToolUse hook, and `validate --fix` reverts any approved node without a record.
 5. The status bar shows the stage, when the loop waits for you, and opens the chat. Commands: Pause, Resume, Stop, Answer Pending Loop Question, Review Pending Approvals, Capture Research Idea.
 
 Stages: `discuss_goals` → `draft_project` → `review_project` → `scaffold` → `sources` → per result `falsify` → (`verify_counterexample`) → `plan` → `execute` → researcher approval → `ready`. A confirmed counterexample deprecates the refuted asset (the corrected statement gets a new ID) and returns to the project goals. Three failed plans since the last direction park the asset until you give a direction or turn an idea into a plan. Draft definitions may be used while proving but must be approved before `ready`.
 
-Generated locally on refresh and ignored by Git: `.claude/settings.local.json` (hooks, permissions), `.mcp.json`, `.codex/hooks.json`, and `.research-assistant-loop/` (state, events, bridge). Claude Code asks once to trust the project MCP server; Codex asks once to trust the project hooks under `/hooks`. Codex reads MCP servers only from its user config, so refresh registers the bundled bridge once with `codex mcp add research-assistant`; the bridge finds the open project through `~/.research-assistant/bridges.json`, which the extension maintains while it runs. The CLI behind the skill is `node .agents/skills/research-loop/scripts/research-loop.cjs` (`status`, `start`, `next`, `report`, `validate`, `park`, `idea add|convert`, `question`).
+Generated locally on refresh and ignored by Git: `.claude/settings.local.json` (hooks, permissions), `.mcp.json`, `.codex/hooks.json`, and `.research-assistant-loop/` (state, events, bridge). Claude Code asks once to trust the project MCP server; Codex asks once to trust the project hooks under `/hooks`. Codex reads MCP servers only from its user config, so refresh registers the bundled bridge once with `codex mcp add research-assistant`; the bridge finds the open project through `~/.research-assistant/bridges.json`, which the extension maintains while it runs. The CLI behind the skill is `node .agents/skills/research-loop/scripts/research-loop.cjs` (`status`, `start`, `next`, `report`, `validate`, `park`, `idea add|convert`, `question`, `handoff`, `sync status|pull|prepare|publish`, `migrate-approvals`). On `start` and after every `sync pull`, parked assets, change requests, falsification, and failure counts are re-derived from the shared records, so a fresh clone continues where a collaborator stopped.
 
 Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everything that differs between them (extension ID, chat command, `/` or `$` prefix, skill folder, hooks file, write-tool matcher, MCP registration) lives in one table, `src/services/AgentProviders.ts`. Both agents receive the same JSON hook output. Codex reads `skills/research-loop/agents/openai.yaml`, which disables implicit invocation just as `disable-model-invocation` does for Claude Code.
 

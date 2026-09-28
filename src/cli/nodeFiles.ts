@@ -1,9 +1,9 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import { ProjectPaths } from '../models/types';
+import { ProjectPaths, SyncConfig } from '../models/types';
 import { LoopFiles } from '../services/ResearchLoopModel';
-import { PROJECT_CONFIG_PATH, pathsFromConfigText } from '../services/ProjectPathsCore';
+import { PROJECT_CONFIG_PATH, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
 
 /** Node `fs` implementation of the small file interface used by the research loop. */
 export class NodeLoopFiles implements LoopFiles {
@@ -21,6 +21,10 @@ export class NodeLoopFiles implements LoopFiles {
     const full = this.resolve(relativePath);
     await fs.mkdir(path.dirname(full), { recursive: true });
     await fs.writeFile(full, content, 'utf8');
+  }
+
+  async deleteFile(relativePath: string): Promise<void> {
+    await fs.rm(this.resolve(relativePath), { force: true });
   }
 
   async exists(relativePath: string): Promise<boolean> {
@@ -48,4 +52,9 @@ export function findProjectRoot(start: string): string | undefined {
 
 export async function loadProjectPaths(root: string): Promise<ProjectPaths> {
   return pathsFromConfigText(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8'));
+}
+
+export async function loadSyncConfig(root: string): Promise<SyncConfig> {
+  const raw = JSON.parse(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8')) as { sync?: Partial<SyncConfig> };
+  return normalizeSyncConfig(raw.sync);
 }

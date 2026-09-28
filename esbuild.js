@@ -93,6 +93,8 @@ const researchLoopCliConfig = {
   format: 'cjs',
   platform: 'node',
   mainFields: ['module', 'main'],
+  // Stamped on approvals and shared research records as extension_version.
+  define: { __EXTENSION_VERSION__: JSON.stringify(require('./package.json').version) },
 };
 
 const researchLoopMcpConfig = {

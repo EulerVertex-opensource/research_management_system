@@ -3,6 +3,8 @@ import * as path from 'path';
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
 import { AGENT_PROVIDERS, PROVIDER_IDS } from './AgentProviders';
+import { migrateApprovals } from './ApprovalStore';
+import { sharedFolders } from './ResearchLoopModel';
 
 const PROJECT_TEMPLATE = `# Project
 
@@ -32,6 +34,8 @@ List sections in presentation order using stable IDs. Each entry points to a bri
 
 `;
 const GITIGNORE_END = '# research-assistant:local:end';
+const GITATTRIBUTES_START = '# research-assistant:merge:start';
+const GITATTRIBUTES_END = '# research-assistant:merge:end';
 const LATEX_WORKSHOP_ID = 'james-yu.latex-workshop';
 
 export const LATEX_OUTPUT_DIRECTORY = '.latex-out';
@@ -72,6 +76,14 @@ export class FileService {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  async deleteFile(relativePath: string): Promise<void> {
+    try {
+      await vscode.workspace.fs.delete(this.resolve(relativePath));
+    } catch {
+      // already gone
     }
   }
 
@@ -151,6 +163,9 @@ export class FileService {
     }
 
     await this.upsertGitignore(paths, bundledSkillNames);
+    await this.upsertGitattributes(paths);
+    // One file per approval, so collaborators approving different results do not conflict.
+    await migrateApprovals(this, paths.researchRoot);
     await this.ensureLatexWorkspaceConfiguration();
 
     if (createLatexDefaults) {
@@ -184,6 +199,7 @@ export class FileService {
   }
 
   private researchReadme(paths: ProjectPaths): string {
+    const shared = sharedFolders(paths.researchRoot);
     return `# Shared research context
 
 This directory is the version-controlled source of truth for Research Assistant.
@@ -195,6 +211,11 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${paths.plans}/\` contains executable proof plans and retained proof records.
 - \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
+- \`${shared.checks}/\` records falsification checks: what was tried against which statement, and what was not covered.
+- \`${shared.decisions}/\` records researcher decisions (new directions, change requests, parked results); \`${shared.handoffs}/\` says where work stopped and what comes next.
+- \`${shared.approvals}/\` holds one approval record per approved result; approvals are made only by a researcher in VS Code.
+
+Share work with \`research-loop sync prepare\` and the "Publish Research to Collaborators" command; bring in collaborators' work with \`research-loop sync pull\`. Keep research discussion in these files rather than Overleaf comments, which Git synchronization can drop.
 
 Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, which is ignored by Git. Record stable URLs, DOI/arXiv identifiers, checksums, and page-level provenance in shared paper metadata so collaborators can retrieve the same source.
 `;
@@ -238,6 +259,24 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
         ? `${current.trimEnd()}\n\n${managed}\n`
         : `${managed}\n`;
     if (updated !== current) await this.writeFile('.gitignore', updated);
+  }
+
+  /** Append-only indexes merge by keeping both sides' new entries instead of conflicting. */
+  private async upsertGitattributes(paths: ProjectPaths): Promise<void> {
+    const current = await this.readFile('.gitattributes').catch(() => '');
+    const managed = [
+      GITATTRIBUTES_START,
+      '# Research Assistant appends to these; union merge keeps both collaborators\' new entries',
+      `/${paths.paperIndex} merge=union`,
+      `/${paths.bibliography} merge=union`,
+      GITATTRIBUTES_END,
+    ].join('\n');
+    const start = current.indexOf(GITATTRIBUTES_START);
+    const end = current.indexOf(GITATTRIBUTES_END);
+    const updated = start !== -1 && end > start
+      ? current.slice(0, start) + managed + current.slice(end + GITATTRIBUTES_END.length)
+      : current.trim() ? `${current.trimEnd()}\n\n${managed}\n` : `${managed}\n`;
+    if (updated !== current) await this.writeFile('.gitattributes', updated);
   }
 
   private async ensureLatexWorkspaceConfiguration(): Promise<void> {

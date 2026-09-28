@@ -60,6 +60,20 @@ test('PreToolUse denies approval forgery across Claude and Codex tool shapes', (
   assert.equal(deny({ tool_name: 'Read', tool_input: { file_path: 'research/approvals.json' } }), false);
 });
 
+test('PreToolUse protects split approvals, shared decision records, and raw git history commands', () => {
+  const deny = (input) => preToolUseDecision(paths, input, '/repo').deny;
+  assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/approvals/assets/main_theorem.json', content: '{}' } }), true);
+  assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: '/repo/research/decisions/decision_x.md', content: 'x' } }), true);
+  assert.equal(deny({ tool_name: 'Edit', tool_input: { file_path: 'research/handoffs/handoff_x.md', old_string: 'a', new_string: 'b' } }), true);
+  assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/checks/check_main_theorem_small.md', content: 'x' } }), false);
+  assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'git push origin main' } }), true);
+  assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'cd repo && git pull --rebase' } }), true);
+  assert.equal(deny({ tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'git -C /repo merge origin/main'] } }), true);
+  assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'git status && git diff' } }), false);
+  assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'git checkout -- research/assets/a.md' } }), false);
+  assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'node .agents/skills/research-loop/scripts/research-loop.cjs sync pull' } }), false);
+});
+
 const cli = path.resolve(__dirname, '../out/research-loop.cjs');
 test('hook entry point blocks Stop while running and stays silent otherwise', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-hook-'));

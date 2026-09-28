@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
+import { ProjectPaths, ResearchAssistantConfig, SyncConfig } from '../models/types';
 
 /**
  * Pure path resolution shared by the extension and the bundled CLI scripts.
@@ -58,6 +58,7 @@ export function normalizeConfig(raw: Partial<ResearchAssistantConfig>): Research
   return {
     version: 1,
     layout,
+    sync: normalizeSyncConfig(raw.sync),
     latex: {
       projectRoot: normalizeRelative(latex.projectRoot, latexDefaults.projectRoot),
       main: normalizeRelative(latex.main, latexDefaults.main),
@@ -81,6 +82,23 @@ export function normalizeConfig(raw: Partial<ResearchAssistantConfig>): Research
       papers: normalizeRelative(research.papers, researchDefaults.papers),
       localSourcePdfs: normalizeRelative(research.localSourcePdfs, researchDefaults.localSourcePdfs),
     },
+  };
+}
+
+const optionalText = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined;
+
+export function normalizeSyncConfig(raw: Partial<SyncConfig> | undefined): SyncConfig {
+  const sync = raw ?? {};
+  return {
+    remote: optionalText(sync.remote) ?? 'origin',
+    branch: optionalText(sync.branch),
+    overleafRemote: optionalText(sync.overleafRemote),
+    overleafBranch: optionalText(sync.overleafBranch) ?? 'master',
+    strategy: sync.strategy === 'merge' ? 'merge' : 'rebase',
+    include: Array.isArray(sync.include) ? sync.include.map((item) => normalizeRelative(item, '.')).filter((item) => item !== '.') : [],
+    latexCommand: optionalText(sync.latexCommand),
+    signCommits: sync.signCommits === true,
+    identity: optionalText(sync.identity),
   };
 }
 

@@ -1,9 +1,17 @@
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
-import { ReportOutcome, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { BRIDGE_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { HookInput, contextOutput, denyOutput, preToolUseDecision, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
-import { NodeLoopFiles, findProjectRoot, loadProjectPaths } from './nodeFiles';
+import { migrateApprovals } from '../services/ApprovalStore';
+import { LoopGit } from '../services/LoopGit';
+import { PublishPreview, ResearchSync } from '../services/ResearchSync';
+import { NodeLoopFiles, findProjectRoot, loadProjectPaths, loadSyncConfig } from './nodeFiles';
+import { openGit, runShell } from './nodeGit';
+
+declare const __EXTENSION_VERSION__: string | undefined;
+const EXTENSION_VERSION = typeof __EXTENSION_VERSION__ === 'string' ? __EXTENSION_VERSION__ : undefined;
 
 interface Args { positional: string[]; flags: Record<string, string | true>; lists: Record<string, string[]> }
 
@@ -34,6 +42,10 @@ const USAGE = `Usage: research-loop <command> [options]
   idea add --title "..." --body "..." [--asset ID]... [--origin researcher|agent]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
   question pending | question answer --text "..." | question skip | question poll <id>
+  handoff [--note "..."]   (write a shared handoff for the next collaborator)
+  sync status [--no-fetch] | sync pull [--remote NAME] [--continue] | sync prepare [--latex] [--no-fetch] [--note "..."]
+  sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
+  migrate-approvals   (split research/approvals.json into one file per approved target)
   hook <SessionStart|UserPromptSubmit|PreToolUse|Stop|SubagentStop>   (reads hook JSON on stdin)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
@@ -48,11 +60,96 @@ async function readStdin(): Promise<string> {
   });
 }
 
-async function openCore(root: string, iterationCap?: number): Promise<ResearchLoopCore> {
+async function openCore(root: string, iterationCap?: number, git?: LoopGit): Promise<ResearchLoopCore> {
   const paths = await loadProjectPaths(root);
-  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap });
+  const sync = await loadSyncConfig(root).catch(() => undefined);
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, identity: sync?.identity, extensionVersion: EXTENSION_VERSION });
   await core.load();
   return core;
+}
+
+function describePreview(preview: PublishPreview): string {
+  return [
+    `Publish to: ${preview.targets.join(' and ')}`,
+    preview.files.length ? `Files to commit (${preview.files.length}):\n${preview.files.slice(0, 40).map((entry) => `  ${entry.code.trim() || '?'} ${entry.path}`).join('\n')}${preview.files.length > 40 ? `\n  ... and ${preview.files.length - 40} more` : ''}` : 'No new files to commit.',
+    preview.ahead ? `Local commits not yet shared: ${preview.ahead}` : '',
+    `Commit message:\n${preview.message.split('\n').map((line) => `  ${line}`).join('\n')}`,
+  ].filter(Boolean).join('\n');
+}
+
+/** Ask on the controlling terminal; agents' shells have none, so this cannot be answered by an agent. */
+function confirmOnTty(text: string): boolean {
+  let fd: number;
+  try { fd = fs.openSync('/dev/tty', 'r+'); } catch { throw new Error('No terminal is attached; run sync publish --interactive yourself in a terminal, or confirm in VS Code.'); }
+  try {
+    fs.writeSync(fd, `${text}\n\nType "publish" to confirm: `);
+    let answer = '';
+    const buffer = Buffer.alloc(1);
+    while (fs.readSync(fd, buffer, 0, 1, null) === 1 && buffer[0] !== 10) answer += buffer.toString('utf8');
+    return answer.trim().toLowerCase() === 'publish';
+  } finally { fs.closeSync(fd); }
+}
+
+/** Ask the researcher in VS Code through the extension bridge; undefined when the extension is not running. */
+async function confirmInExtension(root: string, text: string): Promise<boolean | undefined> {
+  let bridge: { port: number; token: string; pid?: number } | undefined;
+  try { bridge = JSON.parse(fs.readFileSync(path.join(root, BRIDGE_PATH), 'utf8')); } catch { return undefined; }
+  if (!bridge?.port || !bridge.token) return undefined;
+  if (bridge.pid) { try { process.kill(bridge.pid, 0); } catch { return undefined; } }
+  try {
+    const response = await fetch(`http://127.0.0.1:${bridge.port}/tool`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` },
+      body: JSON.stringify({ name: 'confirm_publish', arguments: { detail: text } }), signal: AbortSignal.timeout(15 * 60 * 1000),
+    });
+    if (!response.ok) return undefined;
+    const body = await response.json() as { confirmed?: boolean };
+    return typeof body.confirmed === 'boolean' ? body.confirmed : undefined;
+  } catch { return undefined; }
+}
+
+async function runSync(sub: string | undefined, args: Args, root: string, core: ResearchLoopCore, git: LoopGit, out: (value: unknown) => void, json: boolean): Promise<void> {
+  const sync = new ResearchSync(core, new NodeLoopFiles(root), git, await loadSyncConfig(root), runShell(root));
+  const lines = (title: string, items: string[]) => items.length ? `${title}\n${items.map((item) => `- ${item}`).join('\n')}` : '';
+  switch (sub) {
+    case 'status': {
+      const status = await sync.status({ fetch: args.flags['no-fetch'] !== true });
+      out(status);
+      return;
+    }
+    case 'pull': {
+      const result = await sync.pull({ remote: typeof args.flags.remote === 'string' ? args.flags.remote : undefined, continue: args.flags.continue === true });
+      if (json) { out(result); } else {
+        out([result.status === 'conflict' ? 'Sync stopped on conflicts.' : result.status === 'up_to_date' ? '' : 'Pulled collaborators\' changes:', lines('', result.summary).trim(), lines('Problems (loop paused):', result.problems), lines('Warnings:', result.warnings), result.next ? `Next: ${result.next}` : ''].filter(Boolean).join('\n'));
+      }
+      if (result.status === 'conflict' || result.problems.length) process.exitCode = 1;
+      return;
+    }
+    case 'prepare': {
+      const result = await sync.prepare({ latex: args.flags.latex === true, fetch: args.flags['no-fetch'] !== true, note: typeof args.flags.note === 'string' ? args.flags.note : undefined });
+      if (json) { out(result); } else {
+        const checks = result.checks.map((check) => `${check.ok ? (check.warning ? 'WARN' : 'PASS') : 'FAIL'} ${check.name}${check.details.length ? `\n${check.details.map((detail) => `     ${detail}`).join('\n')}` : ''}`).join('\n');
+        out([result.ok ? 'Ready to share.' : 'Not ready to share; fix the FAIL items and run sync prepare again.', checks, lines('What would be shared:', result.summary), result.handoff ? `Handoff written: ${result.handoff}` : '', result.ok ? 'The researcher publishes with: sync publish (confirmation required).' : ''].filter(Boolean).join('\n\n'));
+      }
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
+    case 'publish': {
+      const interactive = args.flags.interactive === true;
+      const result = await sync.publish(async (preview) => {
+        const text = describePreview(preview);
+        if (interactive) return confirmOnTty(text);
+        const answer = await confirmInExtension(root, text);
+        if (answer !== undefined) return answer;
+        throw new Error('Publishing needs the researcher\'s confirmation. Open the project in VS Code with Research Assistant running (a dialog will ask), or run sync publish --interactive yourself in a terminal.');
+      }, { message: typeof args.flags.message === 'string' ? args.flags.message : undefined });
+      if (json) out(result);
+      else out([lines('', result.summary).trim(), lines('Warnings:', result.warnings)].filter(Boolean).join('\n'));
+      if (result.status === 'conflict' || result.status === 'blocked') process.exitCode = 1;
+      return;
+    }
+    default:
+      throw new Error('sync status|pull|prepare|publish');
+  }
 }
 
 async function runHook(event: string, args: Args): Promise<void> {
@@ -72,7 +169,12 @@ async function runHook(event: string, args: Args): Promise<void> {
         process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
         return;
       }
-      process.stdout.write(contextOutput(event, core.briefStatus()) + '\n');
+      let brief = core.briefStatus();
+      try {
+        const sync = JSON.parse(fs.readFileSync(path.join(root, SYNC_PATH), 'utf8')) as { phase?: string; conflicted?: string[] };
+        if (sync.phase === 'conflict') brief += `\nGit sync stopped on conflicts in ${sync.conflicted?.join(', ') ?? 'research files'}; the researcher resolves them, then run sync pull --continue. Do not resolve mathematical conflicts yourself.`;
+      } catch { /* no sync yet */ }
+      process.stdout.write(contextOutput(event, brief) + '\n');
       await core.consumeAnswers();
       await core.touch(session);
       return;
@@ -122,7 +224,8 @@ async function main(): Promise<void> {
   if (!root) throw new Error('No .research-assistant.json found; run from the project or pass --project.');
   const json = args.flags.json === true;
   const cap = typeof args.flags['iteration-cap'] === 'string' ? Number(args.flags['iteration-cap']) : undefined;
-  const core = await openCore(root, cap);
+  const git = await openGit(root);
+  const core = await openCore(root, cap, git);
   const session = typeof args.flags.session === 'string' ? args.flags.session : undefined;
   const out = (value: unknown) => process.stdout.write((typeof value === 'string' ? value : JSON.stringify(value, null, 2)) + '\n');
   switch (command) {
@@ -207,6 +310,21 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('question pending|answer|skip|poll');
+    }
+    case 'handoff': {
+      const file = await core.writeHandoff(typeof args.flags.note === 'string' ? args.flags.note : undefined);
+      out(json ? { file } : `Wrote ${file}. Share it with sync prepare, then the researcher publishes.`);
+      return;
+    }
+    case 'sync': {
+      if (!git) throw new Error('This project is not a git repository; sync needs git (for Overleaf: git clone the Overleaf project URL).');
+      await runSync(sub, args, root, core, git, out, json);
+      return;
+    }
+    case 'migrate-approvals': {
+      const migrated = await migrateApprovals(new NodeLoopFiles(root), (await loadProjectPaths(root)).researchRoot);
+      out(migrated ? 'Split approvals.json into research/approvals/ (one file per target). Commit the result.' : 'Nothing to migrate.');
+      return;
     }
     default:
       throw new Error(`Unknown command ${command}\n${USAGE}`);

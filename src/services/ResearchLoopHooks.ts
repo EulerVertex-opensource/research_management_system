@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
-import { LoopState, STATE_DIR, stageSignature } from './ResearchLoopModel';
+import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
 import { LOOP_COMMAND } from './AgentProviders';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
@@ -18,6 +18,8 @@ export interface StopDecision { block: boolean; reason?: string; capReached?: bo
 export interface ToolDecision { deny: boolean; reason?: string }
 
 const APPROVED = /^[+>\s]*status:\s*['"]?approved\b/m;
+/** Git commands that rewrite or share history; the loop's sync commands run them with validation around them. */
+const RAW_GIT = /\bgit\s+(?:-C\s+\S+\s+)?(?:pull|push|rebase|merge|reset\s+--hard|cherry-pick)\b/;
 
 /** Decide whether the Stop hook keeps the agent working. Pure; the caller persists any counter changes. */
 export function stopDecision(state: LoopState | undefined, input: HookInput, instruction: string | undefined): StopDecision {
@@ -67,11 +69,18 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   const targets = targetsOf(input);
   const text = textsOf(input);
   const approvalsFile = path.posix.join(paths.researchRoot, 'approvals.json');
+  const shared = sharedFolders(paths.researchRoot);
   const isShell = /shell|bash/.test(tool);
+  if (isShell && RAW_GIT.test(text)) {
+    return { deny: true, reason: `Research loop: do not run git pull/push/rebase/merge directly. Use ${LOOP_COMMAND} sync status | sync pull | sync prepare; publishing (sync publish) needs the researcher's confirmation.` };
+  }
   const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
   for (const target of targets) {
-    if (shellWrites && (under(target, approvalsFile, root) || target.endsWith('/approvals.json') || under(target, STATE_DIR, root))) {
+    if (shellWrites && (under(target, approvalsFile, root) || target.endsWith('/approvals.json') || under(target, shared.approvals, root) || under(target, STATE_DIR, root))) {
       return { deny: true, reason: `Research loop: ${target} is written only by the researcher through the extension. Approvals are never set by the agent.` };
+    }
+    if (shellWrites && (under(target, shared.decisions, root) || under(target, shared.handoffs, root))) {
+      return { deny: true, reason: `Research loop: ${target} is a shared decision or handoff record written only by the loop (${LOOP_COMMAND} park/unpark/handoff, or the researcher's answers).` };
     }
     if ((under(target, paths.assets, root) || under(target, paths.definitions, root)) && APPROVED.test(text)) {
       return { deny: true, reason: `Research loop: ${target} may not be set to status: approved by the agent. Leave it draft and call request_approval so the researcher can approve it.` };

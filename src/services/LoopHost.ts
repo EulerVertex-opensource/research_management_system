@@ -10,6 +10,14 @@ import { ProjectPaths } from '../models/types';
 import { ResearchLoopCore } from './ResearchLoopCore';
 import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
 import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { LoopGit } from './LoopGit';
+import { ResearchSync } from './ResearchSync';
+import { NodeGitRunner, runShell } from '../cli/nodeGit';
+import { loadSyncConfig } from '../cli/nodeFiles';
+
+function extensionVersion(): string | undefined {
+  return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === 'tianhao.research-management-system')?.packageJSON?.version;
+}
 
 type ToolResult = Record<string, unknown>;
 
@@ -36,8 +44,10 @@ export class LoopHost implements vscode.Disposable {
   private readonly subscriptions: vscode.Disposable[] = [];
   private busy: Promise<unknown> = Promise.resolve();
   private readonly interactions = new Map<string, Promise<ToolResult>>();
+  private readonly git: LoopGit;
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel) {
+    this.git = new LoopGit(new NodeGitRunner(files.rootUri.fsPath));
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
     this.statusBar.command = 'research-assistant.loop.openChat';
     this.subscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => { void this.onEditorSave(document); }));
@@ -46,7 +56,7 @@ export class LoopHost implements vscode.Disposable {
   configure(paths: ProjectPaths): void {
     this.paths = paths;
     if (this.core) this.core.setPaths(paths);
-    else this.core = new ResearchLoopCore(this.files, paths, { iterationCap: setting('iterationCap', 10) });
+    else this.core = new ResearchLoopCore(this.files, paths, { iterationCap: setting('iterationCap', 10), git: this.git, extensionVersion: extensionVersion() });
     this.watcher?.dispose();
     this.watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, STATE_PATH));
     const refresh = () => { void this.refreshStatusBar(); };
@@ -166,6 +176,7 @@ export class LoopHost implements vscode.Disposable {
     if (name === 'await_answer') return this.awaitInteraction(String(args.id ?? ''), slice);
     if (name === 'record_idea') return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent') }));
     if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary(), brief: core.briefStatus() }));
+    if (name === 'confirm_publish') return { confirmed: await this.confirmPublish(String(args.detail ?? '')) };
     return { answered: false, reason: `unknown tool ${name}` };
   }
 
@@ -348,6 +359,62 @@ export class LoopHost implements vscode.Disposable {
     const outcome = await this.showApproval(picked.item.kind, picked.item.target, picked.item.reason);
     if (!outcome || outcome.decision === 'later') return;
     await this.withCore((core) => core.resolveApproval(picked.item.id, outcome.decision, outcome.text, 'command'));
+  }
+
+  // ---------- git sync ----------
+
+  /** The human gate on sharing research: a modal only the researcher can answer. */
+  private async confirmPublish(detail: string): Promise<boolean> {
+    const choice = await vscode.window.showWarningMessage('Publish research changes to your collaborators?', { modal: true, detail }, 'Publish');
+    return choice === 'Publish';
+  }
+
+  private async withSync<T>(action: (sync: ResearchSync) => Promise<T>): Promise<T> {
+    const root = this.files.rootUri.fsPath;
+    const config = await loadSyncConfig(root);
+    return this.withCore((core) => action(new ResearchSync(core, this.files, this.git, config, runShell(root))));
+  }
+
+  private report(title: string, lines: string[]): void {
+    this.output.appendLine(`[sync] ${title}`);
+    for (const line of lines) this.output.appendLine(`  ${line}`);
+  }
+
+  async syncStatusCommand(): Promise<void> {
+    const status = await this.withSync((sync) => sync.status());
+    this.report('status', JSON.stringify(status, null, 2).split('\n'));
+    this.output.show(true);
+  }
+
+  async syncPullCommand(): Promise<void> {
+    const result = await this.withSync((sync) => sync.pull());
+    this.report(`pull: ${result.status}`, [...result.summary, ...result.problems.map((line) => `PROBLEM ${line}`), ...result.warnings.map((line) => `WARNING ${line}`)]);
+    this.output.show(true);
+    if (result.status === 'conflict') void vscode.window.showWarningMessage(`Research sync stopped on conflicts in ${result.conflicted?.join(', ')}. Resolve them, then ask the agent to run sync pull --continue.`);
+    else if (result.problems.length) void vscode.window.showWarningMessage(`Pulled, but ${result.problems.length} research file problem(s) need fixing; the loop is paused. See Output.`);
+    else void vscode.window.showInformationMessage(result.summary[0] ?? 'Research sync: pulled.');
+  }
+
+  async syncPrepareCommand(): Promise<void> {
+    const result = await this.withSync((sync) => sync.prepare());
+    this.report(`prepare: ${result.ok ? 'ready' : 'not ready'}`, [...result.checks.map((check) => `${check.ok ? (check.warning ? 'WARN' : 'PASS') : 'FAIL'} ${check.name}${check.details.length ? `: ${check.details.join(' | ')}` : ''}`), ...result.summary]);
+    this.output.show(true);
+    if (result.ok) {
+      const choice = await vscode.window.showInformationMessage('Research is ready to share.', 'Publish…');
+      if (choice) await this.syncPublishCommand();
+    } else void vscode.window.showWarningMessage('Research is not ready to share; see the FAIL items in Output.');
+  }
+
+  async syncPublishCommand(): Promise<void> {
+    const result = await this.withSync((sync) => sync.publish(async (preview) => this.confirmPublish([
+      `To: ${preview.targets.join(' and ')}`,
+      preview.files.length ? `Commit ${preview.files.length} file(s):\n${preview.files.slice(0, 25).map((entry) => `${entry.code.trim() || '?'} ${entry.path}`).join('\n')}` : '',
+      preview.ahead ? `Plus ${preview.ahead} local commit(s).` : '',
+      `Message:\n${preview.message}`,
+    ].filter(Boolean).join('\n\n'))));
+    this.report(`publish: ${result.status}`, [...result.summary, ...result.warnings.map((line) => `WARNING ${line}`)]);
+    if (result.status === 'published') void vscode.window.showInformationMessage(result.summary[result.summary.length - 1] ?? 'Published.');
+    else if (result.status !== 'blocked' || result.warnings.length) { this.output.show(true); void vscode.window.showWarningMessage(`Research publish: ${result.summary[result.summary.length - 1] ?? result.status}`); }
   }
 
   async captureIdeaCommand(): Promise<void> {

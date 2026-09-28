@@ -68,6 +68,10 @@ export function activate(context: vscode.ExtensionContext): void {
     loop('approve', () => provider!.loopHost.approveCommand()),
     loop('captureIdea', () => provider!.loopHost.captureIdeaCommand()),
     loop('openChat', () => provider!.loopHost.openChat()),
+    loop('syncStatus', () => provider!.loopHost.syncStatusCommand()),
+    loop('syncPull', () => provider!.loopHost.syncPullCommand()),
+    loop('syncPrepare', () => provider!.loopHost.syncPrepareCommand()),
+    loop('syncPublish', () => provider!.loopHost.syncPublishCommand()),
     loop('refreshIntegration', () => provider!.refreshProject(true)),
   ];
 

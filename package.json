@@ -65,6 +65,22 @@
         "title": "Research Assistant: Capture Research Idea"
       },
       {
+        "command": "research-assistant.loop.syncStatus",
+        "title": "Research Assistant: Git Sync Status"
+      },
+      {
+        "command": "research-assistant.loop.syncPull",
+        "title": "Research Assistant: Pull Collaborators' Research (Git)"
+      },
+      {
+        "command": "research-assistant.loop.syncPrepare",
+        "title": "Research Assistant: Check Research Before Sharing (Git)"
+      },
+      {
+        "command": "research-assistant.loop.syncPublish",
+        "title": "Research Assistant: Publish Research to Collaborators (Git)"
+      },
+      {
         "command": "research-assistant.loop.openChat",
         "title": "Research Assistant: Open Agent Chat"
       },

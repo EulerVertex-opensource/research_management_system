@@ -77,9 +77,29 @@ export interface PaperEntry {
 
 export type ProjectLayout = 'overleaf-shared' | 'legacy';
 
+/** Git collaboration settings for `research-loop sync`. */
+export interface SyncConfig {
+  /** Main collaboration remote (GitHub or Overleaf). */
+  remote: string;
+  /** Branch on `remote`; defaults to the current branch. */
+  branch?: string;
+  /** Optional Overleaf remote that receives a fast-forward push after publishing to `remote`. */
+  overleafRemote?: string;
+  overleafBranch: string;
+  strategy: 'rebase' | 'merge';
+  /** Extra paths committed on publish, besides the research folders and the manuscript. */
+  include: string[];
+  /** Command that compiles the manuscript for `sync prepare --latex`, e.g. "latexmk -pdf -interaction=nonstopmode main.tex". */
+  latexCommand?: string;
+  signCommits: boolean;
+  /** Overrides git user.email as the collaborator identity in records. */
+  identity?: string;
+}
+
 export interface ResearchAssistantConfig {
   version: 1;
   layout: ProjectLayout;
+  sync?: SyncConfig;
   latex: {
     projectRoot: string;
     main: string;
