@@ -1,6 +1,8 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
-import matter from 'gray-matter';
+import type matter from 'gray-matter';
+import { LOOP_COMMAND } from './AgentProviders';
+import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
@@ -61,7 +63,7 @@ export class ResearchLoopCore {
   }
 
   private require(): LoopState {
-    if (!this.state) throw new Error('No research loop has been started. Run: research-loop start --provider claude|codex');
+    if (!this.state) throw new Error(`No research loop has been started. Run: ${LOOP_COMMAND} start --provider claude|codex`);
     return this.state;
   }
 
@@ -213,7 +215,7 @@ export class ResearchLoopCore {
       for (const filePath of await this.files.listFiles(folder)) {
         const raw = await this.files.readFile(filePath);
         let data: Record<string, any>;
-        try { data = matter(raw).data; } catch { continue; }
+        try { data = parseMarkdown(raw).data; } catch { continue; }
         const id = path.posix.basename(filePath, '.md');
         if (data.status !== 'approved' || file.records.some((record) => record.kind === kind && record.target === id)) continue;
         file.records.push({ kind, target: id, digest: researchDigest(raw, kind), approvedAt: this.now(), source: 'adopted', ...({ statement: statementDigest(raw) } as object) });
@@ -242,9 +244,9 @@ export class ResearchLoopCore {
     } else {
       const file = `${kind === 'asset' ? this.paths.assets : this.paths.definitions}/${target}.md`;
       const raw = await this.files.readFile(file);
-      const parsed = matter(raw);
+      const parsed = parseMarkdown(raw);
       parsed.data.status = 'approved';
-      const approved = matter.stringify(parsed.content, parsed.data);
+      const approved = stringifyMarkdown(parsed.content, parsed.data);
       await this.files.writeFile(file, approved);
       await this.record(kind, target, approved, source);
     }
@@ -262,7 +264,7 @@ export class ResearchLoopCore {
     if (!(await this.files.exists(file))) return false;
     const raw = await this.files.readFile(file);
     let data: Record<string, any>;
-    try { data = matter(raw).data; } catch { return false; }
+    try { data = parseMarkdown(raw).data; } catch { return false; }
     if (data.status !== 'approved') return false;
     if (isApproved((await this.approvals()).records, kind, target, raw)) return false;
     await this.record(kind, target, raw, source);
@@ -278,15 +280,15 @@ export class ResearchLoopCore {
   /** Researcher confirmed a counterexample: approve the example and deprecate the refuted asset. */
   async confirmCounterexample(exampleId: string, source: string): Promise<string> {
     const file = `${this.paths.assets}/${exampleId}.md`;
-    const data = matter(await this.files.readFile(file)).data;
+    const data = parseMarkdown(await this.files.readFile(file)).data;
     if (data.type !== 'example' || typeof data.refutes !== 'string') throw new Error(`${exampleId} is not a counterexample.`);
     const target = data.refutes as string;
     await this.approve('asset', exampleId, source);
     const targetFile = `${this.paths.assets}/${target}.md`;
     if (await this.files.exists(targetFile)) {
-      const parsed = matter(await this.files.readFile(targetFile));
+      const parsed = parseMarkdown(await this.files.readFile(targetFile));
       parsed.data.status = 'deprecated';
-      await this.files.writeFile(targetFile, matter.stringify(parsed.content, parsed.data));
+      await this.files.writeFile(targetFile, stringifyMarkdown(parsed.content, parsed.data));
       const approvals = await this.approvals();
       approvals.records = approvals.records.filter((record) => !(record.kind === 'asset' && record.target === target));
       await this.writeApprovals(approvals);
@@ -302,10 +304,10 @@ export class ResearchLoopCore {
 
   async rejectCounterexample(exampleId: string, reason: string, source: string): Promise<void> {
     const file = `${this.paths.assets}/${exampleId}.md`;
-    const parsed = matter(await this.files.readFile(file));
+    const parsed = parseMarkdown(await this.files.readFile(file));
     parsed.data.status = 'archived';
     const body = hasSection(parsed.content, 'Verdict') ? parsed.content : `${parsed.content.trimEnd()}\n\n## Verdict\n\nrejected: ${reason || 'rejected by the researcher'}\n`;
-    await this.files.writeFile(file, matter.stringify(body, parsed.data));
+    await this.files.writeFile(file, stringifyMarkdown(body, parsed.data));
     if (this.state) {
       const target = parsed.data.refutes as string | undefined;
       if (target && this.state.parked[target]?.reason === 'counterexample_pending') delete this.state.parked[target];
@@ -326,15 +328,15 @@ export class ResearchLoopCore {
     for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
       for (const file of await this.files.listFiles(folder)) {
         const raw = await this.files.readFile(file);
-        try { nodes.set(path.posix.basename(file, '.md'), { kind, file, raw, data: matter(raw).data }); } catch { /* skip */ }
+        try { nodes.set(path.posix.basename(file, '.md'), { kind, file, raw, data: parseMarkdown(raw).data }); } catch { /* skip */ }
       }
     }
     const revert = async (id: string, reason: string) => {
       const node = nodes.get(id);
       if (!node || node.data.status !== 'approved') return;
-      const parsed = matter(node.raw);
+      const parsed = parseMarkdown(node.raw);
       parsed.data.status = 'draft';
-      node.raw = matter.stringify(parsed.content, parsed.data);
+      node.raw = stringifyMarkdown(parsed.content, parsed.data);
       node.data = parsed.data;
       await this.files.writeFile(node.file, node.raw);
       approvals.records = approvals.records.filter((record) => !(record.kind === node.kind && record.target === id));
@@ -492,7 +494,7 @@ export class ResearchLoopCore {
     const assetIds = new Set((await this.files.listFiles(this.paths.assets)).map((file) => path.posix.basename(file, '.md')));
     for (const asset of relatedAssets) if (!assetIds.has(asset)) throw new Error(`Unknown related asset: ${asset}`);
     const ideaId = `idea_${this.id().replace(/-/g, '').slice(0, 12)}`;
-    const raw = matter.stringify(`\n${body.trim()}\n`, { type: 'idea', title: title.trim() || 'Untitled idea', status: 'draft', origin, related_assets: relatedAssets, tags });
+    const raw = stringifyMarkdown(`\n${body.trim()}\n`, { type: 'idea', title: title.trim() || 'Untitled idea', status: 'draft', origin, related_assets: relatedAssets, tags });
     await this.files.writeFile(`${this.paths.ideas}/${ideaId}.md`, raw);
     await this.event('idea_saved', { ideaId, relatedAssets, origin });
     return ideaId;
@@ -500,14 +502,14 @@ export class ResearchLoopCore {
 
   async convertIdea(ideaId: string, assetId: string, goal: string, steps: string, verification: string): Promise<string> {
     const ideaRaw = await this.files.readFile(`${this.paths.ideas}/${ideaId}.md`);
-    if (matter(ideaRaw).data.type !== 'idea') throw new Error('Source must be an idea.');
+    if (parseMarkdown(ideaRaw).data.type !== 'idea') throw new Error('Source must be an idea.');
     if (!(await this.files.exists(`${this.paths.assets}/${assetId}.md`))) throw new Error(`Unknown asset: ${assetId}`);
     const checklist = steps.split(/\r?\n/).map((step) => step.trim()).filter(Boolean).map((step, index) => `${index + 1}. [ ] ${step.replace(/^\d+\.\s*(?:\[[ xX]\])?\s*/, '')}`).join('\n');
     if (!goal.trim() || !checklist || !verification.trim()) throw new Error('Goal, steps, and verification are required.');
     const planId = `plan_${this.id().replace(/-/g, '').slice(0, 12)}`;
     const failed = await this.failedPlans(assetId);
     const difference = failed.length ? `\n## Difference from failed plans\n\n${failed.map((id) => `- ${id}: new route from idea ${ideaId}`).join('\n')}\n` : '';
-    const raw = matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/${assetId}.md)\n\n${goal.trim()}\n\n## Plan\n\n${checklist}\n\n## Verification\n\n${verification.trim()}\n${difference}`, { type: 'plan', title: goal.trim().slice(0, 80), status: 'pending', target_asset: assetId, inspired_by: [ideaId], tags: [] });
+    const raw = stringifyMarkdown(`\n## Goal\n\nTarget: [asset](../assets/${assetId}.md)\n\n${goal.trim()}\n\n## Plan\n\n${checklist}\n\n## Verification\n\n${verification.trim()}\n${difference}`, { type: 'plan', title: goal.trim().slice(0, 80), status: 'pending', target_asset: assetId, inspired_by: [ideaId], tags: [] });
     await this.files.writeFile(`${this.paths.plans}/${planId}.md`, raw);
     if (this.state?.parked[assetId]) { delete this.state.parked[assetId]; await this.save(); }
     await this.event('idea_converted', { ideaId, planId, assetId });
@@ -520,7 +522,7 @@ export class ResearchLoopCore {
     const nodes = new Map<string, AssetInfo>();
     for (const file of await this.files.listFiles(folder)) {
       const raw = await this.files.readFile(file);
-      try { const parsed = matter(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), raw, data: parsed.data, body: parsed.content }); } catch { /* skip unparsable */ }
+      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), raw, data: parsed.data, body: parsed.content }); } catch { /* skip unparsable */ }
     }
     return nodes;
   }
@@ -602,8 +604,8 @@ export class ResearchLoopCore {
       if (verified) { settled.add(id); continue; }
       if (asset.data.status === 'approved') {
         // Approved without a matching record: the researcher must re-approve.
-        const parsed = matter(asset.raw); parsed.data.status = 'draft';
-        await this.files.writeFile(`${this.paths.assets}/${id}.md`, matter.stringify(parsed.content, parsed.data));
+        const parsed = parseMarkdown(asset.raw); parsed.data.status = 'draft';
+        await this.files.writeFile(`${this.paths.assets}/${id}.md`, stringifyMarkdown(parsed.content, parsed.data));
         await this.event('approval_invalidated', { id, reason: 'no_record' });
         asset.data.status = 'draft';
       }
@@ -658,14 +660,14 @@ export class ResearchLoopCore {
   /** Compute or confirm the current stage and return the instruction for the agent. */
   async next(): Promise<NextResult> {
     const state = this.require();
-    if (state.status !== 'running') return this.result(`The loop is ${state.status}. Run: research-loop resume`);
+    if (state.status !== 'running') return this.result(`The loop is ${state.status}. Run: ${LOOP_COMMAND} resume`);
     if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
     const perAsset = ['falsify', 'verify_counterexample', 'plan', 'execute'].includes(state.stage);
     let recompute = ['select', 'waiting', 'ready', 'review_project', 'discuss_goals'].includes(state.stage);
     if (!recompute && !(await this.isProjectApproved()) && state.stage !== 'draft_project') recompute = true;
     if (perAsset && state.current.assetId) {
       const file = `${this.paths.assets}/${state.current.assetId}.md`;
-      const data = (await this.files.exists(file)) ? matter(await this.files.readFile(file)).data : undefined;
+      const data = (await this.files.exists(file)) ? parseMarkdown(await this.files.readFile(file)).data : undefined;
       if (!data || data.status !== 'draft' || state.parked[state.current.assetId]) recompute = true;
     }
     if (recompute) {
@@ -694,14 +696,14 @@ export class ResearchLoopCore {
   instruction(state: LoopState): string {
     const asset = state.current.assetId ?? '(none)';
     const input = state.researcherInput ? `\nResearcher input: ${state.researcherInput.text}` : '';
-    const report = (outcomes: string) => `\nWhen done run: research-loop report <${outcomes}> --summary "<= 5 lines"`;
+    const report = (outcomes: string) => `\nWhen done run: ${LOOP_COMMAND} report <${outcomes}> --summary "<= 5 lines"`;
     switch (state.stage) {
       case 'discuss_goals':
-        return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: research-loop question answer --text "..." (or report complete --summary "<their goal>").${input}`;
+        return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: ${LOOP_COMMAND} question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
         return `Stage draft_project. Draft or revise ${this.paths.projectMd} only: fill ## Main Problem, ## Background, ## Current Goals, ## Required Results (one bullet per stable snake_case asset ID, "- id: role"), ## Known Results, ## Open Questions. Do not claim approval.${state.extension && !state.extension.projectApproved ? ` This extends an approved project: keep every existing bullet under ## Required Results (${state.extension.baselineRequired.join(', ')}) and leave approved statements unchanged; add the new goal as new asset ID(s) and update ## Current Goals.` : ''}${input}${report('complete|question')}`;
       case 'review_project':
-        return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: research-loop next`;
+        return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
         const brief = (state as any).scaffoldBrief as { missing?: string[]; incomplete?: string[] } | undefined;
         return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind self_proved (unless genuinely sourced), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Do not modify existing assets or definitions. Then run order-assets and link-research-nodes.${input}${report('complete|question')}`;
@@ -722,9 +724,9 @@ export class ResearchLoopCore {
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
         if (state.extension?.newResults?.length) return `Stage ready. Every required result and dependency is approved, including the new result(s) ${state.extension.newResults.join(', ')}. If a manuscript already exists, use the plan-manuscript skill to place only these into the existing outline (new or adjusted section briefs), then redraft only the affected sections; keep the other briefs and TeX files. Otherwise tell the researcher the project is ready for the plan-manuscript skill.`;
-        return 'Stage ready. Every required result and dependency is approved. Tell the researcher the project is ready for the plan-manuscript skill. To add a new result later, run: research-loop extend --goal "..."';
+        return `Stage ready. Every required result and dependency is approved. Tell the researcher the project is ready for the plan-manuscript skill. To add a new result later, run: ${LOOP_COMMAND} extend --goal "..."`;
       default:
-        return 'Run: research-loop next';
+        return `Run: ${LOOP_COMMAND} next`;
     }
   }
 
@@ -786,7 +788,7 @@ export class ResearchLoopCore {
       }
       const raw = await this.files.readFile(file);
       try { validateResearchFile(file, raw, folders, paperIds); } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); continue; }
-      const data = matter(raw).data;
+      const data = parseMarkdown(raw).data;
       if (modified.includes(file) && ['scaffold', 'sources', 'falsify', 'plan'].includes(stage) && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
       if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.counterexampleId}.md`) problems.push(`${file}: verification may change only the candidate example.`);
       if (stage === 'execute' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md`) problems.push(`${file}: execution may change only its target asset.`);
@@ -796,11 +798,11 @@ export class ResearchLoopCore {
       if (isIn(file, folders.plans) && data.type === 'plan') {
         const failed = (await this.failedPlans(String(data.target_asset))).filter((id) => id !== path.posix.basename(file, '.md'));
         if (failed.length && data.status === 'pending') {
-          const section = sectionContent(matter(raw).content, 'Difference from failed plans');
+          const section = sectionContent(parseMarkdown(raw).content, 'Difference from failed plans');
           const missing = failed.filter((id) => !section.includes(id));
           if (missing.length) problems.push(`${file}: ## Difference from failed plans must mention ${missing.join(', ')}.`);
         }
-        if (typeof data.target_asset === 'string' && !matter(raw).content.includes(`../assets/${data.target_asset}.md`) && !matter(raw).content.includes(`${this.paths.assets}/${data.target_asset}.md`)) problems.push(`${file}: missing the target asset link.`);
+        if (typeof data.target_asset === 'string' && !parseMarkdown(raw).content.includes(`../assets/${data.target_asset}.md`) && !parseMarkdown(raw).content.includes(`${this.paths.assets}/${data.target_asset}.md`)) problems.push(`${file}: missing the target asset link.`);
       }
       for (const dep of Array.isArray(data.depends_on) ? data.depends_on : []) {
         const known = isIn(file, folders.definitions) ? `${folders.definitions}/${dep}.md` : `${folders.assets}/${dep}.md`;
@@ -867,7 +869,7 @@ export class ResearchLoopCore {
     if (report.outcome === 'question') {
       const kind: QuestionKind = stage === 'plan' && report.question?.toLowerCase().includes('fail') ? 'blocked' : 'discussion';
       await this.askQuestion(kind, report.question || report.summary);
-      return { stage, message: `Question recorded for the researcher. Ask it in chat, then record the answer with: research-loop question answer --text "..."` };
+      return { stage, message: `Question recorded for the researcher. Ask it in chat, then record the answer with: ${LOOP_COMMAND} question answer --text "..."` };
     }
     switch (stage) {
       case 'discuss_goals': {
@@ -903,7 +905,7 @@ export class ResearchLoopCore {
           const candidate = report.counterexampleId ?? added.map((file) => path.posix.basename(file, '.md')).find((id) => added.includes(`${this.paths.assets}/${id}.md`));
           if (!candidate) throw new Error('candidate needs --counterexample <example id>.');
           const raw = await this.files.readFile(`${this.paths.assets}/${candidate}.md`);
-          if (matter(raw).data.refutes !== assetId) throw new Error(`${candidate} must set refutes: ${assetId}.`);
+          if (parseMarkdown(raw).data.refutes !== assetId) throw new Error(`${candidate} must set refutes: ${assetId}.`);
           return finish(`Candidate ${candidate} recorded. Next: verify it independently.`, 'verify_counterexample', { counterexampleId: candidate });
         }
         if (report.outcome !== 'none') throw new Error('falsify outcome must be candidate, none, or question.');
@@ -914,7 +916,7 @@ export class ResearchLoopCore {
         await validated();
         const assetId = state.current.assetId!;
         const exampleId = state.current.counterexampleId!;
-        const example = matter(await this.files.readFile(`${this.paths.assets}/${exampleId}.md`));
+        const example = parseMarkdown(await this.files.readFile(`${this.paths.assets}/${exampleId}.md`));
         if (report.outcome === 'confirmed') {
           if (!sectionContent(example.content, 'Verdict')) throw new Error(`${exampleId} needs a ## Verdict.`);
           await this.enqueueApproval('counterexample', exampleId, `Independently verified counterexample to ${assetId}; confirm or reject.`);
@@ -932,7 +934,7 @@ export class ResearchLoopCore {
         const assetId = state.current.assetId!;
         const planId = report.planId ?? state.current.planId ?? added.filter((file) => path.posix.dirname(file) === this.paths.plans).map((file) => path.posix.basename(file, '.md'))[0];
         if (!planId) throw new Error('Planning did not produce a plan; pass --plan <id>.');
-        const plan = matter(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
+        const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
         if (plan.data.type !== 'plan' || plan.data.status !== 'pending' || plan.data.target_asset !== assetId) throw new Error(`${planId} must be a pending plan targeting ${assetId}.`);
         const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
@@ -944,9 +946,9 @@ export class ResearchLoopCore {
         await validated();
         const assetId = state.current.assetId!;
         const planId = state.current.planId!;
-        const plan = matter(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
+        const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
         if (report.outcome === 'proved') {
-          const asset = matter(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
+          const asset = parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
           if (plan.data.type !== 'proof_record' || !sectionContent(plan.content, 'Outcome')) throw new Error(`${planId} must become type proof_record with ## Outcome.`);
           if (!proofText(asset.content)) throw new Error(`${assetId} needs the proof under ## Proof.`);
           if (asset.data.status !== 'draft') throw new Error(`${assetId} must stay draft until the researcher approves it.`);
@@ -969,7 +971,7 @@ export class ResearchLoopCore {
         return finish(`Plan ${planId} failed (${failures}/${MAX_FAILED_PLANS}). Next: a different plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
       }
       default:
-        throw new Error(`Stage ${stage} takes no report. Run: research-loop next`);
+        throw new Error(`Stage ${stage} takes no report. Run: ${LOOP_COMMAND} next`);
     }
   }
 
@@ -982,14 +984,14 @@ export class ResearchLoopCore {
       for (const file of await this.files.listFiles(folder)) {
         const raw = await this.files.readFile(file);
         let parsed: matter.GrayMatterFile<string>;
-        try { parsed = matter(raw); } catch { problems.push(`${file}: invalid YAML`); continue; }
+        try { parsed = parseMarkdown(raw); } catch { problems.push(`${file}: invalid YAML`); continue; }
         const id = path.posix.basename(file, '.md');
         if (parsed.data.status !== 'approved') continue;
         if (!isApproved(approvals.records, kind, id, raw)) {
           problems.push(`${file}: status approved without a matching researcher approval record.`);
           if (options.fix) {
             parsed.data.status = 'draft';
-            await this.files.writeFile(file, matter.stringify(parsed.content, parsed.data));
+            await this.files.writeFile(file, stringifyMarkdown(parsed.content, parsed.data));
             approvals.records = approvals.records.filter((record) => !(record.kind === kind && record.target === id));
             fixed.push(id);
             await this.event('approval_invalidated', { id, reason: 'validate' });
@@ -1017,7 +1019,7 @@ export class ResearchLoopCore {
 
   briefStatus(): string {
     const state = this.state;
-    if (!state) return 'Research loop: not started. Start it with `research-loop start --provider claude|codex` or the VS Code command "Research Assistant: Start research loop".';
+    if (!state) return `Research loop: not started. Start it with \`${LOOP_COMMAND} start --provider claude|codex\` or the VS Code command "Research Assistant: Start research loop".`;
     const lines = [`Research loop: ${state.status}, stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}${state.current.planId ? `, plan ${state.current.planId}` : ''}.`];
     if (state.pendingQuestion) lines.push(`Pending question (${state.pendingQuestion.kind}): ${state.pendingQuestion.prompt}`);
     if (state.approvalQueue.length) lines.push(`Waiting for researcher approval: ${state.approvalQueue.map((item) => `${item.kind} ${item.target}`).join(', ')}.`);
@@ -1026,7 +1028,7 @@ export class ResearchLoopCore {
     const unread = state.answers.filter((answer) => !answer.consumed);
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
-    lines.push(state.status === 'running' && !state.pendingQuestion ? 'Continue with: research-loop next' : 'Approval is a researcher action; never set status: approved.');
+    lines.push(state.status === 'running' && !state.pendingQuestion ? `Continue with: ${LOOP_COMMAND} next` : 'Approval is a researcher action; never set status: approved.');
     return lines.join('\n');
   }
 

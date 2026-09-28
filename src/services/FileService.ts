@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
+import { AGENT_PROVIDERS, PROVIDER_IDS } from './AgentProviders';
 
 const PROJECT_TEMPLATE = `# Project
 
@@ -128,8 +129,7 @@ export class FileService {
       paths.papers,
       paths.localSourcePdfs,
       LATEX_OUTPUT_DIRECTORY,
-      '.agents/skills',
-      '.claude/skills',
+      ...PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].skillsDir),
       '.github',
     ];
 
@@ -219,19 +219,14 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
       '*.pyc',
       '# Recreated by the same Research Assistant extension version',
       '# Only extension-maintained skills are local; project skills can be tracked',
-      ...bundledSkillNames.flatMap((name) => [
-        `/.agents/skills/${name}/`,
-        `/.claude/skills/${name}/`,
-      ]),
+      ...bundledSkillNames.flatMap((name) => PROVIDER_IDS.map((id) => `/${AGENT_PROVIDERS[id].skillsDir}/${name}/`)),
       '/.github/copilot-instructions.md',
       '/AGENTS.md',
       '/CLAUDE.md',
       '/.vscode/settings.json',
       '/.vscode/extensions.json',
       '/.research-assistant-loop/',
-      '/.claude/settings.local.json',
-      '/.mcp.json',
-      '/.codex/hooks.json',
+      ...PROVIDER_IDS.flatMap((id) => { const spec = AGENT_PROVIDERS[id]; return [`/${spec.hooksFile}`, ...(spec.mcp.kind === 'project-json' ? [`/${spec.mcp.file}`] : [])]; }),
       ...(paths.researchRoot !== '.' ? [`/${paths.researchRoot}/README.md`] : []),
       GITIGNORE_END,
     ].join('\n');

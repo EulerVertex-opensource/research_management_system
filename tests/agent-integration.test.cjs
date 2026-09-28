@@ -11,45 +11,58 @@ function load(file) {
   return module.exports;
 }
 
-const { mergeClaudeSettings, buildClaudeMcpJson, buildCodexHooksJson, mergeCodexConfigToml } = load('../src/services/AgentIntegrationCore.ts');
-const script = '/repo/.claude/skills/research-loop/scripts/research-loop.cjs';
+const { buildHooksFile, buildProjectMcpJson, upsertCodexMcpTable } = load('../src/services/AgentIntegrationCore.ts');
+const { AGENT_PROVIDERS, PROVIDER_IDS, loopScriptPath, chatHint, invocation } = load('../src/services/AgentProviders.ts');
 
-test('Claude settings merge preserves user hooks and comments and is idempotent', () => {
-  const existing = `{
+test('registry covers both agents and derives paths and hints from one table', () => {
+  assert.deepEqual(PROVIDER_IDS, ['claude', 'codex']);
+  assert.equal(loopScriptPath('/repo', 'claude'), '/repo/.claude/skills/research-loop/scripts/research-loop.cjs');
+  assert.equal(loopScriptPath('/repo', 'codex', 'research-loop-mcp.cjs'), '/repo/.agents/skills/research-loop/scripts/research-loop-mcp.cjs');
+  assert.equal(invocation('codex'), '$research-loop');
+  assert.equal(chatHint('claude'), 'Type /research-loop in the Claude Code chat.');
+});
+
+for (const id of ['claude', 'codex']) {
+  test(`${id} hooks file preserves user hooks, is idempotent, and uses the registry matcher`, () => {
+    const spec = AGENT_PROVIDERS[id];
+    const script = loopScriptPath('/repo', id);
+    const existing = `{
   // keep me
-  "permissions": { "allow": ["Bash(npm test)"], },
   "hooks": {
     "Stop": [{ "hooks": [{ "type": "command", "command": "echo mine" }] }, { "hooks": [{ "type": "command", "command": "node \\"/old/research-loop.cjs\\" hook Stop" }] }]
   }
 }
 `;
-  const once = mergeClaudeSettings(existing, script);
-  assert.match(once, /keep me/);
-  const parsed = parse(once);
-  assert.deepEqual(parsed.permissions.allow.slice(0, 1), ['Bash(npm test)']);
-  assert.ok(parsed.permissions.allow.includes('mcp__research-assistant'));
-  assert.equal(parsed.hooks.Stop.length, 2);
-  assert.equal(parsed.hooks.Stop[0].hooks[0].command, 'echo mine');
-  assert.match(parsed.hooks.Stop.at(-1).hooks[0].command, /\/repo\/.claude/);
-  assert.ok(parsed.hooks.PreToolUse[0].matcher.includes('Write'));
-  assert.equal(mergeClaudeSettings(once, script), once);
-  assert.equal(parse(mergeClaudeSettings('', script)).hooks.SessionStart.length, 1);
-  assert.throws(() => mergeClaudeSettings('[1]', script), /JSON object/);
-});
+    const once = buildHooksFile(id, existing, script);
+    assert.match(once, /keep me/);
+    const parsed = parse(once);
+    assert.equal(parsed.hooks.Stop.length, 2);
+    assert.equal(parsed.hooks.Stop[0].hooks[0].command, 'echo mine');
+    assert.ok(parsed.hooks.Stop[1].hooks[0].command.includes(script));
+    assert.equal(parsed.hooks.PreToolUse[0].matcher, spec.writeToolMatcher);
+    assert.equal(parsed.hooks.SessionStart[0].matcher, 'startup|resume|clear|compact');
+    assert.equal(Boolean(parsed.permissions), spec.hooksFileHasPermissions);
+    if (spec.hooksFileHasPermissions) assert.ok(parsed.permissions.allow.includes('mcp__research-assistant'));
+    assert.equal(buildHooksFile(id, once, script), once);
+    assert.throws(() => buildHooksFile(id, '[1]', script), /JSON object/);
+  });
+}
 
-test('MCP and Codex builders', () => {
-  const mcp = parse(buildClaudeMcpJson('{"mcpServers":{"other":{"command":"x"}}}', '/repo/mcp.cjs', '/repo'));
+test('project MCP JSON keeps other servers', () => {
+  const mcp = parse(buildProjectMcpJson('{"mcpServers":{"other":{"command":"x"}}}', '/repo/mcp.cjs', '/repo'));
   assert.equal(mcp.mcpServers.other.command, 'x');
   assert.deepEqual(mcp.mcpServers['research-assistant'].args, ['/repo/mcp.cjs', '--project', '/repo']);
-  const codex = parse(buildCodexHooksJson('', '/repo/.agents/skills/research-loop/scripts/research-loop.cjs'));
-  assert.match(codex.hooks.PreToolUse[0].matcher, /apply_patch/);
-  const toml = mergeCodexConfigToml('model = "o3"\n', '/repo/mcp.cjs', '/repo');
-  assert.match(toml.content, /^model = "o3"\n\n# research-assistant:start\n\[mcp_servers\.research-assistant\]/);
-  assert.equal(mergeCodexConfigToml(toml.content, '/repo/mcp.cjs', '/repo').content, toml.content);
-  const moved = mergeCodexConfigToml(toml.content, '/new/mcp.cjs', '/new').content;
-  assert.match(moved, /\/new\/mcp\.cjs/);
-  assert.doesNotMatch(moved, /\/repo\/mcp\.cjs/);
-  const conflict = mergeCodexConfigToml('[mcp_servers.research-assistant]\ncommand = "custom"\n', '/repo/mcp.cjs', '/repo');
-  assert.match(conflict.skipped, /already defines/);
-  assert.equal(conflict.content, '[mcp_servers.research-assistant]\ncommand = "custom"\n');
+});
+
+test('Codex MCP table is owned as a whole and everything else is untouched', () => {
+  const user = 'model = "o3"\n\n[mcp_servers.other]\ncommand = "x"\n';
+  const once = upsertCodexMcpTable(user, '/ext/out/research-loop-mcp.cjs');
+  assert.ok(once.startsWith(user.trimEnd()));
+  assert.match(once, /\[mcp_servers\.research-assistant\]\ncommand = "node"\nargs = \["\/ext\/out\/research-loop-mcp\.cjs"\]\ndefault_tools_approval_mode = "approve"\n$/);
+  assert.equal(upsertCodexMcpTable(once, '/ext/out/research-loop-mcp.cjs'), once);
+  const legacy = '[mcp_servers.research-assistant]\ncommand = "node"\nargs = ["/old.cjs"]\n\n[mcp_servers.research-assistant.env]\nA = "1"\n\n[mcp_servers.after]\ncommand = "y"\n';
+  const moved = upsertCodexMcpTable(legacy, '/new.cjs');
+  assert.doesNotMatch(moved, /old\.cjs|A = "1"/);
+  assert.match(moved, /default_tools_approval_mode = "approve"\n\n\[mcp_servers\.after\]\ncommand = "y"\n$/);
+  assert.equal(upsertCodexMcpTable('', '/a.cjs').split('\n')[0], '[mcp_servers.research-assistant]');
 });

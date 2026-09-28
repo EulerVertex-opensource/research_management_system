@@ -1,10 +1,8 @@
 import * as vscode from 'vscode';
 import { FileService } from './FileService';
+import { AGENT_PROVIDERS, LOOP_SCRIPT, MCP_SCRIPT, PROVIDER_IDS } from './AgentProviders';
 
-const SKILL_DESTINATIONS = [
-  '.agents/skills',
-  '.claude/skills',
-];
+const SKILL_DESTINATIONS = PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].skillsDir);
 
 /**
  * Installs the extension's bundled, agent-neutral skills into each supported
@@ -87,14 +85,14 @@ export class SkillInstallerService {
       }
       if (skillName === 'research-loop') {
         const [loop, mcp] = await Promise.all([
-          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'research-loop.cjs')),
-          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'research-loop-mcp.cjs')),
+          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', LOOP_SCRIPT)),
+          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', MCP_SCRIPT)),
         ]);
         await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
           const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
           await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'research-loop.cjs'), loop);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'research-loop-mcp.cjs'), mcp);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, LOOP_SCRIPT), loop);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, MCP_SCRIPT), mcp);
         }));
       }
       if (skillName === 'manuscript-writing') {

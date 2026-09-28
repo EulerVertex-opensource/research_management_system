@@ -1,5 +1,5 @@
 import * as path from 'path';
-import matter from 'gray-matter';
+import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, ProjectPaths } from '../models/types';
 import { FileService } from './FileService';
 import { hasSectionContent, resolveIdeaType } from './ProofIdeas';
@@ -152,7 +152,7 @@ const ASSET_TYPES = new Set<NodeType>(['theorem', 'lemma', 'proposition', 'examp
 
 function parseNode(relativePath: string, raw: string): ResearchNode | null {
   try {
-    const { data, content } = matter(raw);
+    const { data, content } = parseMarkdown(raw);
     const id = path.basename(relativePath, '.md');
     return {
       id,
@@ -250,7 +250,7 @@ export class NodeIndexService {
     }
 
     const raw = await this.fileService.readFile(node.filePath);
-    const parsed = matter(raw);
+    const parsed = parseMarkdown(raw);
 
     if (node.type === 'proof_record') throw new Error('Proof records have no status.');
     if (node.type === 'idea' ? !['draft', 'archived'].includes(status) : node.type === 'plan' ? !['pending', 'failed'].includes(status) : !['draft', 'approved', 'deprecated', 'archived'].includes(status)) {
@@ -262,7 +262,7 @@ export class NodeIndexService {
     parsed.data.status = status;
 
     // Rebuild the file: stringify frontmatter + preserve body
-    const updated = matter.stringify(parsed.content, parsed.data);
+    const updated = stringifyMarkdown(parsed.content, parsed.data);
     await this.fileService.writeFile(node.filePath, updated);
 
     node.status = status;
@@ -274,7 +274,7 @@ export class NodeIndexService {
       throw new Error(`Node not found: ${id}`);
     }
     const raw = await this.fileService.readFile(node.filePath);
-    const { data, content } = matter(raw);
+    const { data, content } = parseMarkdown(raw);
     return {
       frontmatter: {
         type: node.type,
@@ -299,7 +299,7 @@ export class NodeIndexService {
     if (!node) {
       throw new Error(`Node not found: ${id}`);
     }
-    // matter.stringify(body, data) → produces "---\n<yaml>\n---\n<body>"
+    // stringifyMarkdown(body, data) → produces "---\n<yaml>\n---\n<body>"
     const data: Record<string, unknown> = { ...frontmatter };
     delete data.kind;
     if (frontmatter.type === 'idea') {
@@ -347,7 +347,7 @@ export class NodeIndexService {
       delete data.related_assets;
     }
     for (const [key, value] of Object.entries(data)) if (value === undefined) delete data[key];
-    const fileContent = matter.stringify(
+    const fileContent = stringifyMarkdown(
       '\n' + body,
       data
     );

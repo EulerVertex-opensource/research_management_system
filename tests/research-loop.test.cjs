@@ -60,7 +60,6 @@ async function driveToPlan(f) {
   assert.equal(f.core.current.stage, 'plan');
 }
 
-// Unique proof text per run: gray-matter caches parses by content, and approval mutates the cached data.
 async function driveToReady(f) {
   await driveToPlan(f);
   f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
@@ -108,10 +107,23 @@ test('happy path: goals, approval gates, proof record, ready, and invalidation o
   assert.equal((await f.core.next()).stage, 'waiting');
 });
 
+test('approving does not leak into later parses of the same draft text', async () => {
+  const draft = asset('\n## Proof\n\nShared text.\n');
+  const f = fixture({ 'research/assets/main_theorem.md': draft, 'research/assets/copy.md': draft });
+  await f.core.start('claude');
+  await f.core.approve('asset', 'main_theorem', 'test');
+  assert.equal(matter(f.map.get('research/assets/main_theorem.md')).data.status, 'approved');
+  const { parseMarkdown } = load('../src/services/Frontmatter.ts');
+  assert.equal(parseMarkdown(draft).data.status, 'draft');
+  const result = await f.core.validateWorkspace({ fix: true });
+  assert.deepEqual(result.problems, []);
+  assert.equal(parseMarkdown(f.map.get('research/assets/copy.md')).data.status, 'draft');
+});
+
 test('ready offers extend; an extension adds a goal and keeps approved results', async () => {
   const f = fixture();
   await driveToReady(f);
-  assert.match((await f.core.next()).instruction, /research-loop extend/);
+  assert.match((await f.core.next()).instruction, /research-loop\.cjs extend/);
   await f.core.extend('Also prove the second theorem.');
   assert.equal(f.core.current.stage, 'draft_project');
   const drafting = await f.core.next();

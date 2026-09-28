@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
-import matter from 'gray-matter';
+import type matter from 'gray-matter';
+import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 
 /**
  * Pure types and helpers for the chat-driven research loop. Shared by the
@@ -126,7 +127,7 @@ export function researchDigest(raw: string, kind: 'project' | 'asset' | 'definit
   if (kind === 'project') {
     return sha(['Main Problem', 'Current Goals', 'Required Results'].map((heading) => normalizeProse(projectSection(raw, heading))).join('\n'));
   }
-  const parsed = matter(raw);
+  const parsed = parseMarkdown(raw);
   const data = { ...parsed.data };
   for (const key of ['status', 'title', 'used_in', 'tags']) delete data[key];
   return sha(JSON.stringify(sortKeys(data)) + '\n' + normalizeProse(parsed.content));
@@ -134,7 +135,7 @@ export function researchDigest(raw: string, kind: 'project' | 'asset' | 'definit
 
 /** Digest of the statement alone; changes here invalidate dependants and freeze proofs. */
 export function statementDigest(raw: string): string {
-  const parsed = matter(raw);
+  const parsed = parseMarkdown(raw);
   const body = parsed.content.split(/^## Proof[ \t]*$/m)[0];
   const data = { ...parsed.data };
   for (const key of ['status', 'title', 'used_in', 'tags']) delete data[key];
@@ -167,7 +168,7 @@ export function statementIncomplete(body: string): boolean {
 export function validateResearchFile(filePath: string, raw: string, folders: ResearchFolders, paperIds: Set<string>): void {
   if (!filePath.endsWith('.md')) throw new Error(`Research file must be Markdown: ${filePath}`);
   let parsed: matter.GrayMatterFile<string>;
-  try { parsed = matter(raw); } catch (error) { throw new Error(`${filePath}: invalid YAML frontmatter (${String(error)})`); }
+  try { parsed = parseMarkdown(raw); } catch (error) { throw new Error(`${filePath}: invalid YAML frontmatter (${String(error)})`); }
   const { data, content } = parsed;
   const id = path.posix.basename(filePath, '.md');
   if (!/^[a-z][a-z0-9_]*$/.test(id)) throw new Error(`Invalid node ID: ${id}`);

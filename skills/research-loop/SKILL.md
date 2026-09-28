@@ -12,7 +12,7 @@ You are the driver, not the sole mathematician. Files are the state; the bundled
 node .agents/skills/research-loop/scripts/research-loop.cjs <command>
 ```
 
-Claude Code has the identical copy under `.claude/skills/research-loop/scripts/`. Read `.research-assistant.json` for folder paths. The MCP server `research-assistant` offers `ask_researcher`, `request_approval`, `record_idea`, and `loop_status`; the VS Code extension shows its popups.
+Claude Code has the identical copy under `.claude/skills/research-loop/scripts/`. Read `.research-assistant.json` for folder paths. The MCP server `research-assistant` offers `ask_researcher`, `request_approval`, `await_answer`, `record_idea`, and `loop_status`; the VS Code extension shows its popups. In Claude Code the tools appear as `mcp__research-assistant__<tool>`; in Codex under the `research-assistant` server.
 
 ## Start, resume, pause
 
@@ -42,10 +42,10 @@ Rules the validator enforces:
 
 ## Asking the researcher
 
-- `ask_researcher({question, kind, asset_id?, options?, wait_seconds?})` opens a VS Code popup and waits. Kinds: `goals`, `discussion`, `blocked`, `counterexample_review`. Result `{answered: true, text}` or `{answered: false, reason}`.
+- `ask_researcher({question, kind, asset_id?, options?})` opens a VS Code popup. Kinds: `goals`, `discussion`, `blocked`, `counterexample_review`. Every call returns within about 45 seconds. If `status` is `pending`, call `await_answer({id})` with the returned id until `status` is `final`. A final result is `{answered: true, text}` or `{answered: false, reason, auto_action}`.
 - On `{answered: false}` continue in auto mode: `goals` proceeds only if `project.md` already has a Main Problem, otherwise `report question`; `discussion` takes the default you stated in the question and records it with `record_idea` tagged `open-question`; `blocked` and `counterexample_review` park the asset (`park <asset> --reason ...`) and continue with `next`.
 - If the MCP tool is unavailable: on Claude Code use the built-in AskUserQuestion; on Codex run `report question --question "..."`, ask in chat, and when the researcher replies record it with `question answer --text "..."`.
-- `request_approval({kind, target, summary})` never blocks and never approves. Kinds: `project`, `asset`, `definition`, `citation`, `counterexample`. Keep working on other actionable assets; `next` reports `waiting` when nothing remains. Late answers appear at the top of your next prompt.
+- `request_approval({kind, target, summary})` never approves by itself and follows the same `pending` / `await_answer` protocol; you may instead leave it pending and continue with other work. Kinds: `project`, `asset`, `definition`, `citation`, `counterexample`. Keep working on other actionable assets; `next` reports `waiting` when nothing remains. Late answers appear at the top of your next prompt.
 - Ask when goals are unclear, a statement is ambiguous, a source cannot be verified, three approaches failed, a counterexample was verified, or an idea needs the researcher's judgment. Do not ask to confirm routine work.
 
 ## Ideas

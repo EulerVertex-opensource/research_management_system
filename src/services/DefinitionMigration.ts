@@ -1,4 +1,4 @@
-import matter from 'gray-matter';
+import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { AssetInput, computeAssetOrder, AssetOrderResult } from './AssetOrder';
 
 export interface DefinitionMigrationPlan {
@@ -12,7 +12,7 @@ export interface DefinitionMigrationPlan {
 /** Plan all changes and validate both dependency graphs before touching files. */
 export function planDefinitionMigration(assets: AssetInput[], definitions: AssetInput[], ideas: AssetInput[] = []): DefinitionMigrationPlan {
   const definitionIds = new Set(definitions.map((item) => item.id));
-  const moved = assets.filter((item) => matter(item.raw).data.type === 'definition');
+  const moved = assets.filter((item) => parseMarkdown(item.raw).data.type === 'definition');
   const movedIds = new Set(moved.map((item) => item.id));
   const remainingAssetIds = new Set(assets.filter((item) => !movedIds.has(item.id)).map((item) => item.id));
   for (const item of definitions) {
@@ -27,7 +27,7 @@ export function planDefinitionMigration(assets: AssetInput[], definitions: Asset
   const allDefinitionIds = new Set([...definitionIds, ...movedIds]);
   const review: string[] = [];
   const migratedDefinitions = moved.map((item) => {
-    const parsed = matter(item.raw);
+    const parsed = parseMarkdown(item.raw);
     const dependencies = Array.isArray(parsed.data.depends_on) ? parsed.data.depends_on as string[] : [];
     for (const id of dependencies) {
       if (!allDefinitionIds.has(id)) throw new Error(`${item.id}.md has a dependency on non-definition ${id}; review it before migration`);
@@ -35,7 +35,7 @@ export function planDefinitionMigration(assets: AssetInput[], definitions: Asset
     return item;
   });
   const updatedAssets = assets.filter((item) => !movedIds.has(item.id)).map((item) => {
-    const parsed = matter(item.raw);
+    const parsed = parseMarkdown(item.raw);
     const dependencies = Array.isArray(parsed.data.depends_on) ? parsed.data.depends_on as string[] : [];
     const uses = Array.isArray(parsed.data.uses_definitions) ? parsed.data.uses_definitions as string[] : [];
     const converted = dependencies.filter((id) => allDefinitionIds.has(id));
@@ -49,10 +49,10 @@ export function planDefinitionMigration(assets: AssetInput[], definitions: Asset
     }
     const usedIn = Array.isArray(parsed.data.used_in) ? parsed.data.used_in as string[] : [];
     if (usedIn.some((id) => movedIds.has(id))) review.push(`${item.id}.md: used_in references a moved definition; review its meaning`);
-    return { id: item.id, raw: converted.length ? matter.stringify(parsed.content, parsed.data) : item.raw };
+    return { id: item.id, raw: converted.length ? stringifyMarkdown(parsed.content, parsed.data) : item.raw };
   });
   for (const item of ideas) {
-    const related = matter(item.raw).data.related_assets;
+    const related = parseMarkdown(item.raw).data.related_assets;
     if (Array.isArray(related) && related.some((id) => movedIds.has(id))) {
       review.push(`${item.id}.md: related_assets references a moved definition; review its meaning`);
     }

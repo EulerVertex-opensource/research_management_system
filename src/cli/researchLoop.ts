@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { ReportOutcome, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { HookInput, preToolUseDecision, stopDecision } from '../services/ResearchLoopHooks';
+import { HookInput, contextOutput, denyOutput, preToolUseDecision, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths } from './nodeFiles';
 
 interface Args { positional: string[]; flags: Record<string, string | true>; lists: Record<string, string[]> }
@@ -69,10 +69,10 @@ async function runHook(event: string, args: Args): Promise<void> {
     case 'UserPromptSubmit': {
       if (!state || (state.status !== 'running' && state.status !== 'paused' && !state.pendingQuestion)) return;
       if (session && !core.heartbeat(session)) {
-        process.stdout.write(`Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.\n`);
+        process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
         return;
       }
-      process.stdout.write(core.briefStatus() + '\n');
+      process.stdout.write(contextOutput(event, core.briefStatus()) + '\n');
       await core.consumeAnswers();
       await core.touch(session);
       return;
@@ -80,7 +80,7 @@ async function runHook(event: string, args: Args): Promise<void> {
     case 'PreToolUse': {
       const paths = await loadProjectPaths(root);
       const decision = preToolUseDecision(paths, input, root);
-      if (decision.deny) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: decision.reason } }) + '\n');
+      if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
       return;
     }
     case 'Stop': {
@@ -100,9 +100,7 @@ async function runHook(event: string, args: Args): Promise<void> {
       record.blocks += 1; record.lastSignature = stageSignature(state); record.lastBlockAt = new Date().toISOString();
       state.autopilot.sessions[key] = record;
       await core.touch(session);
-      // Exit code 2 with the reason on stderr is the documented blocking contract for both Claude Code and Codex.
-      process.stderr.write(decision.reason + '\n');
-      process.exitCode = 2;
+      process.stdout.write(stopBlockOutput(decision.reason ?? 'Continue the research loop.') + '\n');
       return;
     }
     default:

@@ -13,9 +13,11 @@ import { NodeLoopFiles, findProjectRoot, loadProjectPaths } from './nodeFiles';
  * auto mode; ideas and status still work directly on the files.
  */
 
+const PENDING_NOTE = 'If the result has status "pending", call await_answer with its id until the status is "final".';
 const TOOLS = [
-  { name: 'ask_researcher', description: 'Ask the researcher a question in a VS Code popup and wait for the answer. Returns {answered:false, reason} on timeout or when the extension is not running; then continue in auto mode as the research-loop skill describes.', inputSchema: { type: 'object', properties: { question: { type: 'string' }, kind: { type: 'string', enum: ['goals', 'discussion', 'blocked', 'counterexample_review'] }, asset_id: { type: 'string' }, options: { type: 'array', items: { type: 'string' } }, wait_seconds: { type: 'integer', minimum: 1, maximum: 600 } }, required: ['question', 'kind'] } },
-  { name: 'request_approval', description: 'Ask the researcher to approve a project, asset proof, definition, citation, or counterexample. Never approves by itself; returns {answered:false} when the researcher defers, and the loop continues on other work.', inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['project', 'asset', 'definition', 'citation', 'counterexample'] }, target: { type: 'string' }, summary: { type: 'string' }, wait_seconds: { type: 'integer', minimum: 1, maximum: 600 } }, required: ['kind', 'target', 'summary'] } },
+  { name: 'ask_researcher', description: `Ask the researcher a question in a VS Code popup. ${PENDING_NOTE} A final result is {answered:true, text} or {answered:false, reason, auto_action}; on answered:false continue in auto mode as the research-loop skill describes.`, inputSchema: { type: 'object', properties: { question: { type: 'string' }, kind: { type: 'string', enum: ['goals', 'discussion', 'blocked', 'counterexample_review'] }, asset_id: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, required: ['question', 'kind'] } },
+  { name: 'request_approval', description: `Ask the researcher to approve a project, asset proof, definition, citation, or counterexample. Never approves by itself. ${PENDING_NOTE} When the researcher defers, the request stays queued and the loop continues on other work.`, inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['project', 'asset', 'definition', 'citation', 'counterexample'] }, target: { type: 'string' }, summary: { type: 'string' } }, required: ['kind', 'target', 'summary'] } },
+  { name: 'await_answer', description: 'Keep waiting for the researcher on a pending ask_researcher or request_approval id. Returns status "pending" again or the final result.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
   { name: 'record_idea', description: 'Save a research idea (intuition, gap, approach, test case) to the ideas folder as a draft idea node.', inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, related_assets: { type: 'array', items: { type: 'string' } }, tags: { type: 'array', items: { type: 'string' } } }, required: ['title', 'body'] } },
   { name: 'loop_status', description: 'Current research loop status: stage, asset, pending question, approval queue, parked assets.', inputSchema: { type: 'object', properties: {} } },
 ];
@@ -43,15 +45,17 @@ async function projectRoot(): Promise<string | undefined> {
   return (containing ?? (entries.length === 1 ? entries[0] : undefined))?.root;
 }
 
+/** The extension answers within its 45 s slice; this bound only guards a hung extension. */
+const CALL_TIMEOUT_MS = Number(process.env.RESEARCH_LOOP_MCP_CALL_TIMEOUT_MS) || 55_000;
+
 async function forward(root: string, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   let bridge: { port: number; token: string } | undefined;
   try { bridge = JSON.parse(await fs.readFile(path.join(root, BRIDGE_PATH), 'utf8')); } catch { bridge = undefined; }
   if (!bridge?.port || !bridge.token) return { answered: false, reason: 'extension not running' };
-  const wait = typeof args.wait_seconds === 'number' ? args.wait_seconds : 240;
   try {
     const response = await fetch(`http://127.0.0.1:${bridge.port}/tool`, {
       method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` },
-      body: JSON.stringify({ name, arguments: args }), signal: AbortSignal.timeout((wait + 5) * 1000),
+      body: JSON.stringify({ name, arguments: args }), signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
     if (response.status === 401) return { answered: false, reason: 'unauthorized' };
     if (!response.ok) return { answered: false, reason: `extension error ${response.status}` };
@@ -65,7 +69,7 @@ async function forward(root: string, name: string, args: Record<string, unknown>
 async function callTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const root = await projectRoot();
   if (!root) return { ok: false, answered: false, reason: 'no .research-assistant.json found and no running Research Assistant extension' };
-  if (name === 'ask_researcher' || name === 'request_approval') return forward(root, name, args);
+  if (name === 'ask_researcher' || name === 'request_approval' || name === 'await_answer') return forward(root, name, args);
   const paths = await loadProjectPaths(root);
   const core = new ResearchLoopCore(new NodeLoopFiles(root), paths);
   await core.load();

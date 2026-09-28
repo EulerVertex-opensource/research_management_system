@@ -16,7 +16,7 @@ function project() {
 }
 
 function client(root) {
-  const child = spawn(process.execPath, [server, '--project', root], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [server, '--project', root], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, RESEARCH_LOOP_MCP_CALL_TIMEOUT_MS: '1500' } });
   const pending = new Map();
   let buffer = '';
   child.stdout.on('data', (chunk) => {
@@ -42,7 +42,7 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
     const init = await c.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
     assert.equal(init.result.protocolVersion, '2025-03-26');
     const tools = (await c.request('tools/list', {})).result.tools.map((tool) => tool.name);
-    assert.deepEqual(tools, ['ask_researcher', 'request_approval', 'record_idea', 'loop_status']);
+    assert.deepEqual(tools, ['ask_researcher', 'request_approval', 'await_answer', 'record_idea', 'loop_status']);
     assert.deepEqual(await c.call('ask_researcher', { question: 'Goal?', kind: 'goals' }), { answered: false, reason: 'extension not running' });
     const idea = await c.call('record_idea', { title: 'Hunch', body: 'Try compactness.' });
     assert.equal(idea.ok, true);
@@ -53,7 +53,7 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
   } finally { c.close(); p.cleanup(); }
 });
 
-test('MCP bridge forwards to the extension with the bridge token and reports timeouts', async () => {
+test('MCP bridge forwards pending, await_answer, and final results with the bridge token; hung extensions time out', async () => {
   const p = project();
   const requests = [];
   const bridge = http.createServer((request, response) => {
@@ -63,9 +63,10 @@ test('MCP bridge forwards to the extension with the bridge token and reports tim
       requests.push({ auth: request.headers.authorization, body: JSON.parse(body) });
       if (request.headers.authorization !== 'Bearer secret') { response.writeHead(401); response.end(); return; }
       const { name, arguments: args } = JSON.parse(body);
-      if (args.wait_seconds === 1) return; // never answer -> client timeout
+      if (args.hang) return; // never answer -> client timeout
       response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ answered: true, question_id: 'q1', decision: 'answer', text: `answer to ${name}` }));
+      if (name === 'ask_researcher') response.end(JSON.stringify({ status: 'pending', answered: false, id: 'q1' }));
+      else response.end(JSON.stringify({ status: 'final', answered: true, id: args.id ?? 'r1', decision: 'answer', text: `answer to ${name}` }));
     });
   });
   await new Promise((resolve) => bridge.listen(0, '127.0.0.1', resolve));
@@ -75,10 +76,14 @@ test('MCP bridge forwards to the extension with the bridge token and reports tim
     p.write('.research-assistant-loop/bridge.json', JSON.stringify({ port, token: 'wrong' }));
     assert.deepEqual(await c.call('ask_researcher', { question: 'Q', kind: 'discussion' }), { answered: false, reason: 'unauthorized' });
     p.write('.research-assistant-loop/bridge.json', JSON.stringify({ port, token: 'secret' }));
-    const answer = await c.call('request_approval', { kind: 'asset', target: 'main_theorem', summary: 'proof' });
-    assert.equal(answer.text, 'answer to request_approval');
+    const pending = await c.call('ask_researcher', { question: 'Q', kind: 'discussion' });
+    assert.equal(pending.status, 'pending');
+    const final = await c.call('await_answer', { id: pending.id });
+    assert.deepEqual([final.status, final.id, final.text], ['final', 'q1', 'answer to await_answer']);
+    const approval = await c.call('request_approval', { kind: 'asset', target: 'main_theorem', summary: 'proof' });
+    assert.equal(approval.text, 'answer to request_approval');
     assert.equal(requests.at(-1).body.arguments.target, 'main_theorem');
-    const timeout = await c.call('ask_researcher', { question: 'Q', kind: 'discussion', wait_seconds: 1 });
+    const timeout = await c.call('ask_researcher', { question: 'Q', kind: 'discussion', hang: true });
     assert.equal(timeout.reason, 'timeout');
   } finally { c.close(); bridge.close(); p.cleanup(); }
 });

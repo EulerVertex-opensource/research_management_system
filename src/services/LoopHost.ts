@@ -4,13 +4,18 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
-import matter from 'gray-matter';
+import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
 import { ResearchLoopCore } from './ResearchLoopCore';
+import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
 import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
 
 type ToolResult = Record<string, unknown>;
+
+/** Longest a single bridge call may block; stays under Codex's default MCP tool timeout. */
+export const MAX_SLICE_SECONDS = 45;
+function sliceSeconds(value: unknown): number { return typeof value === 'number' && value > 0 ? Math.min(value, MAX_SLICE_SECONDS) : MAX_SLICE_SECONDS; }
 
 function setting<T>(key: string, fallback: T): T {
   return vscode.workspace.getConfiguration('researchAssistant').get<T>(`loop.${key}`, fallback);
@@ -30,6 +35,7 @@ export class LoopHost implements vscode.Disposable {
   private watcher: vscode.FileSystemWatcher | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
   private busy: Promise<unknown> = Promise.resolve();
+  private readonly interactions = new Map<string, Promise<ToolResult>>();
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel) {
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
@@ -107,7 +113,7 @@ export class LoopHost implements vscode.Disposable {
     const folder = path.posix.dirname(relative);
     if (folder !== this.paths.assets && folder !== this.paths.definitions) return;
     let status: unknown;
-    try { status = matter(document.getText()).data.status; } catch { return; }
+    try { status = parseMarkdown(document.getText()).data.status; } catch { return; }
     if (status === 'approved') await this.recordApprovalIfHuman(path.posix.basename(relative, '.md'), 'editor');
   }
 
@@ -144,18 +150,43 @@ export class LoopHost implements vscode.Disposable {
   }
 
   private async tool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
-    const wait = typeof args.wait_seconds === 'number' ? args.wait_seconds : setting('questionTimeoutSeconds', 240);
-    if (name === 'ask_researcher') return this.askResearcher(String(args.question ?? ''), (args.kind as QuestionKind) ?? 'discussion', typeof args.asset_id === 'string' ? args.asset_id : undefined, Array.isArray(args.options) ? args.options.map(String) : undefined, wait);
-    if (name === 'request_approval') return this.requestApproval(args.kind as ApprovalKind, String(args.target ?? ''), String(args.summary ?? ''), wait);
+    const total = setting('questionTimeoutSeconds', 240);
+    const slice = sliceSeconds(args.wait_seconds);
+    if (name === 'ask_researcher') {
+      const question = await this.withCore((core) => core.askQuestion((args.kind as QuestionKind) ?? 'discussion', String(args.question ?? ''), { assetId: typeof args.asset_id === 'string' ? args.asset_id : undefined, options: Array.isArray(args.options) ? args.options.map(String) : undefined, timeoutSec: total }));
+      this.interactions.set(question.id, this.askResearcher(question.id, question.prompt, question.kind, question.options, total));
+      return this.awaitInteraction(question.id, slice);
+    }
+    if (name === 'request_approval') {
+      const kind = args.kind as ApprovalKind; const target = String(args.target ?? ''); const summary = String(args.summary ?? '');
+      const request = await this.withCore((core) => core.enqueueApproval(kind, target, summary));
+      this.interactions.set(request.id, this.requestApproval(request.id, kind, target, summary, total));
+      return this.awaitInteraction(request.id, slice);
+    }
+    if (name === 'await_answer') return this.awaitInteraction(String(args.id ?? ''), slice);
     if (name === 'record_idea') return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent') }));
     if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary(), brief: core.briefStatus() }));
     return { answered: false, reason: `unknown tool ${name}` };
   }
 
+  /**
+   * Answer within one short slice so no MCP client timeout (Codex defaults to
+   * about a minute) cuts the call; the popup itself stays open for the full
+   * configured timeout and the agent keeps polling with await_answer.
+   */
+  private async awaitInteraction(id: string, slice: number): Promise<ToolResult> {
+    const pending = this.interactions.get(id);
+    if (!pending) return { status: 'final', answered: false, id, reason: 'unknown id; it may already have been answered. Check loop_status.' };
+    const result = await Promise.race([pending, this.timeout<ToolResult>(slice * 1000)]);
+    if (result === 'timeout') return { status: 'pending', answered: false, id, note: 'The researcher has not answered yet. Call await_answer with this id to keep waiting.' };
+    this.interactions.delete(id);
+    return { status: 'final', id, ...result };
+  }
+
   private timeout<T>(ms: number): Promise<T | 'timeout'> { return new Promise((resolve) => setTimeout(() => resolve('timeout'), ms)); }
 
-  private async askResearcher(prompt: string, kind: QuestionKind, assetId: string | undefined, options: string[] | undefined, waitSeconds: number): Promise<ToolResult> {
-    const question = await this.withCore((core) => core.askQuestion(kind, prompt, { assetId, options, timeoutSec: waitSeconds }));
+  private async askResearcher(questionId: string, prompt: string, kind: QuestionKind, options: string[] | undefined, waitSeconds: number): Promise<ToolResult> {
+    const question = { id: questionId };
     const popup = this.showQuestion(prompt, kind, options);
     const outcome = await Promise.race([popup, this.timeout<{ decision: 'answer' | 'skip' | 'pause'; text: string }>(waitSeconds * 1000)]);
     if (outcome === 'timeout') {
@@ -204,9 +235,8 @@ export class LoopHost implements vscode.Disposable {
     return text === undefined ? { decision: 'skip', text: '' } : { decision: 'answer', text };
   }
 
-  private async requestApproval(kind: ApprovalKind, target: string, summary: string, waitSeconds: number): Promise<ToolResult> {
-    if (!this.paths) throw new Error('Project paths are not configured.');
-    const request = await this.withCore((core) => core.enqueueApproval(kind, target, summary));
+  private async requestApproval(requestId: string, kind: ApprovalKind, target: string, summary: string, waitSeconds: number): Promise<ToolResult> {
+    const request = { id: requestId };
     const popup = this.showApproval(kind, target, summary);
     const outcome = await Promise.race([popup, this.timeout<{ decision: 'approved' | 'changes_requested' | 'later'; text: string }>(waitSeconds * 1000)]);
     const apply = async (result: { decision: 'approved' | 'changes_requested' | 'later'; text: string } | undefined) => {
@@ -259,34 +289,29 @@ export class LoopHost implements vscode.Disposable {
   // ---------- commands ----------
 
   private preferredProvider(): AgentProvider | undefined {
-    const configured = setting<'auto' | 'claude' | 'codex'>('provider', 'auto');
+    const configured = setting<'auto' | AgentProvider>('provider', 'auto');
     if (configured !== 'auto') return configured;
-    if (vscode.extensions.getExtension('anthropic.claude-code')) return 'claude';
-    if (vscode.extensions.getExtension('openai.chatgpt')) return 'codex';
-    return undefined;
+    return PROVIDER_IDS.find((id) => vscode.extensions.getExtension(AGENT_PROVIDERS[id].extensionId));
   }
 
   async openChat(provider?: AgentProvider): Promise<void> {
     const target = provider ?? this.preferredProvider();
+    const spec = target ? AGENT_PROVIDERS[target] : undefined;
     try {
-      if (target === 'claude' && vscode.extensions.getExtension('anthropic.claude-code')) { await vscode.commands.executeCommand('claude-vscode.sidebar.open'); return; }
-      if (target === 'codex' && vscode.extensions.getExtension('openai.chatgpt')) { await vscode.commands.executeCommand('chatgpt.openSidebar'); return; }
+      if (spec && vscode.extensions.getExtension(spec.extensionId)) { await vscode.commands.executeCommand(spec.openChatCommand); return; }
     } catch (error: unknown) { this.output.appendLine(`[loop] Could not open the chat: ${String(error)}`); }
-    void vscode.window.showInformationMessage('Install the Claude Code or Codex VS Code extension, then type /research-loop (Claude Code) or $research-loop (Codex) in its chat.');
+    void vscode.window.showInformationMessage(`Install the ${PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].label).join(' or ')} VS Code extension, then type ${allChatHints()} in its chat.`);
   }
 
   async startCommand(): Promise<void> {
-    const picked = await vscode.window.showQuickPick([
-      { label: 'Claude Code', description: 'type /research-loop in the Claude Code chat', provider: 'claude' as AgentProvider },
-      { label: 'Codex', description: 'type $research-loop in the Codex chat', provider: 'codex' as AgentProvider },
-    ], { title: 'Research Assistant · Start research loop', placeHolder: 'Which agent chat will drive the loop?' });
+    const picked = await vscode.window.showQuickPick(PROVIDER_IDS.map((id) => ({ label: AGENT_PROVIDERS[id].label, description: `type ${invocation(id)} in the ${AGENT_PROVIDERS[id].label} chat`, provider: id })),
+      { title: 'Research Assistant · Start research loop', placeHolder: 'Which agent chat will drive the loop?' });
     if (!picked) return;
     const goal = await vscode.window.showInputBox({ title: 'Research goal', prompt: 'Describe the research goal, the main claim, and constraints (optional; the agent can ask).', ignoreFocusOut: true });
     if (goal === undefined) return;
     await this.withCore((core) => core.start(picked.provider, { goal, force: true }));
     await this.openChat(picked.provider);
-    const hint = picked.provider === 'claude' ? 'Type /research-loop in the Claude Code chat.' : 'Type $research-loop in the Codex chat.';
-    void vscode.window.showInformationMessage(`Research loop started. ${hint}`);
+    void vscode.window.showInformationMessage(`Research loop started. ${chatHint(picked.provider)}`);
   }
 
   async extendCommand(): Promise<void> {
@@ -294,8 +319,7 @@ export class LoopHost implements vscode.Disposable {
     if (!goal?.trim()) return;
     const state = await this.withCore(async (core) => { await core.extend(goal, { provider: core.current?.provider ?? this.preferredProvider(), force: true }); return core.current; });
     await this.openChat(state?.provider);
-    const hint = state?.provider === 'codex' ? 'Type $research-loop in the Codex chat.' : 'Type /research-loop in the Claude Code chat.';
-    void vscode.window.showInformationMessage(`Research loop reopened to add the new goal. ${hint}`);
+    void vscode.window.showInformationMessage(`Research loop reopened to add the new goal. ${state?.provider ? chatHint(state.provider) : allChatHints()}`);
   }
 
   async pauseCommand(): Promise<void> { await this.withCore((core) => core.pause('Paused by the researcher.')); }

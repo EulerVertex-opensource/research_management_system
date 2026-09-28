@@ -1,30 +1,23 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { execFile } from 'child_process';
+import * as os from 'os';
+import * as fs from 'fs/promises';
 import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
-import { buildClaudeMcpJson, buildCodexHooksJson, mergeClaudeSettings } from './AgentIntegrationCore';
-
-function run(command: string, args: string[]): Promise<{ ok: boolean; missing: boolean; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    execFile(command, args, { timeout: 20000 }, (error, stdout, stderr) => resolve({ ok: !error, missing: Boolean(error && (error as NodeJS.ErrnoException).code === 'ENOENT'), stdout: String(stdout), stderr: String(stderr) }));
-  });
-}
+import { buildHooksFile, buildProjectMcpJson, upsertCodexMcpTable } from './AgentIntegrationCore';
+import { AGENT_PROVIDERS, MCP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, loopScriptPath } from './AgentProviders';
 
 /**
- * Writes the Claude Code and Codex hook and MCP configuration for the research
- * loop. Claude reads project `.mcp.json`; Codex (0.150) only reads MCP servers
- * from the user config, so the bundled server is registered there once with
- * `codex mcp add`, and it locates the project through the bridge registry.
+ * Writes each agent's hook and MCP configuration for the research loop, driven
+ * by `AGENT_PROVIDERS`. Codex reads MCP servers only from its user config, so
+ * its bridge is registered in `~/.codex/config.toml` and finds the open project
+ * through the bridge registry. Idempotent.
  */
 export class AgentIntegrationService {
   constructor(private readonly fileService: FileService, private readonly extensionRoot: string, private readonly output: vscode.OutputChannel) {}
 
   async ensure(_paths: ProjectPaths): Promise<string[]> {
     const root = this.fileService.rootUri.fsPath;
-    const claudeScript = path.join(root, '.claude', 'skills', 'research-loop', 'scripts', 'research-loop.cjs');
-    const claudeMcp = path.join(root, '.claude', 'skills', 'research-loop', 'scripts', 'research-loop-mcp.cjs');
-    const codexScript = path.join(root, '.agents', 'skills', 'research-loop', 'scripts', 'research-loop.cjs');
     const written: string[] = [];
     const upsert = async (file: string, build: (existing: string) => string) => {
       const existing = await this.fileService.readFile(file).catch(() => '');
@@ -35,22 +28,31 @@ export class AgentIntegrationService {
         this.output.appendLine(`[agents] Skipped ${file}: ${error instanceof Error ? error.message : String(error)}`);
       }
     };
-    await upsert('.claude/settings.local.json', (existing) => mergeClaudeSettings(existing, claudeScript));
-    await upsert('.mcp.json', (existing) => buildClaudeMcpJson(existing, claudeMcp, root));
-    await upsert('.codex/hooks.json', (existing) => buildCodexHooksJson(existing, codexScript));
-    await this.registerCodexServer();
+    for (const id of PROVIDER_IDS) {
+      const spec = AGENT_PROVIDERS[id];
+      await upsert(spec.hooksFile, (existing) => buildHooksFile(id, existing, loopScriptPath(root, id)));
+      const mcp = spec.mcp;
+      if (mcp.kind === 'project-json') await upsert(mcp.file, (existing) => buildProjectMcpJson(existing, loopScriptPath(root, id, MCP_SCRIPT), root, mcp.file));
+      else await this.registerCodexServer();
+    }
     if (written.length) this.output.appendLine(`[agents] Wrote ${written.join(', ')}`);
     return written;
   }
 
-  /** Idempotently register the bundled MCP bridge with Codex's user config. */
+  /** Idempotently register the bundled MCP bridge in Codex's user config (only when Codex is installed). */
   private async registerCodexServer(): Promise<void> {
-    const script = path.join(this.extensionRoot, 'out', 'research-loop-mcp.cjs');
-    const current = await run('codex', ['mcp', 'get', 'research-assistant', '--json']);
-    if (current.missing) return; // Codex is not installed on this machine
-    if (current.ok && current.stdout.includes(script)) return;
-    if (current.ok) await run('codex', ['mcp', 'remove', 'research-assistant']);
-    const added = await run('codex', ['mcp', 'add', 'research-assistant', '--', 'node', script]);
-    this.output.appendLine(added.ok ? `[agents] Registered the research-assistant MCP server with Codex (${script})` : `[agents] Could not register the MCP server with Codex: ${added.stderr.trim() || added.stdout.trim()}`);
+    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    try { await fs.access(codexHome); } catch { return; } // Codex is not installed on this machine
+    const file = path.join(codexHome, 'config.toml');
+    const script = path.join(this.extensionRoot, 'out', MCP_SCRIPT);
+    try {
+      const existing = await fs.readFile(file, 'utf8').catch(() => '');
+      const updated = upsertCodexMcpTable(existing, script);
+      if (updated === existing) return;
+      await fs.writeFile(file, updated, 'utf8');
+      this.output.appendLine(`[agents] Registered the ${MCP_SERVER_NAME} MCP server in ${file} (${script})`);
+    } catch (error: unknown) {
+      this.output.appendLine(`[agents] Could not register the MCP server with Codex: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

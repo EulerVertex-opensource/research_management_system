@@ -1,6 +1,7 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { LoopState, STATE_DIR, stageSignature } from './ResearchLoopModel';
+import { LOOP_COMMAND } from './AgentProviders';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
 export interface HookInput {
@@ -22,12 +23,13 @@ const APPROVED = /^[+>\s]*status:\s*['"]?approved\b/m;
 export function stopDecision(state: LoopState | undefined, input: HookInput, instruction: string | undefined): StopDecision {
   if (!state || state.status !== 'running') return { block: false };
   if (state.pendingQuestion) return { block: false };
-  if (state.stage === 'waiting' || state.stage === 'ready') return { block: false };
+  // review_project waits on the researcher's approval just like waiting; pushing the agent there only burns turns.
+  if (state.stage === 'waiting' || state.stage === 'ready' || state.stage === 'review_project') return { block: false };
   const session = input.session_id ?? 'unknown';
   const record = state.autopilot.sessions[session] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
   if (record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
-  const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run research-loop next and follow it. ${instruction ?? ''}`.trim();
+  const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it. ${instruction ?? ''}`.trim();
   return { block: true, reason };
 }
 
@@ -79,4 +81,21 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
     return { deny: true, reason: 'Research loop: shell commands may not set status: approved on assets or definitions.' };
   }
   return { deny: false };
+}
+
+/**
+ * Hook stdout in the JSON form both Claude Code and Codex accept (Codex 0.153
+ * ships the same schemas): context via hookSpecificOutput.additionalContext,
+ * Stop blocking via decision/reason, PreToolUse denial via permissionDecision.
+ */
+export function contextOutput(event: 'SessionStart' | 'UserPromptSubmit', context: string): string {
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
+}
+
+export function stopBlockOutput(reason: string): string {
+  return JSON.stringify({ decision: 'block', reason });
+}
+
+export function denyOutput(reason: string): string {
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
 }

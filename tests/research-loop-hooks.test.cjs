@@ -30,10 +30,11 @@ test('Stop hook decision matrix', () => {
   assert.equal(stopDecision(running({ pendingQuestion: { id: 'q', kind: 'goals', prompt: '?', createdAt: '' } }), {}, 'x').block, false);
   assert.equal(stopDecision(running({ stage: 'waiting' }), {}, 'x').block, false);
   assert.equal(stopDecision(running({ stage: 'ready' }), {}, 'x').block, false);
+  assert.equal(stopDecision(running({ stage: 'review_project' }), {}, 'x').block, false);
   const active = running();
   const decision = stopDecision(active, { session_id: 's' }, 'Do the plan stage.');
   assert.equal(decision.block, true);
-  assert.match(decision.reason, /research-loop next/);
+  assert.match(decision.reason, /node \.agents\/skills\/research-loop\/scripts\/research-loop\.cjs next/);
   active.autopilot.sessions.s = { blocks: 3, lastSignature: '', lastBlockAt: '' };
   assert.equal(stopDecision(active, { session_id: 's' }, 'x').capReached, true);
   active.autopilot.sessions.s = { blocks: 1, lastSignature: stageSignature(active), lastBlockAt: '' };
@@ -48,6 +49,9 @@ test('PreToolUse denies approval forgery across Claude and Codex tool shapes', (
   assert.equal(deny({ tool_name: 'MultiEdit', tool_input: { file_path: 'research/assets/a.md', edits: [{ old_string: 'x', new_string: 'status: approved' }] } }), true);
   assert.equal(deny({ tool_name: 'apply_patch', tool_input: { patch: '*** Begin Patch\n*** Update File: research/assets/a.md\n@@\n-status: draft\n+status: approved\n*** End Patch' } }), true);
   assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/approvals.json', content: '{}' } }), true);
+  // Codex 0.153 sends apply_patch as { command: <patch> } (observed in a live run).
+  assert.equal(deny({ tool_name: 'apply_patch', tool_input: { command: '*** Begin Patch\n*** Update File: research/assets/lemma_a.md\n@@\n-status: draft\n+status: approved\n*** End Patch' } }), true);
+  assert.equal(deny({ tool_name: 'apply_patch', tool_input: { command: '*** Begin Patch\n*** Update File: research/project.md\n@@\n+## Main Problem\n*** End Patch' } }), false);
   assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'echo x > .research-assistant-loop/state.json' } }), true);
   assert.equal(deny({ tool_name: 'shell', tool_input: { command: ['bash', '-lc', "sed -i '' 's/status: draft/status: approved/' research/assets/a.md"] } }), true);
   assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/assets/a.md', content: '---\nstatus: draft\n---\nfine' } }), false);
@@ -67,14 +71,18 @@ test('hook entry point blocks Stop while running and stays silent otherwise', ()
     assert.equal(hook('Stop', {}).status, 0);
     assert.equal(hook('SessionStart', {}).stdout, '');
     assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root, '--iteration-cap', '2'], { encoding: 'utf8' }).status, 0);
+    const blocked = (result) => result.status === 0 && result.stdout.trim() !== '' && JSON.parse(result.stdout).decision === 'block';
     const first = hook('Stop', {});
-    assert.equal(first.status, 2, first.stderr);
-    assert.equal(first.stdout, '');
-    assert.match(first.stderr, /draft_project/);
-    assert.match(hook('UserPromptSubmit', {}).stdout, /stage draft_project/);
-    assert.equal(hook('Stop', { stop_hook_active: true }).status, 0); // no progress since the last block
-    assert.equal(hook('Stop', {}).status, 2);
-    assert.equal(hook('Stop', {}).status, 0); // cap reached -> paused
+    assert.equal(first.status, 0, first.stderr);
+    assert.ok(blocked(first));
+    assert.match(JSON.parse(first.stdout).reason, /draft_project/);
+    const context = JSON.parse(hook('UserPromptSubmit', {}).stdout);
+    assert.equal(context.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    assert.match(context.hookSpecificOutput.additionalContext, /stage draft_project/);
+    assert.equal(JSON.parse(hook('SessionStart', {}).stdout).hookSpecificOutput.hookEventName, 'SessionStart');
+    assert.equal(hook('Stop', { stop_hook_active: true }).stdout, ''); // no progress since the last block
+    assert.ok(blocked(hook('Stop', {})));
+    assert.equal(hook('Stop', {}).stdout, ''); // cap reached -> paused
     assert.match(fs.readFileSync(path.join(root, '.research-assistant-loop/state.json'), 'utf8'), /"status": "paused"/);
     const deny = hook('PreToolUse', { tool_name: 'Write', tool_input: { file_path: path.join(root, 'research/assets/a.md'), content: 'status: approved' } });
     assert.match(deny.stdout, /"permissionDecision":"deny"/);
