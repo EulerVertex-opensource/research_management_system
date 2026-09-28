@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
-import { BRIDGE_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { BRIDGE_PATH, DRIVER_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { HookInput, contextOutput, denyOutput, preToolUseDecision, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
@@ -46,6 +46,7 @@ const USAGE = `Usage: research-loop <command> [options]
   sync status [--no-fetch] | sync pull [--remote NAME] [--continue] | sync prepare [--latex] [--no-fetch] [--note "..."]
   sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
   migrate-approvals   (split research/approvals.json into one file per approved target)
+  restore-approvals   (re-apply status: approved where the researcher's approval record still matches the content)
   hook <SessionStart|UserPromptSubmit|PreToolUse|Stop|SubagentStop>   (reads hook JSON on stdin)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
@@ -58,6 +59,21 @@ async function readStdin(): Promise<string> {
     process.stdin.on('error', () => resolve(data));
     if (process.stdin.isTTY) resolve('');
   });
+}
+
+/**
+ * The running extension records the hash of the driver it ships. A different
+ * copy (an older build left in the skills folder) must not touch loop state:
+ * older engines misread newer files and revert approvals.
+ */
+function staleDriver(root: string): string | undefined {
+  let expected: string | undefined;
+  try { expected = (JSON.parse(fs.readFileSync(path.join(root, DRIVER_PATH), 'utf8')) as { sha256?: string }).sha256; } catch { return undefined; }
+  if (!expected || !process.argv[1]) return undefined;
+  let actual: string;
+  try { actual = crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'); } catch { return undefined; }
+  if (actual === expected) return undefined;
+  return `This research-loop driver (${process.argv[1]}) differs from the one the Research Assistant extension ships, so it will not change loop state. The researcher should run "Research Assistant: Refresh Project Setup" (or reload VS Code) to install the current driver; then continue.`;
 }
 
 async function openCore(root: string, iterationCap?: number, git?: LoopGit): Promise<ResearchLoopCore> {
@@ -157,6 +173,12 @@ async function runHook(event: string, args: Args): Promise<void> {
   try { input = JSON.parse((await readStdin()) || '{}'); } catch { input = {}; }
   const root = typeof args.flags.project === 'string' ? path.resolve(args.flags.project) : findProjectRoot(input.cwd ?? process.cwd());
   if (!root) return;
+  const stale = staleDriver(root);
+  if (stale) {
+    // Only speak up where the agent reads it; never validate, block, or rewrite anything from a stale engine.
+    if (event === 'SessionStart' || event === 'UserPromptSubmit') process.stdout.write(contextOutput(event, `Research loop: ${stale}`) + '\n');
+    if (event !== 'PreToolUse') return;
+  }
   let core: ResearchLoopCore;
   try { core = await openCore(root); } catch { return; }
   const state = core.current;
@@ -222,6 +244,8 @@ async function main(): Promise<void> {
   if (command === 'hook') { await runHook(sub, args); return; }
   const root = typeof args.flags.project === 'string' ? path.resolve(args.flags.project) : findProjectRoot(process.cwd());
   if (!root) throw new Error('No .research-assistant.json found; run from the project or pass --project.');
+  const stale = staleDriver(root);
+  if (stale && command !== 'status') throw new Error(stale);
   const json = args.flags.json === true;
   const cap = typeof args.flags['iteration-cap'] === 'string' ? Number(args.flags['iteration-cap']) : undefined;
   const git = await openGit(root);
@@ -319,6 +343,11 @@ async function main(): Promise<void> {
     case 'sync': {
       if (!git) throw new Error('This project is not a git repository; sync needs git (for Overleaf: git clone the Overleaf project URL).');
       await runSync(sub, args, root, core, git, out, json);
+      return;
+    }
+    case 'restore-approvals': {
+      const restored = await core.restoreApprovals();
+      out(json ? { restored } : restored.length ? `Restored approval of ${restored.length} node(s) whose approval record still matches: ${restored.join(', ')}.` : 'No approvals to restore.');
       return;
     }
     case 'migrate-approvals': {

@@ -102,3 +102,56 @@ test('hook entry point blocks Stop while running and stays silent otherwise', ()
     assert.match(deny.stdout, /"permissionDecision":"deny"/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('a stale driver copy never rewrites loop state; restore-approvals repairs what an old driver reverted', () => {
+  const crypto = require('node:crypto');
+  const matter = require('gray-matter');
+  const { researchDigest, statementDigest } = (() => {
+    const esbuild = require('esbuild');
+    const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, '../src/services/ResearchLoopModel.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
+    const module = { exports: {} };
+    new Function('module', 'exports', 'require', built.outputFiles[0].text)(module, module.exports, require);
+    return module.exports;
+  })();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-stale-'));
+  try {
+    const write = (relative, content) => { fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true }); fs.writeFileSync(path.join(root, relative), content); };
+    const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
+    write('.research-assistant.json', JSON.stringify({ version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [], notations: null, sections: 'sections' }, research: { root: 'research', project: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' } }));
+    write('research/project.md', '# Project\n\n## Main Problem\n\nProve A.\n\n## Required Results\n\n- lemma_a: the lemma\n');
+    const approved = matter.stringify('\n## Statement\n\nA lemma.\n', { type: 'lemma', title: 'Lemma', status: 'approved', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [] });
+    write('research/assets/lemma_a.md', approved);
+    write('research/approvals/assets/lemma_a.json', JSON.stringify({ kind: 'asset', target: 'lemma_a', digest: researchDigest(approved, 'asset'), statement: statementDigest(approved), approvedAt: 'then', source: 'popup' }));
+    const run = (args, input) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', cwd: root, input });
+    assert.equal(run(['start', '--provider', 'codex']).status, 0);
+
+    // The extension ships a different driver than the copy the hooks run.
+    write('.research-assistant-loop/driver.json', JSON.stringify({ sha256: crypto.createHash('sha256').update('another build').digest('hex') }));
+    const state = read('.research-assistant-loop/state.json');
+    write('research/assets/forged.md', matter.stringify('\n## Statement\n\nForged.\n', { type: 'lemma', title: 'Forged', status: 'approved', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [] }));
+    const stop = run(['hook', 'Stop'], JSON.stringify({ cwd: root, session_id: 's' }));
+    assert.equal(stop.status, 0);
+    assert.equal(stop.stdout, '');
+    assert.match(read('research/assets/forged.md'), /status: approved/); // a stale engine does not "fix" anything
+    assert.equal(read('.research-assistant-loop/state.json'), state);
+    assert.match(JSON.parse(run(['hook', 'SessionStart'], JSON.stringify({ cwd: root, session_id: 's' })).stdout).hookSpecificOutput.additionalContext, /Refresh Project Setup/);
+    const next = run(['next']);
+    assert.equal(next.status, 1);
+    assert.match(next.stderr, /differs from the one the Research Assistant extension ships/);
+    assert.equal(run(['status']).status, 0);
+
+    // The matching driver acts again, and restores what an old driver reverted while the record survived.
+    write('.research-assistant-loop/driver.json', JSON.stringify({ sha256: crypto.createHash('sha256').update(fs.readFileSync(cli)).digest('hex') }));
+    fs.rmSync(path.join(root, 'research/assets/forged.md'));
+    write('research/assets/lemma_a.md', approved.replace('status: approved', 'status: draft'));
+    write('research/approvals.json', JSON.stringify({ version: 1, records: [] }));
+    const restored = run(['restore-approvals']);
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.match(restored.stdout, /Restored approval of 1 node\(s\).*lemma_a/);
+    assert.match(read('research/assets/lemma_a.md'), /status: approved/);
+    assert.ok(!fs.existsSync(path.join(root, 'research/approvals.json')));
+    // Content that changed since approval is not restored.
+    write('research/assets/lemma_a.md', approved.replace('status: approved', 'status: draft').replace('A lemma.', 'A different lemma.'));
+    assert.match(run(['restore-approvals']).stdout, /No approvals to restore/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

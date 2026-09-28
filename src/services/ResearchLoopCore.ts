@@ -1202,6 +1202,36 @@ export class ResearchLoopCore {
     return { problems, fixed };
   }
 
+  /**
+   * Re-apply `status: approved` where a researcher's approval record still
+   * matches the node's current content. Repairs nodes that a stale driver
+   * reverted while their records survived; never approves anything new.
+   */
+  async restoreApprovals(): Promise<string[]> {
+    const records = (await this.approvals()).records;
+    const restored: string[] = [];
+    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
+      for (const file of await this.files.listFiles(folder)) {
+        const raw = await this.files.readFile(file);
+        let parsed: matter.GrayMatterFile<string>;
+        try { parsed = parseMarkdown(raw); } catch { continue; }
+        const id = path.posix.basename(file, '.md');
+        if (parsed.data.status === 'approved' || !isApproved(records, kind, id, raw)) continue;
+        parsed.data.status = 'approved';
+        await this.writeOwned(file, stringifyMarkdown(parsed.content, parsed.data));
+        restored.push(id);
+      }
+    }
+    // Retire an emptied legacy approvals.json that an old driver may have re-created.
+    if (await this.files.exists(legacyApprovalsPath(this.paths.researchRoot))) await this.writeApprovals({ version: 1, records });
+    if (this.state && restored.length) {
+      this.state.approvalQueue = this.state.approvalQueue.filter((item) => !restored.includes(item.target));
+      await this.save();
+    }
+    if (restored.length) await this.event('approvals_restored', { restored });
+    return restored;
+  }
+
   // ---------- whole-workspace checks and handoffs (used by sync) ----------
 
   /** Validate every committed research file, dependency references, and cycles; returns problems without changing files. */

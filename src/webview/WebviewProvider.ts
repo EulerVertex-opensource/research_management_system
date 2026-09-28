@@ -175,6 +175,10 @@ export class WebviewProvider {
     const config = await this.configService.loadOrDiscover();
     const paths = this.configService.resolvePaths(config);
     this.configureServices(paths);
+    if (initialized) {
+      const reinstalled = await this.skillInstaller.ensureCurrentDrivers().catch((error: unknown) => { this.output.appendLine(`[skills] Could not check the loop driver: ${String(error)}`); return false; });
+      if (reinstalled) this.output.appendLine('[skills] Project skills and loop driver were older than this extension; reinstalled them.');
+    }
     if (initialized && !this.integrationEnsured) {
       this.integrationEnsured = true;
       await this.agentIntegration.ensure(paths).catch((error: unknown) => this.output.appendLine(`[agents] ${String(error)}`));

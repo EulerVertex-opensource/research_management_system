@@ -27,6 +27,12 @@ export const SNAPSHOT_PATH = `${STATE_DIR}/snapshot.json`;
 export const BRIDGE_PATH = `${STATE_DIR}/bridge.json`;
 /** Local sync bookkeeping (conflict in progress, last prepare); never committed. */
 export const SYNC_PATH = `${STATE_DIR}/sync.json`;
+/**
+ * sha256 of the driver script the running extension ships. Hooks run the copy
+ * under the skills folder; a copy that differs is stale and must not act,
+ * because an older engine misreads newer files (e.g. split approvals).
+ */
+export const DRIVER_PATH = `${STATE_DIR}/driver.json`;
 /** User-level registry of running extension bridges, so a globally registered MCP server can find the project. */
 export const BRIDGE_REGISTRY = ['.research-assistant', 'bridges.json'];
 export interface BridgeEntry { root: string; port: number; token: string; pid: number; startedAt: string }

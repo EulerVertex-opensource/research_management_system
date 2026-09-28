@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import { FileService } from './FileService';
-import { AGENT_PROVIDERS, LOOP_SCRIPT, MCP_SCRIPT, PROVIDER_IDS } from './AgentProviders';
+import { AGENT_PROVIDERS, LOOP_SCRIPT, LOOP_SKILL, MCP_SCRIPT, PROVIDER_IDS } from './AgentProviders';
+import { DRIVER_PATH } from './ResearchLoopModel';
 
 const SKILL_DESTINATIONS = PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].skillsDir);
 
@@ -32,6 +34,29 @@ export class SkillInstallerService {
     }
 
     return skillNames;
+  }
+
+  /**
+   * Hooks and the Claude MCP server run the project's copy of the loop driver,
+   * while the extension runs its own engine. Reinstall the bundled skills when
+   * the copy differs from this extension's build, so two engine versions never
+   * write the same loop state. Returns true when it reinstalled.
+   */
+  async ensureCurrentDrivers(): Promise<boolean> {
+    const bundled = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', LOOP_SCRIPT));
+    let stale = false;
+    for (const destinationRoot of SKILL_DESTINATIONS) {
+      const installed = await vscode.workspace.fs.readFile(this.fileService.resolve(destinationRoot, LOOP_SKILL, 'scripts', LOOP_SCRIPT)).then((data) => data, () => undefined);
+      if (!installed || Buffer.compare(Buffer.from(installed), Buffer.from(bundled)) !== 0) stale = true;
+    }
+    if (stale) await this.installBundledSkills(await this.listBundledSkillNames());
+    else await this.writeDriverStamp(bundled);
+    return stale;
+  }
+
+  private async writeDriverStamp(driver: Uint8Array): Promise<void> {
+    const sha256 = crypto.createHash('sha256').update(driver).digest('hex');
+    await this.fileService.writeFile(DRIVER_PATH, JSON.stringify({ sha256, writtenAt: new Date().toISOString() }, null, 2) + '\n');
   }
 
   async installBundledSkills(skillNames: string[]): Promise<void> {
@@ -94,6 +119,7 @@ export class SkillInstallerService {
           await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, LOOP_SCRIPT), loop);
           await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, MCP_SCRIPT), mcp);
         }));
+        await this.writeDriverStamp(loop);
       }
       if (skillName === 'manuscript-writing') {
         const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'manuscript-writing.cjs'));
