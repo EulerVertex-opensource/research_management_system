@@ -8,6 +8,9 @@ const COLORS: Record<ResearchStatus, string> = {
   archived: '#856404',
   pending: '#6c757d',
   failed: '#dc3545',
+  succeeded: '#28a745',
+  abandoned: '#856404',
+  resolved: '#17a2b8',
 };
 
 interface Props {

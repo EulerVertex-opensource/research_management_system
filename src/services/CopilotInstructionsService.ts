@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
 import { ProjectPaths, ResearchNode } from '../models/types';
 import { FileService } from './FileService';
+import { ASSET_TYPE_LIST, IDEA_KIND_LIST, IDEA_STATUS_LIST, NODE_STATUS_LIST, NODE_TYPE_LIST, PLAN_STATUS_LIST, SOURCE_KIND_LIST } from '../domain/nodeKinds';
+
+const MAINTENANCE = 'node .agents/skills/research-maintenance/scripts/research-maintenance.cjs';
+const alternatives = (values: readonly string[]) => values.join(' | ');
 
 const INSTRUCTIONS_PATH = '.github/copilot-instructions.md';
 const CODEX_AGENTS_PATH = 'AGENTS.md';
@@ -26,11 +30,11 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - \`${paths.bibliography}\`: shared BibTeX bibliography
 - Macros/preamble: ${macros}
 - Notation reference: ${notations}
-- \`${paths.projectMd}\`: research problem, goals, known results, and open questions
-- \`${paths.assets}/\`: theorem, lemma, proposition, example, construction, and remark nodes
+- \`${paths.projectMd}\`: the research contract: main problem, scope, intended contribution, and \`required_results\`
+- \`${paths.assets}/\`: ${ASSET_TYPE_LIST.join(', ')} nodes
 - \`${paths.definitions}/\`: primary mathematical definitions and notation
 - \`${paths.ideas}/\`: freeform research ideas
-- \`${paths.plans}/\`: executable proof plans and retained proof records
+- \`${paths.plans}/\`: proof plans, one per attempt, kept whether they succeed or fail
 - \`${paths.writingOutline}\`: presentation order for the manuscript
 - \`${paths.writingSections}/\`: section briefs with verified asset IDs and writing gaps
 - \`${paths.sections}/\`: canonical, editable LaTeX section files
@@ -51,29 +55,26 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 
 ## Research rules
 
-- Ideas use \`type: idea\`, \`status: draft | archived\`, optional \`related_assets\`, and freeform prose; they need no target or checklist.
-- Plans use \`type: plan\`, \`status: pending | failed\`, one \`target_asset\`, optional \`inspired_by\` idea IDs, and Goal, Plan checkboxes, and Verification. Failed means a documented mathematical obstruction, not that the asset is false.
-- Create a new plan inspired by an idea instead of replacing that idea. Successful plans become status-free \`type: proof_record\` files after the proof is put in the asset.
-- Keep managed asset, idea, and plan Markdown links synchronized using \`convert-proof-ideas\`. Assets list pending and failed plans, proof records, and draft and archived ideas separately.
-- When asked to prove an asset, read its pending linked plans, follow and update one plan's checkboxes, and record any mathematical obstruction under Failure. Put a successful proof in the asset and then convert the plan to a proof record.
+- Ideas use \`type: idea\`, \`status: ${alternatives(IDEA_STATUS_LIST)}\`, \`idea_kind: ${alternatives(IDEA_KIND_LIST)}\`, optional \`related_assets\`, and freeform prose; they need no target or checklist.
+- Plans use \`type: plan\`, \`status: ${alternatives(PLAN_STATUS_LIST)}\`, one \`target_asset\`, optional \`inspired_by\` idea IDs, and Goal, Plan checkboxes, and Verification. Failed means a documented mathematical obstruction under \`## Failure\`, not that the asset is false. Succeeded means the proof is in the asset and \`## Outcome\` says where.
+- Create a new plan inspired by an idea instead of replacing that idea.
+- When asked to prove an asset, read its pending linked plans, follow and update one plan's checkboxes, and record any mathematical obstruction under Failure. Put a successful proof in the asset, then set the plan status to succeeded with an Outcome.
 - New or materially edited assets and definitions must have \`status: draft\`. Only a researcher promotes them. New ideas start \`draft\`; new plans start \`pending\`.
 - Only approved nodes should be relied on in finished manuscript arguments.
 - Keep manuscript writing plans separate from proof plans. Work on one section at a time; read its brief, selected approved nodes and dependencies, relevant definitions, and the configured preamble. Do not send the whole research archive to a model.
 - Preserve existing section TeX prose. Generate a missing file once; later revisions must target a passage or provide a patch.
-- Sync the marked section input block in the main document from the writing outline only after previewing it with the manuscript-writing skill.
-- Use exact node filenames without \`.md\` in \`depends_on\`, \`used_in\`, and \`related_assets\`.
+- Sync the marked section input block in the main document from the writing outline only after previewing it with the draft-latex skill's \`manuscript-writing.cjs sync --preview\`.
+- Use exact node filenames without \`.md\` in relation fields. IDs are global across research folders. Store only forward relations; "used in" and plan lists are derived.
 - Assets link definition IDs in \`uses_definitions\`. Definition \`depends_on\` lists definition IDs; asset \`depends_on\` lists asset IDs.
 - Extract only commonly used mathematical concepts as definitions. Put project-specific conditions and assumptions in draft remark assets, with verified relative Markdown links to relevant definitions and assets. Split mixed passages into a standard definition and a linked remark.
 - After drafting or materially revising an asset, run \`check-notation\` against linked approved definitions, macros, and the notation supplement.
-- After adding or changing an asset, use the \`order-assets\` skill to check dependencies and title order. The extension also reorders assets when it sees file changes.
-- After adding or changing a definition, use \`order-definitions\` to check dependencies and title order. The extension also reorders definitions when it sees file changes.
-- After verifying \`depends_on\` or \`uses_definitions\` links, use \`link-research-nodes\` to add relative Markdown links to prose mentions in node bodies.
+- After adding or changing assets or definitions, run \`${MAINTENANCE} validate\` (dependencies, schema, IDs; it prints the dependency order) and \`${MAINTENANCE} links --preview\` / \`--apply\` to link verified prose mentions.
 - To cite a local source PDF in Markdown, link to its configured \`${paths.localSourcePdfs}/<slug>.pdf\` path relative to the Markdown file. The dashboard opens these links in VS Code's PDF viewer; the PDF remains local and ignored by Git.
 - Do not invent a node or paper ID; verify it from the shared files.
 - Before editing LaTeX, read every configured macro/preamble file and the notation reference when present.
 - Cite manuscript use of a node with a \`% [node_id]\` comment.
 - Block Markdown math must put opening and closing \`$$\` on separate lines.
-- Approval is a researcher action: never set \`status: approved\` and never edit \`approvals.json\`; request approval through the research loop's \`request_approval\` tool.
+- Approval is a researcher action: never set \`status: approved\` and never edit approval records; request approval through the research loop's \`request_approval\` tool.
 - A failed proof plan is not a falsification; only a verified counterexample confirmed by the researcher refutes a statement.
 - Do not change a statement while proving it; a revised statement gets a new asset ID. New plans after failures need \`## Difference from failed plans\`.
 `;
@@ -92,20 +93,21 @@ Each Markdown file in \`${paths.assets}/\`, \`${paths.definitions}/\`, \`${paths
 
 \`\`\`yaml
 ---
-type: theorem | lemma | proposition | definition | example | construction | remark | idea | plan | proof_record
+type: ${alternatives(NODE_TYPE_LIST)}
 title: string
-status: draft | approved | deprecated | archived (assets/definitions); draft | archived (ideas); pending | failed (plans); absent (proof records)
-target_asset: asset_id (proof plans and proof records)
-inspired_by: [idea_id, ...] (proof plans and proof records)
+status: ${alternatives(NODE_STATUS_LIST)} (assets/definitions); ${alternatives(IDEA_STATUS_LIST)} (ideas); ${alternatives(PLAN_STATUS_LIST)} (plans)
+idea_kind: ${alternatives(IDEA_KIND_LIST)} (ideas)
+target_asset: asset_id (plans)
+inspired_by: [idea_id, ...] (plans)
 tags: [string, ...]
 source:
-  kind: paper | self_proved
+  kind: ${alternatives(SOURCE_KIND_LIST)}
   paper_id: string
   location: string
-depends_on: [node_id, ...]
-uses_definitions: [definition_id, ...]
-used_in: [node_id, ...]
-related_assets: [node_id, ...]
+depends_on: [node_id, ...] (asset → asset, definition → definition)
+uses_definitions: [definition_id, ...] (assets)
+related_assets: [asset_id, ...] (ideas)
+refutes: asset_id (counterexample examples)
 ---
 \`\`\`
 
@@ -135,9 +137,9 @@ Overleaf-compatible LaTeX project plus a shared research knowledge base. Folder 
 - New or materially changed assets and definitions stay \`status: draft\`; new ideas \`draft\`, new plans \`pending\`.
 - Never change a statement while proving it; a revised statement gets a new asset ID. A failed plan is not a falsification.
 - Never invent a node ID, paper, theorem location, citation, or proof step; verify IDs from the files.
-- IDs in \`depends_on\`, \`uses_definitions\`, \`used_in\`, \`related_assets\` are exact filenames without \`.md\`. Block \`$$\` go on their own lines.
-- After changing assets or definitions: \`order-assets\` / \`order-definitions\`, then \`link-research-nodes\` and \`check-notation\`.
-- Only approved nodes support manuscript arguments; write one section at a time with \`manuscript-writing\` / \`draft-latex\`.
+- IDs in \`depends_on\`, \`uses_definitions\`, \`related_assets\`, \`target_asset\` are exact filenames without \`.md\`, unique across research folders. Store forward relations only. Block \`$$\` go on their own lines.
+- After changing assets or definitions: \`research-maintenance\` (validate, links), then \`check-notation\`.
+- Only approved nodes support manuscript arguments; plan with \`plan-manuscript\` and write one section at a time with \`draft-latex\`.
 - Share research through the research loop's \`sync\` commands, not raw git pull/push. Do not rename shared files; never commit source PDFs (\`${paths.localSourcePdfs}/\`) or LaTeX build output.
 
 ## Reading context

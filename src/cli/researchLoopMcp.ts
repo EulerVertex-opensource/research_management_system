@@ -5,6 +5,7 @@ import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import * as os from 'os';
 import { BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry } from '../services/ResearchLoopModel';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths } from './nodeFiles';
+import { IDEA_KIND_LIST, toIdeaKind } from '../domain/nodeKinds';
 
 /**
  * Minimal MCP stdio server that forwards researcher-facing tools to the running
@@ -18,7 +19,7 @@ const TOOLS = [
   { name: 'ask_researcher', description: `Ask the researcher a question in a VS Code popup. ${PENDING_NOTE} A final result is {answered:true, text} or {answered:false, reason, auto_action}; on answered:false continue in auto mode as the research-loop skill describes.`, inputSchema: { type: 'object', properties: { question: { type: 'string' }, kind: { type: 'string', enum: ['goals', 'discussion', 'blocked', 'counterexample_review'] }, asset_id: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, required: ['question', 'kind'] } },
   { name: 'request_approval', description: `Ask the researcher to approve a project, asset proof, definition, citation, or counterexample. Never approves by itself. ${PENDING_NOTE} When the researcher defers, the request stays queued and the loop continues on other work.`, inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['project', 'asset', 'definition', 'citation', 'counterexample'] }, target: { type: 'string' }, summary: { type: 'string' } }, required: ['kind', 'target', 'summary'] } },
   { name: 'await_answer', description: 'Keep waiting for the researcher on a pending ask_researcher or request_approval id. Returns status "pending" again or the final result.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
-  { name: 'record_idea', description: 'Save a research idea (intuition, gap, approach, test case) to the ideas folder as a draft idea node.', inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, related_assets: { type: 'array', items: { type: 'string' } }, tags: { type: 'array', items: { type: 'string' } } }, required: ['title', 'body'] } },
+  { name: 'record_idea', description: 'Save a research idea to the ideas folder as a draft idea node. kind says what it is: approach (possible route), question (open question for the researcher), observation, test_case (object worth checking), or risk (suspected gap).', inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, kind: { type: 'string', enum: [...IDEA_KIND_LIST] }, related_assets: { type: 'array', items: { type: 'string' } }, tags: { type: 'array', items: { type: 'string' } } }, required: ['title', 'body'] } },
   { name: 'loop_status', description: 'Current research loop status: stage, asset, pending question, approval queue, parked assets.', inputSchema: { type: 'object', properties: {} } },
 ];
 
@@ -74,7 +75,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
   const core = new ResearchLoopCore(new NodeLoopFiles(root), paths);
   await core.load();
   if (name === 'record_idea') {
-    const ideaId = await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent', Array.isArray(args.tags) ? args.tags.map(String) : []);
+    const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
+    const ideaId = await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent', tags, toIdeaKind(args.kind, tags));
     return { ok: true, idea_id: ideaId, path: `${paths.ideas}/${ideaId}.md` };
   }
   if (name === 'loop_status') return { ok: true, state: core.statusSummary(), brief: core.briefStatus() };

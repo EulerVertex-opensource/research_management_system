@@ -1,7 +1,11 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import type matter from 'gray-matter';
-import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
+import { parseMarkdown } from './Frontmatter';
+import { LEGACY_SOURCE_KINDS, NodeKind } from '../domain/nodeKinds';
+import { approvedProjectParts } from '../domain/project';
+import { nodeProblems } from '../domain/schema';
+import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 
 /**
  * Pure types and helpers for the chat-driven research loop. Shared by the
@@ -17,9 +21,6 @@ export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_
 export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample';
 export type ReportOutcome = 'complete' | 'none' | 'candidate' | 'confirmed' | 'rejected' | 'proved' | 'failed' | 'question';
 
-export const PROVABLE_TYPES = new Set(['theorem', 'lemma', 'proposition', 'construction']);
-export const ASSET_TYPES = new Set(['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark']);
-export const MAX_FAILED_PLANS = 3;
 export const STATE_DIR = '.research-assistant-loop';
 export const STATE_PATH = `${STATE_DIR}/state.json`;
 export const EVENTS_PATH = `${STATE_DIR}/events.jsonl`;
@@ -117,31 +118,22 @@ export interface StageReport {
 
 export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; checks?: string; decisions?: string; handoffs?: string }
 
-export function requiredAssetIds(project: string): string[] {
-  const match = /^## Required Results\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(project);
-  if (!match) return [];
-  return [...new Set([...match[1].matchAll(/^\s*-\s*(?:\[[ xX]\]\s*)?`?([a-z][a-z0-9_]*)`?(?:\s|:|$)/gm)].map((item) => item[1]))];
-}
-
-export function projectSection(project: string, heading: string): string {
-  const match = new RegExp(`^## ${heading}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))`, 'm').exec(project);
-  return match ? match[1].trim() : '';
-}
-
-export function hasSection(body: string, heading: string): boolean {
-  return new RegExp(`^## ${heading}[ \\t]*$`, 'm').test(body);
-}
-
-export function sectionContent(body: string, heading: string): string {
-  return projectSection(body, heading);
-}
-
 function normalizeProse(text: string): string {
-  return text
-    .replace(/<!-- research-assistant:[a-z-]+:start -->[\s\S]*?<!-- research-assistant:[a-z-]+:end -->/g, '')
+  return stripManagedBlocks(text)
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Frontmatter keys a digest ignores: presentation, lifecycle, and fields older schemas stored. */
+const UNAPPROVED_KEYS = ['status', 'title', 'used_in', 'tags', 'proof_digest', 'resolved_by'];
+
+/** Frontmatter as a digest sees it: unapproved keys dropped, legacy names mapped so a rename never invalidates an approval. */
+function approvedData(data: Record<string, any>): Record<string, any> {
+  const result = { ...data };
+  for (const key of UNAPPROVED_KEYS) delete result[key];
+  if (result.source && typeof result.source === 'object' && LEGACY_SOURCE_KINDS[result.source.kind]) result.source = { ...result.source, kind: LEGACY_SOURCE_KINDS[result.source.kind] };
+  return result;
 }
 
 const sha = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
@@ -149,21 +141,16 @@ const sha = (text: string) => crypto.createHash('sha256').update(text).digest('h
 /** Digest of the parts of a node or the project that a researcher approves. */
 export function researchDigest(raw: string, kind: 'project' | 'asset' | 'definition'): string {
   if (kind === 'project') {
-    return sha(['Main Problem', 'Current Goals', 'Required Results'].map((heading) => normalizeProse(projectSection(raw, heading))).join('\n'));
+    return sha(approvedProjectParts(raw).map(normalizeProse).join('\n'));
   }
   const parsed = parseMarkdown(raw);
-  const data = { ...parsed.data };
-  for (const key of ['status', 'title', 'used_in', 'tags']) delete data[key];
-  return sha(JSON.stringify(sortKeys(data)) + '\n' + normalizeProse(parsed.content));
+  return sha(JSON.stringify(sortKeys(approvedData(parsed.data))) + '\n' + normalizeProse(parsed.content));
 }
 
 /** Digest of the statement alone; changes here invalidate dependants and freeze proofs. */
 export function statementDigest(raw: string): string {
   const parsed = parseMarkdown(raw);
-  const body = parsed.content.split(/^## Proof[ \t]*$/m)[0];
-  const data = { ...parsed.data };
-  for (const key of ['status', 'title', 'used_in', 'tags']) delete data[key];
-  return sha(JSON.stringify(sortKeys(data)) + '\n' + normalizeProse(body));
+  return sha(JSON.stringify(sortKeys(approvedData(parsed.data))) + '\n' + normalizeProse(statementPart(parsed.content)));
 }
 
 function sortKeys(value: unknown): unknown {
@@ -183,8 +170,10 @@ export function safeRelativeFile(filePath: string): string {
 }
 
 export function proofText(body: string): string { return sectionContent(body, 'Proof'); }
+/** Digest of an asset's `## Proof`, stamped on the plan that produced it so a later edit marks that plan outdated. */
+export function proofDigest(raw: string): string { return sha(normalizeProse(proofText(parseMarkdown(raw).content))); }
 export function statementIncomplete(body: string): boolean {
-  const statement = body.split(/^## Proof[ \t]*$/m)[0].replace(/<!-- research-assistant:[a-z-]+:start -->[\s\S]*?<!-- research-assistant:[a-z-]+:end -->/g, '');
+  const statement = stripManagedBlocks(statementPart(body));
   return !statement.trim() || /Write the .* here\.|Describe the .* here\./.test(statement);
 }
 
@@ -194,7 +183,6 @@ export function statementIncomplete(body: string): boolean {
  * loop-written shared records, for whole-workspace checks after a pull.
  */
 export function validateResearchFile(filePath: string, raw: string, folders: ResearchFolders, paperIds: Set<string>, options: { committed?: boolean } = {}): void {
-  const nodeStatuses = options.committed ? ['draft', 'approved', 'deprecated', 'archived'] : ['draft', 'deprecated', 'archived'];
   if (!filePath.endsWith('.md')) throw new Error(`Research file must be Markdown: ${filePath}`);
   let parsed: matter.GrayMatterFile<string>;
   try { parsed = parseMarkdown(raw); } catch (error) { throw new Error(`${filePath}: invalid YAML frontmatter (${String(error)})`); }
@@ -203,26 +191,11 @@ export function validateResearchFile(filePath: string, raw: string, folders: Res
   if (!/^[a-z][a-z0-9_]*$/.test(id)) throw new Error(`Invalid node ID: ${id}`);
   if (typeof data.title !== 'string' || !data.title.trim()) throw new Error(`${id}: title is required.`);
   const folder = path.posix.dirname(filePath);
-  if (folder === folders.assets) {
-    if (!ASSET_TYPES.has(data.type)) throw new Error(`${id}: invalid asset type.`);
-    if (!nodeStatuses.includes(data.status)) throw new Error(`${id}: agent-written assets must stay draft; approval is a researcher action.`);
-    if (data.status === 'draft' && statementIncomplete(content)) throw new Error(`${id}: asset statement is incomplete.`);
-    if (data.source?.kind === 'paper' && (!paperIds.has(data.source.paper_id) || !data.source.location)) throw new Error(`${id}: paper source needs an indexed paper and precise location.`);
-    if (data.source?.kind !== undefined && !['paper', 'self_proved', 'note'].includes(data.source.kind)) throw new Error(`${id}: source.kind must be paper or self_proved.`);
-    if (data.type === 'example' && data.refutes !== undefined) {
-      if (typeof data.refutes !== 'string' || !hasSection(content, 'Assumptions') || !hasSection(content, 'Calculation')) throw new Error(`${id}: counterexample needs refutes, Assumptions, and Calculation.`);
-    }
-  } else if (folder === folders.definitions) {
-    if (data.type !== 'definition' || !nodeStatuses.includes(data.status) || !content.trim()) throw new Error(`${id}: invalid draft definition.`);
-  } else if (folder === folders.ideas) {
-    if (data.type !== 'idea' || !['draft', 'archived'].includes(data.status) || !content.trim()) throw new Error(`${id}: invalid idea (type idea, status draft or archived, non-empty body).`);
-  } else if (folder === folders.plans) {
-    if (data.type === 'plan') {
-      if (!['pending', 'failed'].includes(data.status) || typeof data.target_asset !== 'string' || !hasSection(content, 'Goal') || !hasSection(content, 'Plan') || !hasSection(content, 'Verification') || !/^\d+\. \[[ xX]\] /m.test(content)) throw new Error(`${id}: invalid proof plan (needs status pending|failed, target_asset, Goal, Plan checklist, Verification).`);
-      if (data.status === 'failed' && !sectionContent(content, 'Failure')) throw new Error(`${id}: failed plan needs an obstruction under ## Failure.`);
-    } else if (data.type === 'proof_record') {
-      if (data.status !== undefined || typeof data.target_asset !== 'string' || !sectionContent(content, 'Outcome')) throw new Error(`${id}: invalid proof record (no status, target_asset, ## Outcome).`);
-    } else throw new Error(`${id}: plan folder files must be plan or proof_record.`);
+  const kind: NodeKind | undefined = folder === folders.assets ? 'asset' : folder === folders.definitions ? 'definition' : folder === folders.ideas ? 'idea' : folder === folders.plans ? 'plan' : undefined;
+  if (kind) {
+    const problems = nodeProblems(kind, id, data, content, { allowApproved: options.committed, paperIds });
+    if (kind === 'asset' && !problems.length && data.status === 'draft' && statementIncomplete(content)) problems.push(`${id}: asset statement is incomplete.`);
+    if (problems.length) throw new Error(problems[0]);
   } else if (folders.checks && folder === folders.checks) {
     if (data.type !== 'falsification_check' || typeof data.target_asset !== 'string' || !['no_counterexample_found', 'counterexample_rejected'].includes(data.outcome) || !sectionContent(content, 'Cases checked') || !hasSection(content, 'Limitations')) {
       throw new Error(`${id}: invalid falsification check (type falsification_check, target_asset, outcome no_counterexample_found|counterexample_rejected, ## Cases checked, ## Limitations).`);

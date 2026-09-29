@@ -1,5 +1,5 @@
 import React, { useReducer, useCallback, useEffect, useRef } from 'react';
-import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary, ManuscriptStatus } from '../src/models/types';
+import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from '../src/models/types';
 import { ExtensionMessage } from '../src/models/messages';
 import { useExtension } from './hooks/useExtension';
 import { Sidebar, SidebarView } from './components/Sidebar';
@@ -12,6 +12,7 @@ import { AddPaperButton } from './components/AddPaperButton';
 import { CreateNodeModal } from './components/CreateNodeModal';
 import { ManuscriptView } from './components/ManuscriptView';
 import { resolvePaperPdfLink, resolveResearchNodeLink } from './researchLinks';
+import { ASSET_TYPES, ASSET_TYPE_LIST } from '../src/domain/nodeKinds';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -26,6 +27,7 @@ interface State {
   selectedNodeId: string | null;
   nodeDetails: Record<string, NodeDetailData>;
   projectMd: string | null;
+  projectSummary: ProjectSummary | null;
   papers: PaperEntry[];
   papersLoaded: boolean;
   selectedPaperSlug: string | null;
@@ -40,7 +42,7 @@ type Action =
   | { type: 'INIT'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'NODES_UPDATED'; nodes: ResearchNode[] }
   | { type: 'NODE_DETAIL'; id: string; frontmatter: NodeFrontmatter; body: string }
-  | { type: 'PROJECT_MD'; content: string }
+  | { type: 'PROJECT_MD'; content: string; summary?: ProjectSummary }
   | { type: 'PAPERS_DATA'; papers: PaperEntry[] }
   | { type: 'SELECT_NODE'; id: string }
   | { type: 'SELECT_PAPER'; slug: string }
@@ -71,7 +73,7 @@ function reducer(state: State, action: Action): State {
     case 'NODE_DETAIL':
       return { ...state, nodeDetails: { ...state.nodeDetails, [action.id]: { frontmatter: action.frontmatter, body: action.body } } };
     case 'PROJECT_MD':
-      return { ...state, projectMd: action.content };
+      return { ...state, projectMd: action.content, projectSummary: action.summary ?? null };
     case 'PAPERS_DATA':
       return { ...state, papers: action.papers, papersLoaded: true };
     case 'SELECT_NODE':
@@ -107,6 +109,7 @@ const initialState: State = {
   selectedNodeId: null,
   nodeDetails: {},
   projectMd: null,
+  projectSummary: null,
   papers: [],
   papersLoaded: false,
   selectedPaperSlug: null,
@@ -132,7 +135,7 @@ export function App() {
         dispatch({ type: 'NODE_DETAIL', id: msg.id, frontmatter: msg.frontmatter, body: msg.body });
         break;
       case 'projectMd':
-        dispatch({ type: 'PROJECT_MD', content: msg.content });
+        dispatch({ type: 'PROJECT_MD', content: msg.content, summary: msg.summary });
         break;
       case 'papersData':
         dispatch({ type: 'PAPERS_DATA', papers: msg.papers });
@@ -172,7 +175,7 @@ export function App() {
   };
 
   const handleNavigateNode = (node: ResearchNode) => {
-    const view: SidebarView = node.type === 'idea' ? 'ideas' : node.type === 'plan' || node.type === 'proof_record' ? 'plans'
+    const view: SidebarView = node.type === 'idea' ? 'ideas' : node.type === 'plan' ? 'plans'
       : node.filePath.startsWith(`${state.paths?.definitions ?? 'research/definitions'}/`) ? 'definitions' : 'assets';
     dispatch({ type: 'SET_VIEW', view });
     dispatch({ type: 'SELECT_NODE', id: node.id });
@@ -371,6 +374,8 @@ export function App() {
           {state.activeView === 'project' ? (
             <ProjectView
               content={state.projectMd}
+              summary={state.projectSummary}
+              onOpenNode={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
               projectRoot={state.projectRoot}
               initialized={state.initialized}
               paths={state.paths}
@@ -442,7 +447,7 @@ export function App() {
 
       {state.showCreateModal && (
         <CreateNodeModal
-          assets={state.nodes.filter((node) => ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark'].includes(node.type) && node.filePath.startsWith(`${state.paths?.assets ?? 'research/assets'}/`))}
+          assets={state.nodes.filter((node) => ASSET_TYPES.has(node.type) && node.filePath.startsWith(`${state.paths?.assets ?? 'research/assets'}/`))}
           allowedTypes={
             state.activeView === 'ideas'
               ? ['idea']
@@ -450,7 +455,7 @@ export function App() {
                 ? ['plan']
               : state.activeView === 'definitions'
                 ? ['definition']
-                : ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark']
+                : [...ASSET_TYPE_LIST]
           }
           onConfirm={handleCreateNode}
           onCancel={() => dispatch({ type: 'TOGGLE_CREATE_MODAL' })}

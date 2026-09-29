@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ResearchNode, ResearchStatus } from '../../src/models/types';
 import { StatusBadge } from './StatusBadge';
+import { IDEA_STATUS_LIST, NODE_STATUS_LIST, PLAN_STATUS_LIST } from '../../src/domain/nodeKinds';
 
 interface Props {
   nodes: ResearchNode[];
@@ -10,30 +11,29 @@ interface Props {
   definitionPath?: string;
 }
 
-const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'approved', 'draft', 'deprecated', 'archived'];
+const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'abandoned', 'approved', 'draft', 'deprecated', 'archived'];
 
 export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions' }: Props) {
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<ResearchStatus | 'record' | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<ResearchStatus | 'all'>('all');
   useEffect(() => setStatusFilter('all'), [filterType]);
 
   const filtered = nodes.filter((n) => {
     const isDefinition = n.filePath.startsWith(`${definitionPath}/`);
     if (filterType === 'idea' && n.type !== 'idea') return false;
-    if (filterType === 'plan' && n.type !== 'plan' && n.type !== 'proof_record') return false;
+    if (filterType === 'plan' && n.type !== 'plan') return false;
     if (filterType === 'definition' && !isDefinition) return false;
-    if (filterType === 'asset' && (n.type === 'idea' || n.type === 'plan' || n.type === 'proof_record' || isDefinition)) return false;
-    if (statusFilter !== 'all' && (statusFilter === 'record' ? n.type !== 'proof_record' : n.status !== statusFilter)) return false;
+    if (filterType === 'asset' && (n.type === 'idea' || n.type === 'plan' || isDefinition)) return false;
+    if (statusFilter !== 'all' && n.status !== statusFilter) return false;
     if (search && !n.title.toLowerCase().includes(search.toLowerCase()) && !n.tags.join(' ').toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
 
   const sorted = [...filtered].sort((a, b) => {
+    // Assets and definitions follow dependency order, derived by the extension; inactive ones come last.
     if (filterType === 'asset' || filterType === 'definition') {
-      const orderA = /^(\d{3,})\. /.exec(a.title);
-      const orderB = /^(\d{3,})\. /.exec(b.title);
-      if (orderA && orderB) return Number(orderA[1]) - Number(orderB[1]) || a.id.localeCompare(b.id);
-      if (orderA || orderB) return orderA ? -1 : 1;
+      if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
+      if (a.order !== undefined || b.order !== undefined) return a.order !== undefined ? -1 : 1;
     }
     const sa = a.status ? STATUS_ORDER.indexOf(a.status) : STATUS_ORDER.length;
     const sb = b.status ? STATUS_ORDER.indexOf(b.status) : STATUS_ORDER.length;
@@ -61,7 +61,7 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
         />
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as ResearchStatus | 'record' | 'all')}
+          onChange={(e) => setStatusFilter(e.target.value as ResearchStatus | 'all')}
           style={{
             padding: '4px 6px',
             background: 'var(--vscode-dropdown-background)',
@@ -72,14 +72,9 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
           }}
         >
           <option value="all">All status</option>
-          {filterType === 'idea' ? <>
-            <option value="draft">Draft</option><option value="archived">Archived</option>
-          </> : filterType === 'plan' ? <>
-            <option value="pending">Pending</option><option value="failed">Failed</option><option value="record">Proof records</option>
-          </> : <>
-            <option value="approved">Approved</option><option value="draft">Draft</option>
-            <option value="deprecated">Deprecated</option><option value="archived">Archived</option>
-          </>}
+          {(filterType === 'idea' ? IDEA_STATUS_LIST : filterType === 'plan' ? PLAN_STATUS_LIST : NODE_STATUS_LIST).map((status) => (
+            <option key={status} value={status}>{status[0].toUpperCase()}{status.slice(1)}</option>
+          ))}
         </select>
       </div>
 
@@ -112,7 +107,10 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
               </span>
               {node.status && <StatusBadge status={node.status} />}
             </div>
-            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>{node.title}</div>
+            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>
+              {node.order !== undefined && (filterType === 'asset' || filterType === 'definition') && <span style={{ opacity: 0.5, marginRight: 6, fontVariantNumeric: 'tabular-nums' }}>{node.order}.</span>}
+              {node.title}
+            </div>
             {node.tags.length > 0 && (
               <div style={{ fontSize: 11, opacity: 0.6 }}>{node.tags.join(', ')}</div>
             )}

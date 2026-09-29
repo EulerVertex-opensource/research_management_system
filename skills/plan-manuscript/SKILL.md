@@ -1,14 +1,20 @@
 ---
 name: plan-manuscript
-description: Formulate the paper's presentation order and divide it into independently editable LaTeX sections using research asset IDs.
+description: Plan the paper - the section order for the whole manuscript, or one section's brief - from approved research nodes. Use for presentation order, section outlines, result selection, and identifying missing arguments; use draft-latex to write the TeX.
 ---
 
 # Plan the manuscript
 
-Read `.research-assistant.json`, the configured project description, existing main TeX file, and `writing/outline.md` under the configured research root. Start with a compact index of asset and definition IDs, titles, status, and dependencies. Read full node bodies only for candidate results whose role in the presentation is unclear. Do not load the entire research archive into one model request.
+Read `.research-assistant.json`, the project contract (`project.md`), and `writing/outline.md` under the configured research root. Start from a compact index of asset and definition IDs, titles, status, and dependencies (`research-maintenance validate` prints it in dependency order); read full node bodies only where a result's role is unclear. Do not load the whole research archive.
 
-Discuss the paper's audience, main contribution, and argument order with the researcher. Propose a sequence of stable section IDs and a purpose for each section. Use dependency order as a consistency check; the exposition may differ when a clear preview or motivation is needed. Point out missing intermediate arguments and distinguish approved results from drafts and ideas.
+The outline lists sections in presentation order under `## Sections`, one numbered link per section: `1. [Introduction](sections/introduction.md)`. Each brief `writing/sections/<id>.md` has YAML `title` (identical to the outline link title) and `assets` (verified asset IDs, possibly `[]` for exposition), then `## Purpose`, `## Subsections`, and `## Gaps`. Section IDs are stable lowercase letters, digits, underscores, or hyphens. Briefs are writing plans, distinct from proof plans.
 
-Once the researcher chooses an order, update the numbered links under `## Sections` in the writing outline. Create one brief per section at `writing/sections/<id>.md`, with `title` and `assets` YAML fields and `## Purpose`, `## Subsections`, and `## Gaps` headings. Use only verified asset IDs. Keep the outline link title and brief title identical. Preserve existing briefs and TeX files when reorganizing; avoid renaming files with active collaborator edits or Overleaf comments.
+## Scope: manuscript
 
-The writing outline determines manuscript input order. Use the `manuscript-writing` skill to preview and apply the input sync after section TeX files exist.
+Discuss audience, main contribution, and argument order with the researcher. Propose a sequence of stable section IDs with a purpose for each. Use dependency order as a consistency check; the exposition may differ for a preview or motivation. Point out missing intermediate arguments. Once the researcher chooses, update the outline and create or revise one brief per section. Preserve existing briefs and TeX files when reorganizing; avoid renaming files with active collaborator edits or Overleaf comments.
+
+## Scope: section
+
+Work on one brief. Find candidate nodes from the index, then read only the relevant ones, plus related ideas and pending plans as possible approaches (kept distinct from established results) and failed plans as recorded obstructions. Give subsection goals, result order, and the exact IDs used. Record draft nodes and speculative ideas under Gaps; never present them as proved. If too few approved results exist, say what is missing. Do not edit TeX while planning.
+
+After briefs change, `draft-latex` prepares and writes the sections and syncs the main document's input order.

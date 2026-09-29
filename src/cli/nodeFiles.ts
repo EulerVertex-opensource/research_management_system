@@ -1,9 +1,9 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import { ProjectPaths, SyncConfig } from '../models/types';
+import { ProjectPaths, ResearchAssistantConfig, SyncConfig } from '../models/types';
 import { LoopFiles } from '../services/ResearchLoopModel';
-import { PROJECT_CONFIG_PATH, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
+import { PROJECT_CONFIG_PATH, normalizeConfig, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
 
 /** Node `fs` implementation of the small file interface used by the research loop. */
 export class NodeLoopFiles implements LoopFiles {
@@ -48,6 +48,10 @@ export function findProjectRoot(start: string): string | undefined {
     if (parent === current) return undefined;
     current = parent;
   }
+}
+
+export async function loadProjectConfig(root: string): Promise<ResearchAssistantConfig> {
+  return normalizeConfig(JSON.parse(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8')) as Partial<ResearchAssistantConfig>);
 }
 
 export async function loadProjectPaths(root: string): Promise<ProjectPaths> {

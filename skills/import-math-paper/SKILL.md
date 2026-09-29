@@ -1,6 +1,6 @@
 ---
 name: import-math-paper
-description: Import a mathematical paper from PDF into a page-marked Markdown working copy, preserve provenance, flag extraction uncertainty, and optionally create draft research nodes. Use when adding, transcribing, OCR-processing, or extracting results from a paper. Do not use for ordinary edits to an already imported paper.
+description: Import a mathematical paper from PDF into a page-marked Markdown working copy with provenance and flagged extraction uncertainty. Use when adding, transcribing, or OCR-processing a new paper; to turn an imported paper into assets or definitions, use extract-research-nodes. Do not use for ordinary edits to an already imported paper.
 ---
 
 # Import a mathematical paper
@@ -20,11 +20,8 @@ Read `.research-assistant.json` and keep the untouched PDF in its configured `lo
 5. Preserve uncertain text visibly. Never silently repair a formula whose intended meaning is unclear.
 6. Render or inspect source pages containing important formulas, theorem statements, diagrams, tables, or suspicious extraction.
 7. Record the extraction method, timestamp, checksum, review state, and known limitations in metadata.
-8. If requested, use `extract-definitions` for commonly used definitions, put project-specific conditions or assumptions in linked `remark` assets, and extract theorem-like results to assets. Set every created or materially changed node to `status: draft` and include paper slug plus page/location provenance.
-9. After writing asset nodes, use the `order-assets` skill to validate dependencies and update title order.
-10. Use `link-research-nodes` to link verified definition and asset mentions in created node bodies.
-11. Run `check-notation` against each new or materially revised asset using its linked definitions.
-12. Summarize files created, uncertain passages, visually checked pages, and work still requiring human review.
+8. If the researcher also wants results or definitions from the paper, continue with `extract-research-nodes` on the new transcription.
+9. Summarize files created, uncertain passages, visually checked pages, and work still requiring human review.
 
 ## Boundaries
 

@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const cli = path.resolve(__dirname, '../out/order-assets.cjs');
+const cli = path.resolve(__dirname, '../out/research-maintenance.cjs');
 
 function fixture(nodes) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asset-order-'));
@@ -15,14 +15,13 @@ function fixture(nodes) {
   for (const [id, { title = id, status = 'draft', depends_on = [] }] of Object.entries(nodes)) {
     fs.writeFileSync(path.join(assets, `${id}.md`), `---\ntype: theorem\ntitle: ${title}\nstatus: ${status}\ndepends_on: [${depends_on.join(', ')}]\n---\n\nBody.\n`);
   }
-  return { root, assets, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  const snapshot = () => fs.readdirSync(assets).sort().map((file) => fs.readFileSync(path.join(assets, file), 'utf8'));
+  return { root, assets, snapshot, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
-function run(root, flag) {
-  return spawnSync(process.execPath, [cli, flag, '--project', root], { encoding: 'utf8' });
-}
+const validate = (root, ...args) => spawnSync(process.execPath, [cli, 'validate', ...args, '--project', root], { encoding: 'utf8' });
 
-test('orders chains and branches, previews safely, and becomes a no-op', () => {
+test('validate prints chains and branches in dependency order without touching titles', () => {
   const project = fixture({
     z: { title: 'Z', depends_on: ['b'] },
     b: { title: 'B', depends_on: ['a'] },
@@ -31,34 +30,43 @@ test('orders chains and branches, previews safely, and becomes a no-op', () => {
     x: { title: 'X', status: 'archived' },
   });
   try {
-    const before = fs.readFileSync(path.join(project.assets, 'a.md'), 'utf8');
-    assert.equal(run(project.root, '--preview').status, 0);
-    assert.equal(fs.readFileSync(path.join(project.assets, 'a.md'), 'utf8'), before);
-    assert.equal(run(project.root, '--apply').status, 0);
-    const titles = Object.fromEntries(['a', 'b', 'c', 'z', 'x'].map((id) => [id, /^title: (.*)$/m.exec(fs.readFileSync(path.join(project.assets, `${id}.md`), 'utf8'))?.[1].replace(/^"|"$/g, '')]));
-    assert.match(titles.a, /^001\. A/);
-    assert.match(titles.b, /^002\. B/);
-    assert.match(titles.c, /^003\. C/);
-    assert.match(titles.z, /^004\. Z/);
-    assert.equal(titles.x, 'X');
-    assert.match(run(project.root, '--apply').stdout, /0 title change\(s\)/);
-    fs.writeFileSync(path.join(project.assets, 'aa.md'), '---\ntype: theorem\ntitle: AA\nstatus: draft\ndepends_on: [a]\n---\n');
-    assert.equal(run(project.root, '--apply').status, 0);
-    assert.match(fs.readFileSync(path.join(project.assets, 'aa.md'), 'utf8'), /title: "002\. AA"/);
+    const before = project.snapshot();
+    const result = validate(project.root, '--assets');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /001 a — A\n\s+002 b — B\n\s+003 c — C\n\s+004 z — Z\n/);
+    assert.doesNotMatch(result.stdout, / x — /);
+    assert.deepEqual(project.snapshot(), before);
+    fs.writeFileSync(path.join(project.assets, 'aa.md'), '---\ntype: theorem\ntitle: AA\nstatus: draft\ndepends_on: [a]\n---\n\nBody.\n');
+    assert.match(validate(project.root, '--assets').stdout, /001 a — A\n\s+002 aa — AA\n/);
   } finally { project.cleanup(); }
 });
 
-test('missing, inactive, and cyclic dependencies leave files untouched', () => {
-  for (const nodes of [
-    { a: { depends_on: ['missing'] } },
-    { a: { depends_on: ['b'] }, b: { status: 'archived' } },
-    { a: { depends_on: ['b'] }, b: { depends_on: ['a'] } },
+test('missing, inactive, and cyclic dependencies are reported and leave files untouched', () => {
+  for (const [nodes, problem] of [
+    [{ a: { depends_on: ['missing'] } }, /depends on missing asset missing\.md/],
+    [{ a: { depends_on: ['b'] }, b: { status: 'archived' } }, /depends on inactive asset b\.md \(archived\)/],
+    [{ a: { depends_on: ['b'] }, b: { depends_on: ['a'] } }, /Dependency cycle involving: a, b/],
   ]) {
     const project = fixture(nodes);
     try {
-      const before = fs.readdirSync(project.assets).map((id) => fs.readFileSync(path.join(project.assets, id), 'utf8'));
-      assert.equal(run(project.root, '--apply').status, 1);
-      assert.deepEqual(fs.readdirSync(project.assets).map((id) => fs.readFileSync(path.join(project.assets, id), 'utf8')), before);
+      const before = project.snapshot();
+      const result = validate(project.root);
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, problem);
+      assert.deepEqual(project.snapshot(), before);
     } finally { project.cleanup(); }
   }
+});
+
+test('validate reports IDs reused across research folders and schema problems', () => {
+  const project = fixture({ lemma: { title: 'Lemma' } });
+  try {
+    fs.mkdirSync(path.join(project.root, 'research', 'ideas'), { recursive: true });
+    fs.writeFileSync(path.join(project.root, 'research', 'ideas', 'lemma.md'), '---\ntype: idea\ntitle: Same ID\nstatus: draft\n---\n\nA thought.\n');
+    fs.writeFileSync(path.join(project.assets, 'odd.md'), '---\ntype: theorem\ntitle: Odd\nstatus: draft\nsource:\n  kind: rumour\n---\n\nBody.\n');
+    const result = validate(project.root);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /research\/ideas\/lemma\.md: node ID lemma is already used by research\/assets\/lemma\.md/);
+    assert.match(result.stdout, /research\/assets\/odd\.md: source\.kind must be one of paper, textbook, original, note/);
+  } finally { project.cleanup(); }
 });

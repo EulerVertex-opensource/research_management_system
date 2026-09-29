@@ -1,6 +1,6 @@
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { AgentProvider } from './ResearchLoopModel';
-import { AGENT_PROVIDERS, LOOP_SCRIPT, MCP_SERVER_NAME } from './AgentProviders';
+import { AGENT_PROVIDERS, LOOP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, RETIRED_SKILLS } from './AgentProviders';
 
 /**
  * Pure builders for the agent-side configuration the extension generates.
@@ -126,4 +126,23 @@ You run exactly one research-loop stage. The driver gives you the stage, the ass
 3. Do the stage's work in the files, following the skill. Never set \`status: approved\`; never run \`report\`, \`next\`, or git commands. The driver does that.
 4. Reply with at most five lines: the outcome (for example \`none\`, \`candidate --counterexample <id>\`, \`complete --plan <id>\`, \`proved\`, \`failed\`, or \`question: ...\`), the files you wrote, and the key mathematical reason.
 `;
+}
+
+/**
+ * .gitignore entries for everything the extension installs or generates for
+ * coding agents: every skill it ships or once shipped (per provider skill
+ * folder), the worker subagents, hooks, and MCP files. Researchers' own skills
+ * and agents under the same folders stay trackable.
+ */
+export function generatedAgentIgnores(bundledSkillNames: string[]): string[] {
+  const skills = [...new Set([...bundledSkillNames, ...RETIRED_SKILLS])].sort();
+  return PROVIDER_IDS.flatMap((id) => {
+    const spec = AGENT_PROVIDERS[id];
+    return [
+      ...skills.map((name) => `/${spec.skillsDir}/${name}/`),
+      ...(spec.agentsDir ? WORKER_TIERS.map((tier) => `/${spec.agentsDir}/${workerAgentName(tier)}.md`) : []),
+      `/${spec.hooksFile}`,
+      ...(spec.mcp.kind === 'project-json' ? [`/${spec.mcp.file}`] : []),
+    ];
+  });
 }

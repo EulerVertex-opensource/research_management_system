@@ -1,4 +1,4 @@
-import matter from 'gray-matter';
+import { parseMarkdown } from './Frontmatter';
 
 export const SECTION_START = '% research-assistant:sections:start';
 export const SECTION_END = '% research-assistant:sections:end';
@@ -41,7 +41,7 @@ export function parseWritingOutline(raw: string): WritingSection[] {
 }
 
 export function parseSectionBrief(raw: string, id: string): SectionBrief {
-  const parsed = matter(raw);
+  const parsed = parseMarkdown(raw);
   const title = parsed.data.title;
   const assets = parsed.data.assets;
   if (typeof title !== 'string' || !title.trim()) throw new Error(`Section ${id} needs a title in YAML frontmatter`);

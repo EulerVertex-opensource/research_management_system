@@ -8,7 +8,7 @@ const esbuild = require('esbuild');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 
-const cli = path.resolve(__dirname, '../out/link-research-nodes.cjs');
+const cli = path.resolve(__dirname, '../out/research-maintenance.cjs');
 
 function project() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'interlinks-'));
@@ -23,7 +23,7 @@ function project() {
     return raw;
   };
   const read = (folder, id) => fs.readFileSync(path.join(root, 'research', folder, `${id}.md`), 'utf8');
-  const run = (...args) => spawnSync(process.execPath, [cli, ...args, '--project', root], { encoding: 'utf8' });
+  const run = (...args) => spawnSync(process.execPath, [cli, 'links', ...args, '--project', root], { encoding: 'utf8' });
   return { root, write, read, run, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -160,4 +160,20 @@ test('dashboard preview renders research links and routes their clicks', () => {
   external.props.onClick({ preventDefault: () => { prevented = true; } });
   assert.equal(prevented, false);
   assert.deepEqual(opened, [href, pdfHref]);
+});
+
+test('dashboard preview hides YAML frontmatter but keeps later horizontal rules', () => {
+  const built = esbuild.buildSync({
+    entryPoints: [path.resolve(__dirname, '../webview-src/components/MarkdownPreview.tsx')],
+    bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react', 'react-dom'],
+  });
+  const module = { exports: {} };
+  new Function('module', 'exports', 'require', built.outputFiles[0].text)(module, module.exports, require);
+  const { MarkdownPreview } = module.exports;
+  const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n    role: >-\n      $G_0$ is nilpotent\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n---\n\nAfter a rule.\n';
+  const html = renderToStaticMarkup(React.createElement(MarkdownPreview, { content: project }));
+  assert.doesNotMatch(html, /type: project|required_results|main_theorem|schema_version/);
+  assert.match(html, /<h1>Project<\/h1>/);
+  assert.match(html, /<hr\/>/);
+  assert.match(html, /After a rule\./);
 });

@@ -10,6 +10,7 @@ import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths, loadSyncConfig } from './nodeFiles';
 import { openGit, runShell } from './nodeGit';
+import { toIdeaKind } from '../domain/nodeKinds';
 
 declare const __EXTENSION_VERSION__: string | undefined;
 const EXTENSION_VERSION = typeof __EXTENSION_VERSION__ === 'string' ? __EXTENSION_VERSION__ : undefined;
@@ -42,7 +43,8 @@ const USAGE = `Usage: research-loop <command> [options]
   report <complete|none|candidate|confirmed|rejected|proved|failed|question> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
-  idea add --title "..." --body "..." [--asset ID]... [--origin researcher|agent]
+  idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
+  idea resolve <ideaId> --by <decision, plan, or asset ID> [--note "..."]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
   question pending | question answer --text "..." | question skip | question poll <id>
   handoff [--note "..."]   (write a shared handoff for the next collaborator)
@@ -351,7 +353,8 @@ async function main(): Promise<void> {
     case 'unpark': { await core.unpark(text(sub, 'asset')); out(`Unparked ${sub}.`); return; }
     case 'idea': {
       if (sub === 'add') {
-        const id = await core.saveIdea(text(args.flags.title, 'title'), text(args.flags.body, 'body'), args.lists.asset ?? [], args.flags.origin === 'agent' ? 'agent' : 'researcher', args.lists.tag ?? []);
+        const tags = args.lists.tag ?? [];
+        const id = await core.saveIdea(text(args.flags.title, 'title'), text(args.flags.body, 'body'), args.lists.asset ?? [], args.flags.origin === 'agent' ? 'agent' : 'researcher', tags, toIdeaKind(args.flags.kind, tags));
         out(json ? { ideaId: id } : `Saved idea ${id}.`);
         return;
       }
@@ -360,7 +363,12 @@ async function main(): Promise<void> {
         out(json ? { planId: id } : `Created plan ${id} from ${third}.`);
         return;
       }
-      throw new Error('idea add|convert');
+      if (sub === 'resolve') {
+        await core.resolveIdea(text(third, 'ideaId'), text(args.flags.by, 'by'), typeof args.flags.note === 'string' ? args.flags.note : undefined);
+        out(json ? { resolved: third } : `Resolved idea ${third}.`);
+        return;
+      }
+      throw new Error('idea add|convert|resolve');
     }
     case 'question': {
       const state = core.current;

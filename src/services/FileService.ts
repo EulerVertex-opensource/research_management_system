@@ -5,25 +5,9 @@ import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
 import { AGENT_PROVIDERS, PROVIDER_IDS } from './AgentProviders';
 import { migrateApprovals } from './ApprovalStore';
 import { sharedFolders } from './ResearchLoopModel';
-
-const PROJECT_TEMPLATE = `# Project
-
-## Main Problem
-
-## Background
-
-## Current Goals
-
-## Required Results
-
-List one stable asset ID per bullet, for example main_theorem. The research loop uses this list to decide manuscript readiness.
-
-## Known Results
-
-## Open Questions
-
-## Writing Status
-`;
+import { PROJECT_TEMPLATE } from '../domain/project';
+import { generatedAgentIgnores } from './AgentIntegrationCore';
+import { ASSET_TYPE_LIST } from '../domain/nodeKinds';
 
 const GITIGNORE_START = '# research-assistant:local:start';
 const WRITING_OUTLINE_TEMPLATE = `# Manuscript outline
@@ -204,11 +188,11 @@ export class FileService {
 
 This directory is the version-controlled source of truth for Research Assistant.
 
-- \`${paths.projectMd}\` describes the research problem, goals, and open questions.
-- \`${paths.assets}/\` contains theorem, lemma, proposition, example, construction, and remark nodes.
+- \`${paths.projectMd}\` is the research contract: the problem, scope, intended contribution, and the \`required_results\` that decide when the work is complete.
+- \`${paths.assets}/\` contains ${ASSET_TYPE_LIST.join(', ')} nodes.
 - \`${paths.definitions}/\` contains mathematical definitions and their notation.
 - \`${paths.ideas}/\` contains freeform research ideas.
-- \`${paths.plans}/\` contains executable proof plans and retained proof records.
+- \`${paths.plans}/\` contains proof plans, one per attempt; failed and succeeded plans are kept as the record of what was tried.
 - \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
 - \`${shared.checks}/\` records falsification checks: what was tried against which statement, and what was not covered.
@@ -239,15 +223,14 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
       '__pycache__/',
       '*.pyc',
       '# Recreated by the same Research Assistant extension version',
-      '# Only extension-maintained skills are local; project skills can be tracked',
-      ...bundledSkillNames.flatMap((name) => PROVIDER_IDS.map((id) => `/${AGENT_PROVIDERS[id].skillsDir}/${name}/`)),
+      '# Preinstalled skills, worker subagents, hooks, and MCP files are local; your own skills and agents can be tracked',
+      ...generatedAgentIgnores(bundledSkillNames),
       '/.github/copilot-instructions.md',
       '/AGENTS.md',
       '/CLAUDE.md',
       '/.vscode/settings.json',
       '/.vscode/extensions.json',
       '/.research-assistant-loop/',
-      ...PROVIDER_IDS.flatMap((id) => { const spec = AGENT_PROVIDERS[id]; return [`/${spec.hooksFile}`, ...(spec.mcp.kind === 'project-json' ? [`/${spec.mcp.file}`] : []), ...(spec.agentsDir ? [`/${spec.agentsDir}/research-worker-*.md`] : [])]; }),
       ...(paths.researchRoot !== '.' ? [`/${paths.researchRoot}/README.md`] : []),
       GITIGNORE_END,
     ].join('\n');

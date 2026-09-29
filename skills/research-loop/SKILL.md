@@ -30,33 +30,26 @@ Claude Code has the identical copy under `.claude/skills/research-loop/scripts/`
 3. `report <outcome> --summary "<= 5 lines" [--plan ID] [--counterexample ID]`. It validates every file written during the stage against the stage rules and advances the state. If it fails, fix exactly what it lists and report again; never work around it.
 4. Repeat until `next` says `waiting`, `ready`, or `paused`, or the autopilot cap pauses the loop. Then tell the researcher in three lines or fewer what is waiting on them. At `ready` after an extension, `next` names the new results; update the existing manuscript for those only.
 
-Stage skills: `falsify-asset` for `falsify` and `verify_counterexample`; `plan-proof` for `plan`; `execute-proof` for `execute`. `scaffold` and `sources` use `extract-theorems`, `extract-definitions`, `import-math-paper`, `order-assets`, `order-definitions`, `link-research-nodes`, and `check-notation`.
+Stage skills: `falsify-asset` for `falsify` and `verify_counterexample`; `plan-proof` for `plan`; `execute-proof` for `execute`; `extract-research-nodes`, `import-math-paper`, `research-maintenance`, and `check-notation` for `scaffold` and `sources`.
 
-Rules the validator enforces:
-
-- `draft_project`: only `project.md`; `## Required Results` lists one bullet per stable snake_case asset ID (`- id: role`). When extending, keep every existing bullet and add at least one new ID.
-- `scaffold`, `sources`: only new draft assets and definitions, plus appended paper index and BibTeX entries. A paper-sourced node needs `paper_id` and an exact location; a new paper needs a stable URL and a BibTeX entry. Unverifiable sources are never cited.
-- `falsify`: one new draft `example` with `refutes: <asset>`, `## Assumptions`, `## Calculation`; or, for `none`, one new check in `<research>/checks/` (`type: falsification_check`, `target_asset`, `outcome: no_counterexample_found`, `## Cases checked`, `## Limitations`). The loop stamps who checked, the statement digest, and the commit, so collaborators see what was tried and a changed statement is re-checked.
-- `plan`: one new `pending` plan, or execute an existing pending plan first. With failed plans present, `## Difference from failed plans` names every failed plan ID.
-- `execute`: only the plan file and the target asset's `## Proof`. The statement is frozen.
-- Nothing ever sets `status: approved` or touches `approvals/` (or a legacy `approvals.json`), `decisions/`, or `handoffs/`. The loop writes decisions (directions, change requests, parks) and handoffs itself.
+The stage instruction from `next` states that stage's file rules, and `report` enforces them; this skill does not repeat them. What holds in every stage: only the files the stage names may change, new nodes stay `draft`, a proof never changes its statement, and nothing ever sets `status: approved` or touches `approvals/`, `decisions/`, or `handoffs/` (the loop writes decisions and handoffs itself).
 
 ## Asking the researcher
 
 - `ask_researcher({question, kind, asset_id?, options?})` opens a VS Code popup. Kinds: `goals`, `discussion`, `blocked`, `counterexample_review`. Every call returns within about 45 seconds. If `status` is `pending`, call `await_answer({id})` with the returned id until `status` is `final`. A final result is `{answered: true, text}` or `{answered: false, reason, auto_action}`.
-- On `{answered: false}` continue in auto mode: `goals` proceeds only if `project.md` already has a Main Problem, otherwise `report question`; `discussion` takes the default you stated in the question and records it with `record_idea` tagged `open-question`; `blocked` and `counterexample_review` park the asset (`park <asset> --reason ...`) and continue with `next`.
+- On `{answered: false}` continue in auto mode: `goals` proceeds only if `project.md` already has a Main Problem, otherwise `report question`; `discussion` takes the default you stated in the question (the loop records it as an idea with `idea_kind: question`); `blocked` and `counterexample_review` park the asset (`park <asset> --reason ...`) and continue with `next`.
 - If the MCP tool is unavailable: on Claude Code use the built-in AskUserQuestion; on Codex run `report question --question "..."`, ask in chat, and when the researcher replies record it with `question answer --text "..."`.
 - `request_approval({kind, target, summary})` never approves by itself and follows the same `pending` / `await_answer` protocol; you may instead leave it pending and continue with other work. Kinds: `project`, `asset`, `definition`, `citation`, `counterexample`. Keep working on other actionable assets; `next` reports `waiting` when nothing remains. Late answers appear at the top of your next prompt.
 - Ask when goals are unclear, a statement is ambiguous, a source cannot be verified, three approaches failed, a counterexample was verified, or an idea needs the researcher's judgment. Do not ask to confirm routine work.
 
 ## Ideas
 
-- Any useful vague idea, yours or the researcher's, goes to `record_idea({title, body, related_assets})` at once (or `idea add`). Ideas are archived, never deleted.
+- Any useful vague idea, yours or the researcher's, goes to `record_idea({title, body, kind, related_assets})` at once (or `idea add --kind ...`). `kind` is `approach`, `question`, `observation`, `test_case`, or `risk`. An idea is `resolved` once answered or turned into a plan or lemma (`idea resolve <id> --by <decision, plan, or asset ID>`; `idea convert` does it for plans) and `archived` when dropped; never deleted. Researcher directions and answers are decision records the loop writes; do not copy them into ideas.
 - Guided idea conversation, when the researcher opens an idea or says "discuss idea X":
   1. Restate the idea and which required results it could serve; read only those assets.
-  2. Decide the shape with the researcher: (a) a new approach to an existing asset, so a new plan with `inspired_by`; (b) a missing intermediate result, so a new draft lemma asset added to the `depends_on` of the result it serves (say that this re-opens that result's approval); (c) a new end goal, so `extend --goal "..."`, then a new bullet under `## Required Results` followed by `request_approval(kind: "project")`.
+  2. Decide the shape with the researcher: (a) a new approach to an existing asset, so a new plan with `inspired_by`; (b) a missing intermediate result, so a new draft lemma asset added to the `depends_on` of the result it serves (say that this re-opens that result's approval); (c) a new end goal, so `extend --goal "..."`, then a new entry under `required_results` in project.md followed by `request_approval(kind: "project")`.
   3. Draft the concrete statement and an executable checklist; confirm with `ask_researcher(kind: "discussion")`.
-  4. Write the files, run `order-assets` and `link-research-nodes`, link plan and idea with `idea convert <ideaId> --asset ... --goal ... --steps ... --verification ...`, and `unpark` any asset the idea targets.
+  4. Write the files, run `research-maintenance validate` and `links`, link plan and idea with `idea convert <ideaId> --asset ... --goal ... --steps ... --verification ...` (or, for a new lemma, `idea resolve <ideaId> --by <lemma_id>`), and `unpark` any asset the idea targets.
 
 ## Sharing with collaborators (git sync)
 
@@ -65,12 +58,12 @@ Research files are shared through git; the loop's run state is not. Use only the
 - `sync status`: ahead/behind, uncommitted research files, unreported stage edits, the latest handoff.
 - `sync pull [--remote NAME]`: only between stages (report first). It fetches, rebases or merges, validates every research file, invalidates approvals whose content or dependencies changed upstream, rebuilds parked assets, change requests, and falsification from the shared records, re-baselines the stage, and prints a research summary. On conflicts it stops and pauses the loop. **Never resolve a conflict in a statement, proof, definition, or decision yourself**: show the researcher both sides; after they resolve it and finish the rebase or merge, run `sync pull --continue`.
 - If `report` says HEAD moved during the stage, run `sync pull --continue` and redo the stage. Never report files git brought in as your own.
-- After project approval, scaffold, sources, each proof record, and each approval the researcher tells you about, run `sync prepare` (add `--latex` when the manuscript changed). Fix every FAIL item. On success it writes a handoff; tell the researcher it is ready and that **they** publish (the "Publish Research to Collaborators" command, or `sync publish`, which asks them to confirm in VS Code). Never try to confirm a publish yourself, never push, and never rename shared files.
+- After project approval, scaffold, sources, each succeeded plan, and each approval the researcher tells you about, run `sync prepare` (add `--latex` when the manuscript changed). Fix every FAIL item. On success it writes a handoff; tell the researcher it is ready and that **they** publish (the "Publish Research to Collaborators" command, or `sync publish`, which asks them to confirm in VS Code). Never try to confirm a publish yourself, never push, and never rename shared files.
 - `handoff --note "..."` when the researcher stops for the day, so the next collaborator knows where to continue.
 
 ## Hard rules
 
-- Never write `status: approved`, never edit `approvals.json`. Approval happens only through the researcher's click, dashboard, or editor.
+- Never write `status: approved`, never edit approval records. Approval happens only through the researcher's click, dashboard, or editor.
 - Never invent a paper, theorem, location, proof step, or researcher answer.
 - A failed plan is not a falsification. Only a verified counterexample confirmed by the researcher refutes a statement, and only the researcher deprecates an asset.
 - Do not change a statement while proving it; a revised statement gets a new asset ID.

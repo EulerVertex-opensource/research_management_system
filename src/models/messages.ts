@@ -1,11 +1,11 @@
-import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ManuscriptStatus } from './types';
+import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
 export type ExtensionMessage =
   | { type: 'init'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'nodesUpdated'; nodes: ResearchNode[] }
   | { type: 'nodeDetail'; id: string; frontmatter: NodeFrontmatter; body: string }
-  | { type: 'projectMd'; content: string }
+  | { type: 'projectMd'; content: string; summary?: ProjectSummary }
   | { type: 'papersData'; papers: PaperEntry[] }
   | { type: 'manuscriptStatus'; status: ManuscriptStatus }
   | { type: 'error'; message: string };

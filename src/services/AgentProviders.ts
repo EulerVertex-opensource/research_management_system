@@ -87,3 +87,11 @@ export function allChatHints(): string { return PROVIDER_IDS.map((id) => `${invo
  * also the path SKILL.md documents; one spelling keeps instructions identical.
  */
 export const LOOP_COMMAND = `node ${AGENT_PROVIDERS.codex.skillsDir}/${LOOP_SKILL}/scripts/${LOOP_SCRIPT}`;
+
+/** Bundled skills that were merged or replaced; installs remove their copies and the generated .gitignore keeps ignoring them. */
+export const RETIRED_SKILLS = [
+  'prove-asset',
+  // Merged into research-maintenance, extract-research-nodes, explore-research, plan-manuscript, and draft-latex.
+  'order-assets', 'order-definitions', 'link-research-nodes', 'convert-proof-ideas',
+  'extract-theorems', 'extract-definitions', 'find-relevant', 'summarize', 'plan-section', 'manuscript-writing',
+];

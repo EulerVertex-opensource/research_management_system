@@ -1,12 +1,16 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { FileService } from './FileService';
-import { AGENT_PROVIDERS, LOOP_SCRIPT, LOOP_SKILL, MCP_SCRIPT, PROVIDER_IDS } from './AgentProviders';
+import { AGENT_PROVIDERS, LOOP_SCRIPT, LOOP_SKILL, MCP_SCRIPT, PROVIDER_IDS, RETIRED_SKILLS } from './AgentProviders';
 import { DRIVER_PATH } from './ResearchLoopModel';
 
 const SKILL_DESTINATIONS = PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].skillsDir);
-/** Bundled skills that were replaced; their installed copies are removed so agents do not load stale instructions. */
-const RETIRED_SKILLS = ['prove-asset'];
+/** Built CLIs (under out/) copied into each skill's scripts folder. */
+export const SKILL_SCRIPTS: Record<string, string[]> = {
+  'research-loop': [LOOP_SCRIPT, MCP_SCRIPT],
+  'research-maintenance': ['research-maintenance.cjs'],
+  'draft-latex': ['manuscript-writing.cjs'],
+};
 
 /**
  * Installs the extension's bundled, agent-neutral skills into each supported
@@ -64,79 +68,34 @@ export class SkillInstallerService {
   async installBundledSkills(skillNames: string[]): Promise<void> {
     const sourceRoot = vscode.Uri.joinPath(this.extensionUri, 'skills');
     for (const retired of RETIRED_SKILLS) {
-      for (const destinationRoot of SKILL_DESTINATIONS) {
-        await vscode.workspace.fs.delete(this.fileService.resolve(destinationRoot, retired), { recursive: true }).then(undefined, () => undefined);
-      }
+      for (const destinationRoot of SKILL_DESTINATIONS) await this.removeRetiredSkill(destinationRoot, retired);
     }
 
     for (const skillName of skillNames) {
       const sourceSkill = vscode.Uri.joinPath(sourceRoot, skillName);
-      await Promise.all(
-        SKILL_DESTINATIONS.map((destinationRoot) =>
-          this.copyDirectory(
-            sourceSkill,
-            this.fileService.resolve(destinationRoot, skillName)
-          )
-        )
-      );
-      if (skillName === 'order-assets' || skillName === 'order-definitions') {
-        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'order-assets.cjs'));
+      await Promise.all(SKILL_DESTINATIONS.map((destinationRoot) => this.copyDirectory(sourceSkill, this.fileService.resolve(destinationRoot, skillName))));
+      for (const script of SKILL_SCRIPTS[skillName] ?? []) {
+        const content = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', script));
         await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
           const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
           await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, skillName === 'order-assets' ? 'order-assets.cjs' : 'order-definitions.cjs'), script);
+          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, script), content);
         }));
-      }
-      if (skillName === 'extract-definitions') {
-        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'migrate-definitions.cjs'));
-        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
-          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
-          await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'migrate-definitions.cjs'), script);
-        }));
-      }
-      if (skillName === 'link-research-nodes') {
-        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'link-research-nodes.cjs'));
-        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
-          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
-          await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'link-research-nodes.cjs'), script);
-        }));
-      }
-      if (skillName === 'convert-proof-ideas') {
-        const [script, migration] = await Promise.all([
-          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'sync-proof-ideas.cjs')),
-          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'migrate-idea-plans.cjs')),
-        ]);
-        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
-          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
-          await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'sync-proof-ideas.cjs'), script);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'migrate-idea-plans.cjs'), migration);
-        }));
-      }
-      if (skillName === 'research-loop') {
-        const [loop, mcp] = await Promise.all([
-          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', LOOP_SCRIPT)),
-          vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', MCP_SCRIPT)),
-        ]);
-        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
-          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
-          await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, LOOP_SCRIPT), loop);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, MCP_SCRIPT), mcp);
-        }));
-        await this.writeDriverStamp(loop);
-      }
-      if (skillName === 'manuscript-writing') {
-        const script = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'out', 'manuscript-writing.cjs'));
-        await Promise.all(SKILL_DESTINATIONS.map(async (destinationRoot) => {
-          const destination = this.fileService.resolve(destinationRoot, skillName, 'scripts');
-          await vscode.workspace.fs.createDirectory(destination);
-          await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(destination, 'manuscript-writing.cjs'), script);
-        }));
+        if (script === LOOP_SCRIPT) await this.writeDriverStamp(content);
       }
     }
+  }
+
+  /**
+   * Remove an installed copy of a retired bundled skill. A folder is only
+   * deleted when its SKILL.md names that skill and describes research work, so
+   * a researcher's own skill that happens to share the name is left alone.
+   */
+  private async removeRetiredSkill(destinationRoot: string, name: string): Promise<void> {
+    const folder = this.fileService.resolve(destinationRoot, name);
+    const manifest = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder, 'SKILL.md')).then((data) => Buffer.from(data).toString('utf8'), () => undefined);
+    if (manifest === undefined || !isBundledSkillManifest(manifest, name)) return;
+    await vscode.workspace.fs.delete(folder, { recursive: true }).then(undefined, () => undefined);
   }
 
   private async hasSkillManifest(skillDirectory: vscode.Uri): Promise<boolean> {
@@ -171,4 +130,10 @@ export class SkillInstallerService {
       })
     );
   }
+}
+
+/** True for a SKILL.md this extension shipped under `name`: its frontmatter names the skill and it describes research nodes. */
+export function isBundledSkillManifest(manifest: string, name: string): boolean {
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(manifest)?.[1] ?? '';
+  return new RegExp(`^name:\\s*${name}\\s*$`, 'm').test(frontmatter) && /research|\.research-assistant\.json|asset/i.test(manifest);
 }

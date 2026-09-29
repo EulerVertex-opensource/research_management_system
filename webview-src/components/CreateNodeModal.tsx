@@ -2,11 +2,6 @@ import React, { useState } from 'react';
 import { NodeType } from '../../src/models/types';
 import { ResearchNode } from '../../src/models/types';
 
-const ASSET_TYPES: NodeType[] = [
-  'theorem', 'lemma', 'proposition', 'definition',
-  'example', 'construction', 'remark',
-];
-
 interface Props {
   allowedTypes: NodeType[];
   assets: ResearchNode[];

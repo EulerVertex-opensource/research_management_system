@@ -1,16 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { NodeFrontmatter, NodeType, NodeStatus, IdeaStatus, NodeSource, LayoutMode, ResearchNode, PaperEntry } from '../../src/models/types';
+import { NodeFrontmatter, NodeType, NodeSource, LayoutMode, ResearchNode, PaperEntry, ResearchStatus, IdeaKind } from '../../src/models/types';
+import { ASSET_TYPE_LIST, IDEA_KIND_LIST, SOURCE_KIND_LIST, statusesFor } from '../../src/domain/nodeKinds';
+import { hasSectionContent } from '../../src/domain/sections';
+import { reverseRelations } from '../../src/domain/relations';
+import { isCited, sourceKind } from '../../src/domain/schema';
 import { MarkdownEditor } from './MarkdownEditor';
 import { PaperIdInput } from './PaperIdInput';
 import { NodeTagInput } from './NodeTagInput';
 
-const ASSET_TYPES: NodeType[] = [
-  'theorem', 'lemma', 'proposition',
-  'example', 'construction', 'remark',
-];
-const STATUS_OPTIONS: NodeStatus[] = ['draft', 'approved', 'deprecated', 'archived'];
-const IDEA_STATUS_OPTIONS: IdeaStatus[] = ['pending', 'failed'];
-const SOURCE_KINDS: NodeSource['kind'][] = ['paper', 'self_proved'];
+const ASSET_TYPES: readonly NodeType[] = ASSET_TYPE_LIST;
 
 interface Props {
   id: string;
@@ -150,9 +148,13 @@ export function NodeDetail({
 
   const isIdea = fm.type === 'idea';
   const isPlan = fm.type === 'plan';
-  const isProofFile = isIdea || isPlan || fm.type === 'proof_record';
+  const isProofFile = isIdea || isPlan;
   const ideas = allNodes.filter((node) => node.type === 'idea');
-  const isPaperSource = fm.source?.kind === 'paper';
+  const reverse = reverseRelations(allNodes).get(id);
+  const usedIn = [...(reverse?.usedIn ?? []), ...(reverse?.usedBy ?? [])].map((ref) => allNodes.find((node) => node.id === ref)).filter((node): node is ResearchNode => Boolean(node));
+  // A status that needs a section is offered only once the section has content.
+  const statusBlocked = (status: string) => (status === 'failed' && !hasSectionContent(body, 'Failure')) || (status === 'succeeded' && !hasSectionContent(body, 'Outcome'));
+  const isPaperSource = isCited(fm.source);
 
   const inp: React.CSSProperties = {
     padding: '3px 7px',
@@ -198,10 +200,16 @@ export function NodeDetail({
               </select>
             )}
           </div>
-          {fm.type !== 'proof_record' && <div style={{ flex: 1 }}>
+          <div style={{ flex: 1 }}>
             <label style={lbl}>Status</label>
-            <select value={fm.status ?? ''} onChange={(e) => update('status', e.target.value as NodeStatus | IdeaStatus)} style={inp}>
-              {(isIdea ? ['draft', 'archived'] : isPlan ? IDEA_STATUS_OPTIONS : STATUS_OPTIONS).map((s) => <option key={s} value={s} disabled={s === 'failed' && !/^## Failure\s*\n\s*\S/m.test(body)}>{s}</option>)}
+            <select value={fm.status ?? ''} onChange={(e) => update('status', e.target.value as ResearchStatus)} style={inp}>
+              {statusesFor(fm.type).map((s) => <option key={s} value={s} disabled={s !== fm.status && statusBlocked(s)}>{s}</option>)}
+            </select>
+          </div>
+          {isIdea && <div style={{ flex: 1 }}>
+            <label style={lbl}>Kind</label>
+            <select value={fm.idea_kind ?? 'approach'} onChange={(e) => update('idea_kind', e.target.value as IdeaKind)} style={inp}>
+              {IDEA_KIND_LIST.map((kind) => <option key={kind} value={kind}>{kind.replace('_', ' ')}</option>)}
             </select>
           </div>}
         </div>
@@ -225,14 +233,14 @@ export function NodeDetail({
               <label style={lbl}>Source</label>
               <div style={{ display: 'flex', gap: 5 }}>
                 <select
-                  value={fm.source?.kind ?? 'paper'}
+                  value={sourceKind(fm.source) ?? 'paper'}
                   onChange={(e) => {
                     updateSource('kind', e.target.value);
-                    if (e.target.value !== 'paper') updateSource('paper_id', '');
+                    if (!isCited({ kind: e.target.value })) updateSource('paper_id', '');
                   }}
                   style={{ ...inp, width: 'auto', flex: '0 0 110px' }}
                 >
-                  {SOURCE_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+                  {SOURCE_KIND_LIST.map((k) => <option key={k} value={k}>{k}</option>)}
                 </select>
                 <input
                   value={fm.source?.location ?? ''}
@@ -276,19 +284,29 @@ export function NodeDetail({
               </div>
             )}
 
-            {/* Used in */}
-            {!isDefinition && <div>
-              <label style={lbl}>Used in</label>
-              <NodeTagInput
-                values={fm.used_in}
-                onChange={(v) => update('used_in', v)}
-                nodes={allNodes}
-                excludeId={id}
-                onNavigateNode={onNavigateNode}
-              />
-            </div>}
+            {/* Used in: derived from other nodes' depends_on and uses_definitions, never stored */}
+            <div>
+              <label style={lbl}>Used in (derived)</label>
+              <div style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {usedIn.length ? usedIn.map((node) => (
+                  <button key={node.id} type="button" onClick={() => onNavigateNode(node)} title={node.id}
+                    style={{ padding: '1px 7px', fontSize: 11, background: 'var(--vscode-badge-background)', color: 'var(--vscode-badge-foreground)', border: 'none', borderRadius: 9, cursor: 'pointer' }}>
+                    {node.title}
+                  </button>
+                )) : <span style={{ opacity: 0.5 }}>Nothing depends on this yet.</span>}
+              </div>
+            </div>
           </>
         )}
+
+        {/* Derived from other nodes' forward fields; nothing here is stored in this file. */}
+        {!isDefinition && !isPlan && (
+          <DerivedList label={isIdea ? 'Plans it inspired' : 'Plans'} ids={isIdea ? reverse?.inspired ?? [] : reverse?.plans ?? []} allNodes={allNodes} onNavigateNode={onNavigateNode} lbl={lbl} />
+        )}
+        {!isDefinition && !isIdea && !isPlan && <>
+          <DerivedList label="Ideas" ids={reverse?.ideas ?? []} allNodes={allNodes} onNavigateNode={onNavigateNode} lbl={lbl} />
+          {(reverse?.refutedBy.length ?? 0) > 0 && <DerivedList label="Refuted by" ids={reverse!.refutedBy} allNodes={allNodes} onNavigateNode={onNavigateNode} lbl={lbl} />}
+        </>}
 
         {isIdea && <div>
           <label style={lbl}>Related assets (optional)</label>
@@ -303,7 +321,7 @@ export function NodeDetail({
           </select>
         </div>}
 
-        {(isPlan || fm.type === 'proof_record') && (
+        {isPlan && (
           <div>
             <label style={lbl}>Target asset</label>
             <select value={fm.target_asset ?? ''} onChange={(e) => update('target_asset', e.target.value)} style={inp}>
@@ -313,11 +331,7 @@ export function NodeDetail({
             {fm.target_asset && <button type="button" onClick={() => { const asset = assets.find((n) => n.id === fm.target_asset); if (asset) onNavigateNode(asset); }}>Open target asset</button>}
             <label style={lbl}>Inspired by ideas (optional)</label>
             <NodeTagInput values={fm.inspired_by ?? []} onChange={(v) => update('inspired_by', v)} nodes={ideas} onNavigateNode={onNavigateNode} />
-            {isPlan && <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>Add a Failure section with the obstruction before choosing failed. After putting a successful proof in the asset, add an Outcome section to convert this attempt to a proof record.</div>}
-            {isPlan && <button type="button" disabled={!/^## Outcome\s*\n\s*\S/m.test(body)} title="Add an Outcome section after incorporating the proof into the asset" onClick={() => {
-              setFm((current) => ({ ...current, type: 'proof_record', status: undefined }));
-              setDirty(true);
-            }}>Convert to proof record after adding proof to asset</button>}
+            <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>Add a Failure section with the obstruction before choosing failed. After putting a successful proof in the asset, add an Outcome section saying where it lives, then choose succeeded.</div>
           </div>
         )}
       </div>
@@ -378,6 +392,24 @@ export function NodeDetail({
           onLayoutChange={onLayoutChange}
           onSplitRatioChange={onSplitRatioChange}
         />
+      </div>
+    </div>
+  );
+}
+
+/** Nodes that point at this one, with their status; derived on every refresh and never written to the file. */
+function DerivedList({ label, ids, allNodes, onNavigateNode, lbl }: { label: string; ids: string[]; allNodes: ResearchNode[]; onNavigateNode: (node: ResearchNode) => void; lbl: React.CSSProperties }) {
+  const nodes = ids.map((ref) => allNodes.find((node) => node.id === ref)).filter((node): node is ResearchNode => Boolean(node));
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label style={lbl}>{label} (derived)</label>
+      <div style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {nodes.length ? nodes.map((node) => (
+          <button key={node.id} type="button" onClick={() => onNavigateNode(node)} title={node.outdated ? 'The target proof changed after this plan succeeded' : node.id}
+            style={{ padding: '1px 7px', fontSize: 11, background: 'var(--vscode-badge-background)', color: 'var(--vscode-badge-foreground)', border: 'none', borderRadius: 9, cursor: 'pointer' }}>
+            {node.title}{node.status ? ` · ${node.status}` : ''}{node.outdated ? ' · outdated' : ''}
+          </button>
+        )) : <span style={{ opacity: 0.5 }}>None.</span>}
       </div>
     </div>
   );

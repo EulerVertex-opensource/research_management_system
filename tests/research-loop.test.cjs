@@ -15,13 +15,15 @@ function load(file) {
 }
 
 const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
-const { requiredAssetIds, researchDigest, statementDigest, validateResearchFile, safeRelativeFile } = load('../src/services/ResearchLoopModel.ts');
+const { researchDigest, statementDigest, validateResearchFile, safeRelativeFile } = load('../src/services/ResearchLoopModel.ts');
+const { requiredAssetIds, requiredResults } = load('../src/domain/project.ts');
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
-const project = '# Project\n\n## Main Problem\n\nProve A.\n\n## Current Goals\n\nFind a proof.\n\n## Required Results\n\n- main_theorem: the central claim\n\n## Known Results\n\nNone.\n';
+const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n    role: the central claim\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n\n## Background\n\nNone.\n';
+const legacyProject = '# Project\n\n## Main Problem\n\nProve A.\n\n## Current Goals\n\nFind a proof.\n\n## Required Results\n\n- main_theorem: the central claim\n\n## Known Results\n\nNone.\n';
 const asset = (proof = '', extra = {}) => matter.stringify(`\n## Statement\n\nFor every natural number n, n = n.\n${proof}`, { type: 'theorem', title: 'Main theorem', status: 'draft', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [], tags: [], ...extra });
 const plan = (id, status = 'pending', difference = '') => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\nProve reflexivity.\n\n## Plan\n\n1. [ ] Apply equality reflexivity.\n\n## Verification\n\nCheck the equality.\n${difference}${status === 'failed' ? '\n## Failure\n\nThis approach cannot establish the needed equality.\n' : ''}`, { type: 'plan', title: id, status, target_asset: 'main_theorem', inspired_by: [], tags: [] });
 const check = (target = 'main_theorem') => matter.stringify('\n## Cases checked\n\n- n = 0 and n = 1\n\n## Limitations\n\nOnly small cases.\n', { type: 'falsification_check', title: `Check ${target}`, target_asset: target, outcome: 'no_counterexample_found' });
-const record = (id) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [x] Apply reflexivity.\n\n## Verification\n\nCheck the equality.\n\n## Outcome\n\nProof incorporated into main_theorem.\n`, { type: 'proof_record', title: id, target_asset: 'main_theorem', inspired_by: [], tags: [] });
+const succeeded = (id) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [x] Apply reflexivity.\n\n## Verification\n\nCheck the equality.\n\n## Outcome\n\nProof incorporated into main_theorem.\n`, { type: 'plan', title: id, status: 'succeeded', target_asset: 'main_theorem', inspired_by: [], tags: [] });
 
 function memoryFiles(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -70,22 +72,28 @@ async function driveToReady(f) {
   f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
   await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
   f.map.set('research/assets/main_theorem.md', asset(`\n## Proof\n\nEquality is reflexive (run ${++counter}).\n`));
-  f.map.set('research/plans/attempt_1.md', record('attempt_1'));
+  f.map.set('research/plans/attempt_1.md', succeeded('attempt_1'));
   await f.core.report({ outcome: 'proved', summary: 'Proved' });
   const approval = f.core.current.approvalQueue.find((item) => item.kind === 'asset' && item.target === 'main_theorem');
   await f.core.resolveApproval(approval.id, 'approved', '', 'test');
   assert.equal((await f.core.next()).stage, 'ready');
 }
 
-const extendedProject = project.replace('- main_theorem: the central claim\n', '- main_theorem: the central claim\n- second_theorem: the new conjecture\n');
+const extendedProject = project.replace('    role: the central claim\n', '    role: the central claim\n  - id: second_theorem\n    role: the new conjecture\n');
 
 test('required results, digests, and validators', () => {
-  assert.deepEqual(requiredAssetIds(project), ['main_theorem']);
+  assert.deepEqual(requiredResults(project), [{ id: 'main_theorem', role: 'the central claim' }]);
+  // Projects not yet migrated still read their required results from the legacy section.
+  assert.deepEqual(requiredResults(legacyProject), [{ id: 'main_theorem', role: 'the central claim' }]);
+  assert.deepEqual(requiredAssetIds('# Project\n\n## Required Results\n\n- `lemma_a` supporting lemma\n- [x] main_theorem\n'), ['lemma_a', 'main_theorem']);
+  assert.equal(researchDigest(project, 'project'), researchDigest(project.replace('None.', 'Some background.'), 'project'));
+  assert.notEqual(researchDigest(project, 'project'), researchDigest(project.replace('Natural numbers.', 'Integers.'), 'project'));
+  assert.notEqual(researchDigest(project, 'project'), researchDigest(extendedProject, 'project'));
+  assert.equal(researchDigest(legacyProject, 'project'), researchDigest(legacyProject + '\n## Writing Status\n\nlater\n', 'project'));
   assert.notEqual(researchDigest(asset(), 'asset'), researchDigest(asset('\n## Proof\n\nNew proof.\n'), 'asset'));
   assert.equal(statementDigest(asset()), statementDigest(asset('\n## Proof\n\nNew proof.\n')));
   const withLink = asset().replace('natural number', '[natural number](../definitions/natural.md)');
   assert.equal(researchDigest(asset(), 'asset'), researchDigest(withLink, 'asset'));
-  assert.equal(researchDigest(project, 'project'), researchDigest(project + '\n## Writing Status\n\nlater\n', 'project'));
   assert.throws(() => safeRelativeFile('../escape.md'));
   assert.throws(() => validateResearchFile('research/assets/fake.md', matter.stringify('\n## Statement\n\nFake.\n', { type: 'theorem', title: 'Fake', status: 'approved' }), paths, new Set()), /approval is a researcher action/);
 });
@@ -97,7 +105,7 @@ test('happy path: goals, approval gates, proof record, ready, and invalidation o
   await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
   assert.equal(f.core.current.stage, 'execute');
   f.map.set('research/assets/main_theorem.md', asset('\n## Proof\n\nEquality is reflexive.\n'));
-  f.map.set('research/plans/attempt_1.md', record('attempt_1'));
+  f.map.set('research/plans/attempt_1.md', succeeded('attempt_1'));
   await f.core.report({ outcome: 'proved', summary: 'Proved' });
   assert.equal(matter(f.map.get('research/assets/main_theorem.md')).data.status, 'draft');
   const approval = f.core.current.approvalQueue.find((item) => item.kind === 'asset' && item.target === 'main_theorem');
@@ -133,10 +141,10 @@ test('ready offers extend; an extension adds a goal and keeps approved results',
   assert.equal(f.core.current.stage, 'draft_project');
   const drafting = await f.core.next();
   assert.equal(drafting.stage, 'draft_project');
-  assert.match(drafting.instruction, /keep every existing bullet.*main_theorem/);
+  assert.match(drafting.instruction, /keep every existing required_results entry \(main_theorem\)/);
   assert.match(drafting.instruction, /Also prove the second theorem/);
   await assert.rejects(() => f.core.report({ outcome: 'complete', summary: 'No change' }), /add the new goal as a new asset ID/);
-  f.map.set(paths.projectMd, extendedProject.replace('- main_theorem: the central claim\n', ''));
+  f.map.set(paths.projectMd, extendedProject.replace('  - id: main_theorem\n    role: the central claim\n', ''));
   await assert.rejects(() => f.core.report({ outcome: 'complete', summary: 'Replaced' }), /keep the existing required results main_theorem/);
   f.map.set(paths.projectMd, extendedProject);
   await f.core.report({ outcome: 'complete', summary: 'Added second_theorem' });
@@ -174,7 +182,7 @@ test('execution may not change the statement, and failed plans need a difference
   f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
   await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
   f.map.set('research/assets/main_theorem.md', asset('\n## Proof\n\nDone.\n').replace('n = n', 'n = n + 0'));
-  f.map.set('research/plans/attempt_1.md', record('attempt_1'));
+  f.map.set('research/plans/attempt_1.md', succeeded('attempt_1'));
   await assert.rejects(() => f.core.report({ outcome: 'proved', summary: 'Proved' }), /statement changed/);
   f.map.set('research/assets/main_theorem.md', asset());
   f.map.set('research/plans/attempt_1.md', plan('attempt_1', 'failed'));
@@ -185,6 +193,30 @@ test('execution may not change the statement, and failed plans need a difference
   f.map.set('research/plans/attempt_2.md', plan('attempt_2', 'pending', '\n## Difference from failed plans\n\n- attempt_1: use induction instead\n'));
   await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_2' });
   assert.equal(f.core.current.stage, 'execute');
+});
+
+test('a plan stage writes one plan, and a proof marks it succeeded rather than a legacy proof record', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
+  f.map.set('research/plans/attempt_2.md', plan('attempt_2'));
+  await assert.rejects(() => f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' }), /Write one plan per plan stage; found 2 new plans/);
+  f.map.delete('research/plans/attempt_2.md');
+  await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
+  f.map.set('research/assets/main_theorem.md', asset('\n## Proof\n\nEquality is reflexive.\n'));
+  f.map.set('research/plans/attempt_1.md', succeeded('attempt_1').replace('type: plan', 'type: proof_record').replace('status: succeeded\n', ''));
+  await assert.rejects(() => f.core.report({ outcome: 'proved', summary: 'Proved' }), /proof_record is a legacy type/);
+  f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
+  await assert.rejects(() => f.core.report({ outcome: 'proved', summary: 'Proved' }), /must get status succeeded and a ## Outcome/);
+  f.map.set('research/plans/attempt_1.md', succeeded('attempt_1'));
+  await f.core.report({ outcome: 'proved', summary: 'Proved' });
+  assert.equal(f.core.current.stage, 'select');
+});
+
+test('whole-workspace validation reports a node ID used in two research folders', async () => {
+  const f = fixture({ 'research/assets/main_theorem.md': asset(), 'research/ideas/main_theorem.md': matter.stringify('\nSame ID.\n', { type: 'idea', title: 'Clash', status: 'draft' }) });
+  await f.core.start('claude');
+  assert.ok((await f.core.validateAll()).some((problem) => /research\/ideas\/main_theorem\.md: node ID main_theorem is already used by research\/assets\/main_theorem\.md/.test(problem)));
 });
 
 test('three failed approaches ask the researcher; silence parks the asset', async () => {
@@ -231,6 +263,81 @@ test('confirmed counterexample deprecates the asset and returns to the project g
   assert.equal((await f.core.next()).stage, 'draft_project');
 });
 
+test('a confirmed counterexample abandons the refuted asset\'s pending plans', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
+  f.map.set('research/assets/counterexample_1.md', matter.stringify('\n## Assumptions\n\nAll hypotheses hold.\n\n## Calculation\n\nThe conclusion fails.\n\n## Verdict\n\nconfirmed\n', { type: 'example', title: 'Counterexample', status: 'draft', refutes: 'main_theorem' }));
+  await f.core.confirmCounterexample('counterexample_1', 'test');
+  const abandoned = matter(f.map.get('research/plans/attempt_1.md'));
+  assert.equal(abandoned.data.status, 'abandoned');
+  assert.match(abandoned.content, /## Outcome\n\nTarget main_theorem was refuted by counterexample counterexample_1/);
+});
+
+test('a proof stamps proof_digest on its plan, and show marks the plan outdated after the proof changes', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  f.map.set('research/plans/attempt_1.md', plan('attempt_1'));
+  await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
+  f.map.set('research/assets/main_theorem.md', asset('\n## Proof\n\nEquality is reflexive.\n'));
+  f.map.set('research/plans/attempt_1.md', succeeded('attempt_1'));
+  await f.core.report({ outcome: 'proved', summary: 'Proved' });
+  assert.match(matter(f.map.get('research/plans/attempt_1.md')).data.proof_digest, /^[0-9a-f]{64}$/);
+  assert.match(await f.core.show('main_theorem'), /- Plans: attempt_1 \(succeeded\)/);
+  f.map.set('research/assets/main_theorem.md', asset('\n## Proof\n\nA different argument.\n'));
+  assert.match(await f.core.show('main_theorem'), /attempt_1 \(succeeded, outdated: the proof changed since\)/);
+  assert.doesNotMatch(f.map.get('research/assets/main_theorem.md'), /attempt_1/);
+});
+
+test('a researcher direction is a decision, not also an idea', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  const question = await f.core.askQuestion('blocked', 'Three plans failed.', { assetId: 'main_theorem' });
+  const ideasBefore = [...f.map.keys()].filter((file) => file.startsWith('research/ideas/')).length;
+  await f.core.answerQuestion(question.id, 'answer', 'Try induction on n.', 'test');
+  assert.equal([...f.map.keys()].filter((file) => file.startsWith('research/ideas/')).length, ideasBefore);
+  assert.ok([...f.map.entries()].some(([file, raw]) => file.startsWith('research/decisions/') && /kind: direction/.test(raw) && /Try induction on n\./.test(raw)));
+  assert.equal(f.core.current.stage, 'plan');
+});
+
+test('an unanswered question becomes a question idea that a late answer resolves', async () => {
+  const f = fixture({ 'research/assets/main_theorem.md': asset() });
+  await f.core.start('claude');
+  const question = await f.core.askQuestion('discussion', 'Is compactness needed?', { assetId: 'main_theorem' });
+  await f.core.autoResolveQuestion(question.id);
+  const [ideaFile] = [...f.map.keys()].filter((file) => file.startsWith('research/ideas/'));
+  assert.deepEqual([matter(f.map.get(ideaFile)).data.idea_kind, matter(f.map.get(ideaFile)).data.status], ['question', 'draft']);
+  await f.core.answerQuestion(question.id, 'answer', 'Yes, for the limit argument.', 'test');
+  const resolved = matter(f.map.get(ideaFile));
+  assert.equal(resolved.data.status, 'resolved');
+  assert.match(resolved.data.resolved_by, /^decision_/);
+  assert.ok(f.map.has(`research/decisions/${resolved.data.resolved_by}.md`));
+  assert.match(resolved.content, /## Resolution\n\nAnswered by the researcher: Yes, for the limit argument\./);
+});
+
+test('textbook results are cited, not falsified or proved', async () => {
+  const f = fixture({ 'research/papers.md': '# Papers\n\n## rudin\n\nhttps://example.org/rudin\n' });
+  await f.core.start('claude', { goal: 'Use a textbook result.' });
+  f.map.set(paths.projectMd, project);
+  await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  await f.core.resolveApproval(f.core.current.approvalQueue[0].id, 'approved', '', 'test');
+  await f.core.next();
+  f.map.set('research/assets/main_theorem.md', asset('', { source: { kind: 'textbook', paper_id: 'rudin', location: 'Theorem 7.9' } }));
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await f.core.next()).stage, 'waiting');
+  assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'citation' && item.target === 'main_theorem'));
+});
+
+test('renaming source.kind self_proved to original keeps approvals valid', () => {
+  const legacy = asset().replace('kind: self_proved', 'kind: self_proved');
+  const renamed = asset('', { source: { kind: 'original' } });
+  assert.match(legacy, /kind: self_proved/);
+  assert.equal(researchDigest(legacy, 'asset'), researchDigest(renamed, 'asset'));
+  assert.equal(statementDigest(legacy), statementDigest(renamed));
+  assert.notEqual(researchDigest(legacy, 'asset'), researchDigest(asset('', { source: { kind: 'note' } }), 'asset'));
+});
+
 test('agent-set approvals are reverted and dependency statement changes invalidate dependants', async () => {
   const f = fixture({ 'research/assets/main_theorem.md': asset('', { status: 'approved', depends_on: ['key_lemma'] }), 'research/assets/key_lemma.md': matter.stringify('\n## Statement\n\nA lemma.\n', { type: 'lemma', title: 'Key lemma', status: 'approved', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [] }) });
   await f.core.start('codex');
@@ -250,6 +357,7 @@ test('ideas remain after conversion to a linked executable plan', async () => {
   const ideaId = await f.core.saveIdea('Try reflexivity', 'A possibly useful observation.', ['main_theorem']);
   const planId = await f.core.convertIdea(ideaId, 'main_theorem', 'Prove reflexivity', 'Check the assumptions\nApply equality', 'Verify each equality step');
   assert.equal(matter(f.map.get(`research/ideas/${ideaId}.md`)).data.type, 'idea');
+  assert.deepEqual([matter(f.map.get(`research/ideas/${ideaId}.md`)).data.status, matter(f.map.get(`research/ideas/${ideaId}.md`)).data.resolved_by], ['resolved', planId]);
   const parsed = matter(f.map.get(`research/plans/${planId}.md`));
   assert.deepEqual(parsed.data.inspired_by, [ideaId]);
   assert.match(parsed.content, /2\. \[ \] Apply equality/);
@@ -326,7 +434,7 @@ test('CLI extend reopens an approved project for a new goal', () => {
     const extended = p.run(['extend', '--goal', 'New conjecture', '--provider', 'codex']);
     assert.equal(extended.status, 0, extended.stderr);
     assert.match(extended.stdout, /draft_project/);
-    assert.match(extended.stdout, /keep every existing bullet/);
+    assert.match(extended.stdout, /keep every existing required_results entry/);
     p.write('research/project.md', extendedProject);
     const drafted = p.run(['report', 'complete', '--summary', 'Added']);
     assert.equal(drafted.status, 0, drafted.stderr);

@@ -14,6 +14,7 @@ import { LoopGit } from './LoopGit';
 import { ResearchSync } from './ResearchSync';
 import { NodeGitRunner, runShell } from '../cli/nodeGit';
 import { loadSyncConfig } from '../cli/nodeFiles';
+import { toIdeaKind } from '../domain/nodeKinds';
 
 function extensionVersion(): string | undefined {
   return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === 'tianhao.research-management-system')?.packageJSON?.version;
@@ -174,7 +175,10 @@ export class LoopHost implements vscode.Disposable {
       return this.awaitInteraction(request.id, slice);
     }
     if (name === 'await_answer') return this.awaitInteraction(String(args.id ?? ''), slice);
-    if (name === 'record_idea') return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent') }));
+    if (name === 'record_idea') {
+      const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
+      return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent', tags, toIdeaKind(args.kind, tags)) }));
+    }
     if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary(), brief: core.briefStatus() }));
     if (name === 'confirm_publish') return { confirmed: await this.confirmPublish(String(args.detail ?? '')) };
     return { answered: false, reason: `unknown tool ${name}` };

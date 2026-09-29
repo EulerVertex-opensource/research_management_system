@@ -41,46 +41,10 @@ const webviewConfig = {
   },
 };
 
-const assetOrderCliConfig = {
-  entryPoints: ['src/cli/orderAssets.ts'],
+const researchMaintenanceCliConfig = {
+  entryPoints: ['src/cli/researchMaintenance.ts'],
   bundle: true,
-  outfile: 'out/order-assets.cjs',
-  format: 'cjs',
-  platform: 'node',
-  mainFields: ['module', 'main'],
-};
-
-const definitionMigrationCliConfig = {
-  entryPoints: ['src/cli/migrateDefinitions.ts'],
-  bundle: true,
-  outfile: 'out/migrate-definitions.cjs',
-  format: 'cjs',
-  platform: 'node',
-  mainFields: ['module', 'main'],
-};
-
-const researchInterlinksCliConfig = {
-  entryPoints: ['src/cli/linkResearchNodes.ts'],
-  bundle: true,
-  outfile: 'out/link-research-nodes.cjs',
-  format: 'cjs',
-  platform: 'node',
-  mainFields: ['module', 'main'],
-};
-
-const proofIdeasCliConfig = {
-  entryPoints: ['src/cli/syncProofIdeas.ts'],
-  bundle: true,
-  outfile: 'out/sync-proof-ideas.cjs',
-  format: 'cjs',
-  platform: 'node',
-  mainFields: ['module', 'main'],
-};
-
-const ideaPlanMigrationCliConfig = {
-  entryPoints: ['src/cli/migrateIdeaPlans.ts'],
-  bundle: true,
-  outfile: 'out/migrate-idea-plans.cjs',
+  outfile: 'out/research-maintenance.cjs',
   format: 'cjs',
   platform: 'node',
   mainFields: ['module', 'main'],
@@ -125,34 +89,20 @@ async function main() {
     path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'LICENSE'),
     path.join('out', 'webview', 'PDFJS-LICENSE')
   );
+  const configs = [
+    extensionConfig,
+    webviewConfig,
+    researchMaintenanceCliConfig,
+    manuscriptWritingCliConfig,
+    researchLoopCliConfig,
+    researchLoopMcpConfig,
+  ];
   if (isWatch) {
-    const [extCtx, webCtx, cliCtx, migrationCtx, interlinksCtx, proofIdeasCtx, ideaPlanMigrationCtx, writingCtx, loopCtx, mcpCtx] = await Promise.all([
-      esbuild.context(extensionConfig),
-      esbuild.context(webviewConfig),
-      esbuild.context(assetOrderCliConfig),
-      esbuild.context(definitionMigrationCliConfig),
-      esbuild.context(researchInterlinksCliConfig),
-      esbuild.context(proofIdeasCliConfig),
-      esbuild.context(ideaPlanMigrationCliConfig),
-      esbuild.context(manuscriptWritingCliConfig),
-      esbuild.context(researchLoopCliConfig),
-      esbuild.context(researchLoopMcpConfig),
-    ]);
-    await Promise.all([extCtx.watch(), webCtx.watch(), cliCtx.watch(), migrationCtx.watch(), interlinksCtx.watch(), proofIdeasCtx.watch(), ideaPlanMigrationCtx.watch(), writingCtx.watch(), loopCtx.watch(), mcpCtx.watch()]);
+    const contexts = await Promise.all(configs.map((config) => esbuild.context(config)));
+    await Promise.all(contexts.map((context) => context.watch()));
     console.log('Watching for changes...');
   } else {
-    await Promise.all([
-      esbuild.build(extensionConfig),
-      esbuild.build(webviewConfig),
-      esbuild.build(assetOrderCliConfig),
-      esbuild.build(definitionMigrationCliConfig),
-      esbuild.build(researchInterlinksCliConfig),
-      esbuild.build(proofIdeasCliConfig),
-      esbuild.build(ideaPlanMigrationCliConfig),
-      esbuild.build(manuscriptWritingCliConfig),
-      esbuild.build(researchLoopCliConfig),
-      esbuild.build(researchLoopMcpConfig),
-    ]);
+    await Promise.all(configs.map((config) => esbuild.build(config)));
     console.log('Build complete.');
   }
 }

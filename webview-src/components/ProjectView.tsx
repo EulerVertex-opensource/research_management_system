@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutMode, ProjectPathSummary } from '../../src/models/types';
+import { LayoutMode, ProjectPathSummary, ProjectSummary } from '../../src/models/types';
+import { StatusBadge } from './StatusBadge';
+import { MarkdownPreview } from './MarkdownPreview';
 import { MarkdownEditor } from './MarkdownEditor';
 
 interface Props {
   content: string | null;
+  summary: ProjectSummary | null;
+  onOpenNode: (id: string) => void;
   projectRoot: string;
   initialized: boolean;
   paths: ProjectPathSummary | null;
@@ -19,6 +23,8 @@ interface Props {
 
 export function ProjectView({
   content,
+  summary,
+  onOpenNode,
   projectRoot,
   initialized,
   paths,
@@ -128,6 +134,8 @@ export function ProjectView({
         </button>
       </div>
 
+      {summary && <ProjectStatus summary={summary} onOpenNode={onOpenNode} />}
+
       {/* Editor */}
       <div style={{ flex: 1, overflow: 'hidden' }}>
         <MarkdownEditor
@@ -139,6 +147,45 @@ export function ProjectView({
           onSplitRatioChange={onSplitRatioChange}
           onOpenNodeLink={onOpenNodeLink}
         />
+      </div>
+    </div>
+  );
+}
+
+/** Read-only status derived from the research nodes; project.md itself holds only the contract. */
+function ProjectStatus({ summary, onOpenNode }: { summary: ProjectSummary; onOpenNode: (id: string) => void }) {
+  const link: React.CSSProperties = { background: 'none', border: 'none', padding: 0, color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', fontSize: 12 };
+  const heading: React.CSSProperties = { fontSize: 10, opacity: 0.55, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 };
+  return (
+    <div style={{ flexShrink: 0, padding: '8px 14px', borderBottom: '1px solid var(--vscode-panel-border)', display: 'flex', gap: 24, flexWrap: 'wrap', fontSize: 12, maxHeight: 180, overflowY: 'auto' }}>
+      {summary.legacy && (
+        <div style={{ flexBasis: '100%', opacity: 0.8 }}>
+          This project.md predates the current format. Run <code>research-maintenance migrate --preview</code> (or reload the window and accept the migration prompt) to move required results into frontmatter.
+        </div>
+      )}
+      <div>
+        <div style={heading}>Required results</div>
+        {summary.required.length ? summary.required.map((item) => (
+          <div key={item.id} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 2 }}>
+            {item.status ? <StatusBadge status={item.status as never} /> : <span style={{ opacity: 0.6 }}>missing</span>}
+            {item.title ? <button type="button" style={link} onClick={() => onOpenNode(item.id)}>{item.title}</button> : <code>{item.id}</code>}
+            {item.role && <MarkdownPreview inline content={item.role} style={{ opacity: 0.7 }} />}
+          </div>
+        )) : <span style={{ opacity: 0.6 }}>None listed yet.</span>}
+      </div>
+      <div>
+        <div style={heading}>Results</div>
+        <div>{summary.assets.approved} approved, {summary.assets.draft} draft</div>
+      </div>
+      <div>
+        <div style={heading}>Open questions</div>
+        {summary.openQuestions.length ? summary.openQuestions.map((question) => (
+          <div key={question.id}><button type="button" style={link} onClick={() => onOpenNode(question.id)}>{question.title}</button></div>
+        )) : <span style={{ opacity: 0.6 }}>None recorded.</span>}
+      </div>
+      <div>
+        <div style={heading}>Manuscript</div>
+        {summary.writingSections.length ? <div>{summary.writingSections.join(' → ')}</div> : <span style={{ opacity: 0.6 }}>No sections planned yet.</span>}
       </div>
     </div>
   );

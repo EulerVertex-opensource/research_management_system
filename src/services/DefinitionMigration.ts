@@ -47,8 +47,6 @@ export function planDefinitionMigration(assets: AssetInput[], definitions: Asset
     for (const id of parsed.data.uses_definitions ?? []) {
       if (!allDefinitionIds.has(id)) throw new Error(`${item.id}.md uses unknown definition ${id}`);
     }
-    const usedIn = Array.isArray(parsed.data.used_in) ? parsed.data.used_in as string[] : [];
-    if (usedIn.some((id) => movedIds.has(id))) review.push(`${item.id}.md: used_in references a moved definition; review its meaning`);
     return { id: item.id, raw: converted.length ? stringifyMarkdown(parsed.content, parsed.data) : item.raw };
   });
   for (const item of ideas) {
@@ -57,6 +55,7 @@ export function planDefinitionMigration(assets: AssetInput[], definitions: Asset
       review.push(`${item.id}.md: related_assets references a moved definition; review its meaning`);
     }
   }
+  // Both dependency graphs must stay valid (no missing, inactive, or cyclic links) after the move.
   const assetOrder = computeAssetOrder(updatedAssets);
   const definitionOrder = computeAssetOrder([...definitions, ...migratedDefinitions], 'definition');
   return { moved, updatedAssets, assetOrder, definitionOrder, review };

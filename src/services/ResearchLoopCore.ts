@@ -6,9 +6,13 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  MAX_FAILED_PLANS, PROVABLE_TYPES, QuestionKind, SNAPSHOT_PATH, STATE_PATH, StageReport, hasSection, isApproved, isWaitingForHuman, newState,
-  projectSection, proofText, requiredAssetIds, researchDigest, sectionContent, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
+  QuestionKind, SNAPSHOT_PATH, STATE_PATH, StageReport, isApproved, isWaitingForHuman, newState,
+  proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
+import { IdeaKind, MAX_FAILED_PLANS, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { projectSection, requiredAssetIds } from '../domain/project';
+import { duplicateIds, isCited } from '../domain/schema';
+import { hasSection, sectionContent } from '../domain/sections';
 import { approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
 import {
@@ -16,8 +20,9 @@ import {
   failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampCheck,
 } from './ResearchRecords';
 import {
-  ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, renderContext, renderShow,
+  ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, projectPart, renderContext, renderShow,
 } from './ResearchContext';
+import { ideaPlanProblems } from './ProofIdeas';
 
 export interface CoreOptions {
   now?: () => string;
@@ -202,7 +207,7 @@ export class ResearchLoopCore {
     const added = required.filter((id) => !extension.baselineRequired.includes(id));
     const problems: string[] = [];
     if (removed.length) problems.push(`project.md: keep the existing required results ${removed.join(', ')}; extending only adds results (deprecate an asset to retire it).`);
-    if (!added.length) problems.push('project.md: add the new goal as a new asset ID under ## Required Results.');
+    if (!added.length) problems.push('project.md: add the new goal as a new asset ID under required_results.');
     return problems;
   }
 
@@ -305,7 +310,7 @@ export class ResearchLoopCore {
   async approve(kind: 'project' | 'asset' | 'definition', target: string, source: string): Promise<void> {
     if (kind === 'project') {
       const raw = await this.files.readFile(this.paths.projectMd);
-      if (!requiredAssetIds(raw).length) throw new Error('Add asset IDs under ## Required Results before approving the project.');
+      if (!requiredAssetIds(raw).length) throw new Error('Add asset IDs to required_results in project.md before approving the project.');
       await this.record('project', 'project', raw, source);
     } else {
       const file = `${kind === 'asset' ? this.paths.assets : this.paths.definitions}/${target}.md`;
@@ -359,6 +364,7 @@ export class ResearchLoopCore {
       const approvals = await this.approvals();
       approvals.records = approvals.records.filter((record) => !(record.kind === 'asset' && record.target === target));
       await this.writeApprovals(approvals);
+      await this.abandonPlans(target, `Target ${target} was refuted by counterexample ${exampleId} and deprecated.`);
     }
     if (this.state) {
       await this.clearPark(target, `refuted by ${exampleId}`);
@@ -367,6 +373,20 @@ export class ResearchLoopCore {
     }
     await this.event('refuted', { assetId: target, exampleId, source });
     return target;
+  }
+
+  /** Pending plans of a target that is no longer pursued become abandoned, with the reason as their Outcome. */
+  private async abandonPlans(target: string, reason: string): Promise<string[]> {
+    const abandoned: string[] = [];
+    for (const plan of await this.plans()) {
+      if (plan.data.type !== 'plan' || plan.data.target_asset !== target || plan.data.status !== 'pending') continue;
+      const parsed = parseMarkdown(plan.raw);
+      parsed.data.status = 'abandoned';
+      await this.writeOwned(plan.file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Outcome\n\n${reason}\n`, parsed.data));
+      abandoned.push(plan.id);
+    }
+    if (abandoned.length) await this.event('plans_abandoned', { target, plans: abandoned });
+    return abandoned;
   }
 
   async rejectCounterexample(exampleId: string, reason: string, source: string): Promise<void> {
@@ -447,8 +467,9 @@ export class ResearchLoopCore {
     const state = this.require();
     const question = state.pendingQuestion?.id === questionId ? state.pendingQuestion : undefined;
     if (!question) {
-      // Late answer to an expired question: keep it for the agent to pick up.
+      // Late answer to an expired question: keep it for the agent to pick up, and settle the question idea it left behind.
       state.answers.push({ questionId, decision, text, answeredAt: this.now(), source });
+      if (decision === 'answer' && text.trim()) await this.resolveQuestionIdeas(questionId, text.trim());
       await this.save();
       await this.event('question_answered', { questionId, decision, hasText: Boolean(text.trim()), late: true });
       return;
@@ -458,7 +479,10 @@ export class ResearchLoopCore {
     await this.event('question_answered', { questionId, kind: question.kind, decision, hasText: Boolean(text.trim()) });
     const assetId = question.assetId;
     if (decision === 'answer' && text.trim()) state.researcherInput = { kind: question.kind, text: text.trim(), at: this.now() };
-    if (decision === 'answer' && text.trim() && question.kind === 'discussion') await this.writeDecision('answer', assetId ?? 'project', `${question.prompt}\n\n${text.trim()}`);
+    if (decision === 'answer' && text.trim() && question.kind === 'discussion') {
+      const decisionId = await this.writeDecision('answer', assetId ?? 'project', `${question.prompt}\n\n${text.trim()}`);
+      await this.resolveQuestionIdeas(questionId, undefined, decisionId);
+    }
     if (question.kind === 'goals') {
       if (decision === 'answer' && text.trim()) await this.setStage('draft_project');
       else if (projectSection(await this.files.readFile(this.paths.projectMd).catch(() => ''), 'Main Problem')) await this.setStage('draft_project');
@@ -466,8 +490,7 @@ export class ResearchLoopCore {
     } else if (question.kind === 'blocked' && assetId) {
       if (decision === 'answer' && text.trim()) {
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
-        await this.saveIdea(`Direction for ${assetId}`, text, [assetId], 'researcher');
-        // The direction answers every failed plan so far; the shared record resets the failure count on every machine.
+        // The decision record is the one home of a direction (plan packs read the latest one). It answers every failed plan so far; the shared record resets the failure count on every machine.
         await this.writeDecision('direction', assetId, text, { failedPlansAtDirection: await this.failedPlans(assetId) });
         delete state.parked[assetId];
         await this.setStage('plan', { assetId, planId: undefined });
@@ -476,11 +499,11 @@ export class ResearchLoopCore {
         await this.setStage('select');
       }
     } else if (question.kind === 'counterexample_review') {
-      if (decision === 'answer' && text.trim()) await this.saveIdea(`Counterexample review for ${assetId ?? 'project'}`, text, assetId ? [assetId] : [], 'researcher');
+      if (decision === 'answer' && text.trim()) await this.saveIdea(`Counterexample review for ${assetId ?? 'project'}`, text, assetId ? [assetId] : [], 'researcher', [], 'observation');
       await this.save();
     } else {
       if (decision === 'skip' || !text.trim()) {
-        await this.saveIdea(`Open question: ${question.prompt.slice(0, 60)}`, `${question.prompt}\n\nThe researcher did not answer; the agent proceeded with its stated default.`, assetId ? [assetId] : [], 'agent', ['open-question']);
+        await this.saveIdea(`Open question: ${question.prompt.slice(0, 60)}`, `${question.prompt}\n\nThe researcher did not answer; the agent proceeded with its stated default.`, assetId ? [assetId] : [], 'agent', ['open-question'], 'question', { question_id: questionId });
       }
       await this.save();
     }
@@ -662,12 +685,12 @@ export class ResearchLoopCore {
 
   // ---------- ideas ----------
 
-  async saveIdea(title: string, body: string, relatedAssets: string[], origin: 'researcher' | 'agent' = 'researcher', tags: string[] = []): Promise<string> {
+  async saveIdea(title: string, body: string, relatedAssets: string[], origin: 'researcher' | 'agent' = 'researcher', tags: string[] = [], ideaKind: IdeaKind = 'approach', extra: Record<string, string> = {}): Promise<string> {
     if (!body.trim()) throw new Error('Idea text is required.');
     const assetIds = new Set((await this.files.listFiles(this.paths.assets)).map((file) => path.posix.basename(file, '.md')));
     for (const asset of relatedAssets) if (!assetIds.has(asset)) throw new Error(`Unknown related asset: ${asset}`);
     const ideaId = `idea_${this.id().replace(/-/g, '').slice(0, 12)}`;
-    const raw = stringifyMarkdown(`\n${body.trim()}\n`, { type: 'idea', title: title.trim() || 'Untitled idea', status: 'draft', origin, related_assets: relatedAssets, tags });
+    const raw = stringifyMarkdown(`\n${body.trim()}\n`, { type: 'idea', title: title.trim() || 'Untitled idea', status: 'draft', idea_kind: ideaKind, origin, related_assets: relatedAssets, tags, ...extra });
     await this.files.writeFile(`${this.paths.ideas}/${ideaId}.md`, raw);
     await this.event('idea_saved', { ideaId, relatedAssets, origin });
     return ideaId;
@@ -684,9 +707,35 @@ export class ResearchLoopCore {
     const difference = failed.length ? `\n## Difference from failed plans\n\n${failed.map((id) => `- ${id}: new route from idea ${ideaId}`).join('\n')}\n` : '';
     const raw = stringifyMarkdown(`\n## Goal\n\nTarget: [asset](../assets/${assetId}.md)\n\n${goal.trim()}\n\n## Plan\n\n${checklist}\n\n## Verification\n\n${verification.trim()}\n${difference}`, { type: 'plan', title: goal.trim().slice(0, 80), status: 'pending', target_asset: assetId, inspired_by: [ideaId], tags: [] });
     await this.files.writeFile(`${this.paths.plans}/${planId}.md`, raw);
+    await this.resolveIdea(ideaId, planId);
     if (this.state?.parked[assetId]) { await this.clearPark(assetId, `new plan ${planId} from idea ${ideaId}`); await this.save(); }
     await this.event('idea_converted', { ideaId, planId, assetId });
     return planId;
+  }
+
+  /** Mark an idea resolved by a decision, plan, or asset; the idea itself is kept. */
+  async resolveIdea(ideaId: string, resolvedBy: string, note?: string): Promise<void> {
+    const file = `${this.paths.ideas}/${ideaId}.md`;
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
+    if (parsed.data.status === 'resolved' && parsed.data.resolved_by === resolvedBy) return;
+    parsed.data.status = 'resolved';
+    parsed.data.resolved_by = resolvedBy;
+    const content = note ? `${parsed.content.trimEnd()}\n\n## Resolution\n\n${note}\n` : parsed.content;
+    await this.files.writeFile(file, stringifyMarkdown(content, parsed.data));
+    await this.event('idea_resolved', { ideaId, resolvedBy });
+  }
+
+  /** Question ideas left by an unanswered question, resolved once the researcher answers it. */
+  private async resolveQuestionIdeas(questionId: string, lateAnswer?: string, decisionId?: string): Promise<void> {
+    for (const file of await this.files.listFiles(this.paths.ideas)) {
+      let data: Record<string, any>;
+      try { data = parseMarkdown(await this.files.readFile(file)).data; } catch { continue; }
+      if (data.question_id !== questionId || data.status !== 'draft') continue;
+      const id = path.posix.basename(file, '.md');
+      const by = decisionId ?? await this.writeDecision('answer', Array.isArray(data.related_assets) && data.related_assets[0] ? String(data.related_assets[0]) : 'project', `${String(data.title ?? '')}\n\n${lateAnswer ?? ''}`);
+      await this.resolveIdea(id, by, lateAnswer ? `Answered by the researcher: ${lateAnswer}` : undefined);
+    }
   }
 
   // ---------- selection ----------
@@ -755,8 +804,8 @@ export class ResearchLoopCore {
         await this.event('approval_invalidated', { id, reason: 'no_record' });
         asset.data.status = 'draft';
       }
-      if (asset.data.source?.kind === 'paper') {
-        await this.enqueueApproval('citation', id, `Check the cited source ${asset.data.source.paper_id} (${asset.data.source.location ?? 'location missing'}) against the statement.`);
+      if (isCited(asset.data.source)) {
+        await this.enqueueApproval('citation', id, `Check the cited ${asset.data.source.kind} ${asset.data.source.paper_id} (${asset.data.source.location ?? 'location missing'}) against the statement.`);
         settled.add(id); continue;
       }
       if (!PROVABLE_TYPES.has(asset.data.type)) {
@@ -872,7 +921,7 @@ export class ResearchLoopCore {
     if (id === 'project') {
       const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
       await this.event('context_request', { id, sections, stage: this.state?.stage });
-      return sections.length ? sections.map((heading) => `## ${heading}\n\n${projectSection(project, heading)}`).join('\n\n') : project;
+      return sections.length ? sections.map((heading) => `## ${heading}\n\n${projectPart(project, heading)}`).join('\n\n') : project;
     }
     const folders: Array<[string, string]> = [['asset', this.paths.assets], ['definition', this.paths.definitions], ['plan', this.paths.plans], ['idea', this.paths.ideas], ['check', this.shared.checks]];
     for (const [kind, folder] of folders) {
@@ -881,7 +930,8 @@ export class ResearchLoopCore {
       if (raw === undefined) continue;
       const parsed = parseMarkdown(raw);
       await this.event('context_request', { id, kind, sections, stage: this.state?.stage });
-      return renderShow({ id, file, raw, data: parsed.data, body: parsed.content }, sections, kind);
+      const shown = renderShow({ id, file, raw, data: parsed.data, body: parsed.content }, sections, kind);
+      return kind === 'asset' && !sections.length ? `${shown}\n\n${await this.derivedForAsset(id, raw)}` : shown;
     }
     const paper = `${this.paths.papers}/${id}/paper.md`;
     const raw = await this.files.readFile(paper).catch(() => undefined);
@@ -942,15 +992,15 @@ export class ResearchLoopCore {
       case 'discuss_goals':
         return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: ${LOOP_COMMAND} question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
-        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only: fill ## Main Problem, ## Background, ## Current Goals, ## Required Results (one bullet per stable snake_case asset ID, "- id: role"), ## Known Results, ## Open Questions. Do not claim approval.${state.extension && !state.extension.projectApproved ? ` This extends an approved project: keep every existing bullet under ## Required Results (${state.extension.baselineRequired.join(', ')}) and leave approved statements unchanged; add the new goal as new asset ID(s) and update ## Current Goals.` : ''}${input}${report('complete|question')}`;
+        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? ` This extends an approved project: keep every existing required_results entry (${state.extension.baselineRequired.join(', ')}) and leave approved statements unchanged; add the new goal as new asset ID(s) and update ## Intended Contribution.` : ''}${input}${report('complete|question')}`;
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
         const brief = state.scaffoldBrief;
-        return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind self_proved (unless genuinely sourced), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Do not modify existing assets or definitions. Then run order-assets and link-research-nodes.${input}${report('complete|question')}`;
+        return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
       }
       case 'sources':
-        return `Stage sources. Find results from indexed papers (or a verifiable new paper) that the required results can use. For a new paper append a ## slug section with a stable DOI/arXiv/publisher URL to ${this.paths.paperIndex} and a matching BibTeX entry to ${this.paths.bibliography}; never change existing entries. Create only draft, paper-sourced assets (paper_id and exact location) and draft definitions. If a source cannot be verified, do not cite it: ask the researcher or record an idea. Return none when nothing verifiable exists.${report('complete|none|question')}`;
+        return `Stage sources. Find results from indexed papers (or a verifiable new paper) that the required results can use; import-math-paper and extract-research-nodes cover transcription and extraction. For a new paper append a ## slug section with a stable DOI/arXiv/publisher URL to ${this.paths.paperIndex} and a matching BibTeX entry to ${this.paths.bibliography}; never change existing entries. Create only draft, paper-sourced assets (paper_id and exact location) and draft definitions. If a source cannot be verified, do not cite it: ask the researcher or record an idea. Return none when nothing verifiable exists.${report('complete|none|question')}`;
       case 'falsify':
         return `Stage falsify for asset ${asset}. Use the falsify-asset skill: try to refute the exact statement. A candidate must be a new draft example in ${this.paths.assets}/ with refutes: ${asset}, ## Assumptions, ## Calculation; return candidate --counterexample <id>. With no counterexample, write one falsification check ${this.shared.checks}/check_${asset}_<short_slug>.md (type falsification_check, title, target_asset: ${asset}, outcome: no_counterexample_found, ## Cases checked listing each family tried, ## Limitations naming what was not covered) and return none. A failed proof attempt is not a counterexample.${input}${report('candidate|none|question')}`;
       case 'verify_counterexample':
@@ -960,7 +1010,7 @@ export class ResearchLoopCore {
         return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID).`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report('complete --plan <id>|question')}`;
       }
       case 'execute':
-        return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft) and convert the plan to type proof_record (no status) with ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
+        return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft), then set the plan status succeeded and add ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
       case 'waiting':
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
@@ -969,6 +1019,17 @@ export class ResearchLoopCore {
       default:
         return `Run: ${LOOP_COMMAND} next`;
     }
+  }
+
+  /** Plans, ideas, and counterexamples that point at an asset; derived on request, never stored in the asset. */
+  private async derivedForAsset(assetId: string, raw: string): Promise<string> {
+    const current = proofDigest(raw);
+    const plans = (await this.plans()).filter((plan) => plan.data.target_asset === assetId)
+      .map((plan) => `${plan.id} (${String(plan.data.status)}${plan.data.status === 'succeeded' && typeof plan.data.proof_digest === 'string' && plan.data.proof_digest !== current ? ', outdated: the proof changed since' : ''})`);
+    const ideas = [...(await this.collect(this.paths.ideas)).values()].filter((idea) => Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId)).map((idea) => `${idea.id} (${String(idea.data.idea_kind ?? 'approach')}, ${String(idea.data.status)})`);
+    const refutedBy = [...(await this.collect(this.paths.assets)).values()].filter((node) => node.data.refutes === assetId).map((node) => `${node.id} (${String(node.data.status)})`);
+    const line = (label: string, items: string[]) => `- ${label}: ${items.length ? items.join(', ') : 'none'}`;
+    return ['### Derived relations (not stored in the file)', line('Plans', plans), line('Ideas', ideas), line('Refuted by', refutedBy)].join('\n');
   }
 
   // ---------- report and validation ----------
@@ -1027,7 +1088,7 @@ export class ResearchLoopCore {
       if (!allowedFiles.has(file) && !allowedFolders.has(folder)) { problems.push(`${file}: not writable during stage ${stage}.`); continue; }
       if (file === this.paths.paperIndex || file === this.paths.bibliography) continue; // append-only check below
       if (file === this.paths.projectMd) {
-        if (!requiredAssetIds(await this.files.readFile(file)).length) problems.push('project.md needs ## Required Results with asset IDs.');
+        if (!requiredAssetIds(await this.files.readFile(file)).length) problems.push('project.md needs required_results with asset IDs.');
         continue;
       }
       const raw = await this.files.readFile(file);
@@ -1047,7 +1108,6 @@ export class ResearchLoopCore {
           const missing = failed.filter((id) => !section.includes(id));
           if (missing.length) problems.push(`${file}: ## Difference from failed plans must mention ${missing.join(', ')}.`);
         }
-        if (typeof data.target_asset === 'string' && !parseMarkdown(raw).content.includes(`../assets/${data.target_asset}.md`) && !parseMarkdown(raw).content.includes(`${this.paths.assets}/${data.target_asset}.md`)) problems.push(`${file}: missing the target asset link.`);
       }
       for (const dep of Array.isArray(data.depends_on) ? data.depends_on : []) {
         const known = isIn(file, folders.definitions) ? `${folders.definitions}/${dep}.md` : `${folders.assets}/${dep}.md`;
@@ -1068,7 +1128,7 @@ export class ResearchLoopCore {
       const index = await this.files.readFile(this.paths.paperIndex).catch(() => '');
       const bib = await this.files.readFile(this.paths.bibliography).catch(() => '');
       for (const paperId of existing) {
-        const section = new RegExp(`^## ${paperId}\\s*\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))`, 'm').exec(index)?.[1] ?? '';
+        const section = sectionContent(index, paperId);
         if (added.some((file) => isIn(file, folders.assets)) && !/https?:\/\//.test(section) && !new RegExp(`^@\\w+\\{${paperId},`, 'm').test(bib)) problems.push(`${paperId}: paper needs a stable source URL and a BibTeX entry.`);
       }
     }
@@ -1152,7 +1212,7 @@ export class ResearchLoopCore {
         await validated();
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
-        if (!requiredAssetIds(project).length) throw new Error('project.md needs ## Required Results with asset IDs.');
+        if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
         const extensionProblems = this.extensionProblems(project);
         if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
@@ -1206,6 +1266,8 @@ export class ResearchLoopCore {
         if (report.outcome !== 'complete') throw new Error('plan outcome must be complete --plan <id> or question.');
         const { added } = await validated();
         const assetId = state.current.assetId!;
+        const newPlans = added.filter((file) => path.posix.dirname(file) === this.paths.plans);
+        if (newPlans.length > 1) throw new Error(`Write one plan per plan stage; found ${newPlans.length} new plans (${newPlans.join(', ')}). Keep the best one and record the others as ideas.`);
         const planId = report.planId ?? state.current.planId ?? added.filter((file) => path.posix.dirname(file) === this.paths.plans).map((file) => path.posix.basename(file, '.md'))[0];
         if (!planId) throw new Error('Planning did not produce a plan; pass --plan <id>.');
         const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
@@ -1223,9 +1285,12 @@ export class ResearchLoopCore {
         const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
         if (report.outcome === 'proved') {
           const asset = parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
-          if (plan.data.type !== 'proof_record' || !sectionContent(plan.content, 'Outcome')) throw new Error(`${planId} must become type proof_record with ## Outcome.`);
+          if (plan.data.type !== 'plan' || plan.data.status !== 'succeeded' || !sectionContent(plan.content, 'Outcome')) throw new Error(`${planId} must get status succeeded and a ## Outcome.`);
           if (!proofText(asset.content)) throw new Error(`${assetId} needs the proof under ## Proof.`);
           if (asset.data.status !== 'draft') throw new Error(`${assetId} must stay draft until the researcher approves it.`);
+          // Tie the succeeded plan to the proof it produced; a later proof edit shows the plan as outdated.
+          plan.data.proof_digest = proofDigest(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
+          await this.writeOwned(`${this.paths.plans}/${planId}.md`, stringifyMarkdown(plan.content, plan.data));
           await this.enqueueApproval('asset', assetId, `Proof from ${planId}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
           for (const definition of report.assumedDefinitions ?? []) if (await this.files.exists(`${this.paths.definitions}/${definition}.md`)) await this.enqueueApproval('definition', definition, `Used by the proof of ${assetId}.`);
           delete state.current.statementDigest;
@@ -1315,6 +1380,11 @@ export class ResearchLoopCore {
     const paperIds = await this.paperIds();
     const assets = await this.collect(this.paths.assets);
     const definitions = await this.collect(this.paths.definitions);
+    const nodeFiles: string[] = [];
+    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans]) nodeFiles.push(...await this.files.listFiles(folder));
+    problems.push(...duplicateIds(nodeFiles));
+    const nodeInputs = async (folder: string) => Promise.all((await this.files.listFiles(folder)).map(async (file) => ({ filePath: file, raw: await this.files.readFile(file) })));
+    problems.push(...ideaPlanProblems(await nodeInputs(folders.assets), [...await nodeInputs(folders.ideas), ...await nodeInputs(folders.plans)]));
     for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, folders.checks, folders.decisions, folders.handoffs]) {
       for (const file of await this.files.listFiles(folder)) {
         const raw = await this.files.readFile(file);

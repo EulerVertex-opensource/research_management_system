@@ -1,7 +1,9 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import matter from 'gray-matter';
+import { parseMarkdown } from '../services/Frontmatter';
+import { loadProjectConfig, loadProjectPaths } from './nodeFiles';
 import { parseSectionBrief, parseWritingOutline, sectionTexSkeleton, syncInputBlock, validSectionId, WritingSection } from '../services/ManuscriptWriting';
+import { isCited } from '../domain/schema';
 
 type Mode = 'preview' | 'apply';
 interface Paths {
@@ -26,23 +28,19 @@ function within(root: string, relative: string): string {
 }
 
 async function projectPaths(root: string): Promise<Paths> {
-  const config = JSON.parse(await fs.readFile(path.join(root, '.research-assistant.json'), 'utf8'));
-  const legacy = config.layout === 'legacy';
-  const latexRoot = within(root, config.latex?.projectRoot ?? (legacy ? 'manuscript' : '.'));
-  const researchRoot = config.research?.root ?? (legacy ? '.' : 'research');
-  const writing = within(root, path.join(researchRoot, 'writing'));
-  const latexChild = (value: string): string => within(latexRoot, value);
+  const [config, raw] = await Promise.all([loadProjectPaths(root), loadProjectConfig(root)]);
+  const inside = (relative: string): string => within(root, relative);
   return {
-    root, latexRoot,
-    main: latexChild(config.latex?.main ?? 'main.tex'),
-    sections: latexChild(config.latex?.sections ?? 'sections'),
-    outline: within(writing, 'outline.md'),
-    briefs: within(writing, 'sections'),
-    assets: within(root, config.research?.assets ?? (legacy ? 'assets' : 'research/assets')),
-    definitions: within(root, config.research?.definitions ?? (legacy ? 'definitions' : 'research/definitions')),
-    bibliography: latexChild(config.latex?.bibliography ?? (legacy ? 'reference.bib' : 'references.bib')),
-    macros: (config.latex?.macros ?? []).map(latexChild),
-    notations: config.latex?.notations ? latexChild(config.latex.notations) : null,
+    root, latexRoot: inside(raw.latex.projectRoot),
+    main: inside(config.mainTex),
+    sections: inside(config.sections),
+    outline: inside(config.writingOutline),
+    briefs: inside(config.writingSections),
+    assets: inside(config.assets),
+    definitions: inside(config.definitions),
+    bibliography: inside(config.bibliography),
+    macros: config.macroFiles.map(inside),
+    notations: config.notations ? inside(config.notations) : null,
   };
 }
 
@@ -92,12 +90,12 @@ async function prepare(paths: Paths, id: string, mode: Mode): Promise<void> {
     let raw: string;
     try { raw = await fs.readFile(file, 'utf8'); }
     catch { throw new Error(`Missing ${kind} dependency: ${nodeId}`); }
-    const data = matter(raw).data;
+    const data = parseMarkdown(raw).data;
     if (data.status !== 'approved') throw new Error(`Cannot draft from ${kind} ${nodeId}: status is ${String(data.status ?? 'missing')}`);
     seen.add(file);
-    if (data.source?.kind === 'paper') {
+    if (isCited(data.source)) {
       if (typeof data.source.paper_id !== 'string' || !data.source.paper_id.trim()) {
-        throw new Error(`Paper source for ${nodeId} has no paper_id`);
+        throw new Error(`Cited source for ${nodeId} has no paper_id`);
       }
       paperIds.add(data.source.paper_id);
     }

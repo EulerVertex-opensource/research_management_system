@@ -9,6 +9,7 @@ import { LoopFiles, SYNC_PATH } from './ResearchLoopModel';
 import { ResearchLoopCore } from './ResearchLoopCore';
 import { parseHandoff } from './ResearchRecords';
 import { summarizeResearchChanges } from './SyncSummary';
+import { isCited } from '../domain/schema';
 
 /**
  * Git-aware sync for the research loop: pull with re-validation and state
@@ -304,11 +305,11 @@ export class ResearchSync {
     for (const file of await this.files.listFiles(paths.assets)) {
       let data: Record<string, any>;
       try { data = parseMarkdown(await this.files.readFile(file)).data; } catch { continue; }
-      if (data.source?.kind !== 'paper') continue;
+      if (!isCited(data.source)) continue;
       const paperId = String(data.source.paper_id ?? '');
       cited.add(paperId);
       if (!sections.has(paperId)) problems.push(`${file}: cites ${paperId || '(no paper_id)'}, which is not in ${paths.paperIndex}.`);
-      if (!String(data.source.location ?? '').trim()) problems.push(`${file}: paper source needs an exact location (theorem number, page).`);
+      if (!String(data.source.location ?? '').trim()) problems.push(`${file}: cited source needs an exact location (theorem number, page).`);
     }
     for (const paperId of cited) {
       const section = sections.get(paperId);

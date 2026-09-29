@@ -1,4 +1,6 @@
-import { LoopStage, projectSection, requiredAssetIds, sectionContent } from './ResearchLoopModel';
+import { LoopStage } from './ResearchLoopModel';
+import { projectSection, requiredAssetIds, requiredResults } from '../domain/project';
+import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 
 /**
  * Deterministic context packs for the research loop. For each stage the loop
@@ -79,8 +81,7 @@ export function hasContextPack(stage: LoopStage): boolean { return stage in DEFA
 /** Rough token estimate; good enough to budget packs, not a tokenizer. */
 export function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
 
-const MANAGED_BLOCK = /<!-- research-assistant:[a-z-]+:start -->[\s\S]*?<!-- research-assistant:[a-z-]+:end -->\n?/g;
-const strip = (text: string) => text.replace(MANAGED_BLOCK, '').replace(/\n{3,}/g, '\n\n').trim();
+const strip = (text: string) => stripManagedBlocks(text).replace(/\n{3,}/g, '\n\n').trim();
 const list = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
 /** Required results plus their transitive dependencies in dependency order; missing IDs are reported, not thrown. */
@@ -137,8 +138,10 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
 
   switch (focus.stage) {
     case 'discuss_goals':
-      add('project', 'project', sources.projectFile, ['Main Problem', 'Open Questions'], 0, 'current goals');
-      excluded.push('research nodes (not needed to discuss goals)');
+      add('project', 'project', sources.projectFile, ['Main Problem', 'Scope and Assumptions'], 0, 'current goals');
+      // Open questions live in question ideas, not in project.md.
+      for (const idea of sources.ideas.values()) if (idea.data.status === 'draft' && idea.data.idea_kind === 'question') add('idea', idea.id, idea.file, 'summary', 1, 'open question');
+      excluded.push('other research nodes (not needed to discuss goals)');
       break;
     case 'draft_project':
       add('project', 'project', sources.projectFile, 'all', 0, 'the file this stage edits');
@@ -146,7 +149,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
       excluded.push('node bodies');
       break;
     case 'review_project':
-      add('project', 'project', sources.projectFile, ['Main Problem', 'Current Goals', 'Required Results'], 0, 'what the researcher approves');
+      add('project', 'project', sources.projectFile, ['Main Problem', 'Scope and Assumptions', 'Intended Contribution', 'Required Results'], 0, 'what the researcher approves');
       break;
     case 'scaffold':
       add('project', 'project', sources.projectFile, ['Main Problem', 'Required Results'], 0, 'what to scaffold');
@@ -193,7 +196,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
         for (const plan of sources.plans.values()) {
           if (plan.data.target_asset !== target || plan.id === focus.planId) continue;
           if (plan.data.type === 'plan' && plan.data.status === 'failed') add('plan', plan.id, plan.file, ['Goal', 'Failure'], 2, 'failed plan: name it under ## Difference from failed plans');
-          else if (plan.data.type === 'proof_record') add('plan', plan.id, plan.file, ['Outcome'], 3, 'earlier proof record');
+          else if (plan.data.type === 'plan' && plan.data.status === 'succeeded') add('plan', plan.id, plan.file, ['Outcome'], 3, 'earlier successful attempt');
         }
         for (const idea of sources.ideas.values()) if (idea.data.status !== 'archived' && list(idea.data.related_assets).includes(target)) add('idea', idea.id, idea.file, 'summary', 3, 'related idea');
         excluded.push('proofs of dependencies', 'full checklists of failed plans (show <plan> for one when needed)');
@@ -208,21 +211,27 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
   return { stage: focus.stage, assetId: target, planId: focus.planId, budget, worker: STAGE_WORKERS[focus.stage], items, excluded, notes };
 }
 
+/** A project section, or the required results from frontmatter (or the legacy section) under that heading. */
+export function projectPart(project: string, heading: string): string {
+  if (heading !== 'Required Results') return projectSection(project, heading);
+  return requiredResults(project).map((item) => `- ${item.id}${item.role ? `: ${item.role}` : ''}`).join('\n');
+}
+
 function frontmatterLine(data: Record<string, any>): string {
   const parts: string[] = [];
-  for (const key of ['type', 'status', 'target_asset', 'refutes', 'outcome']) if (data[key] !== undefined) parts.push(`${key}: ${String(data[key])}`);
+  for (const key of ['type', 'status', 'idea_kind', 'target_asset', 'refutes', 'outcome']) if (data[key] !== undefined) parts.push(`${key}: ${String(data[key])}`);
   for (const key of ['depends_on', 'uses_definitions', 'inspired_by']) if (list(data[key]).length) parts.push(`${key}: [${list(data[key]).join(', ')}]`);
   if (data.source?.kind) parts.push(`source: ${data.source.kind}${data.source.paper_id ? ` ${data.source.paper_id}` : ''}${data.source.location ? ` (${data.source.location})` : ''}`);
   return parts.join('; ');
 }
 
 /** Body before `## Proof`, without managed link blocks. */
-export function statementOf(body: string): string { return strip(body.split(/^## Proof[ \t]*$/m)[0]); }
+export function statementOf(body: string): string { return strip(statementPart(body)); }
 
 /** Named `## ` sections, in the given order; missing ones are skipped. */
 export function sectionsOf(body: string, headings: string[]): string {
   return headings.map((heading) => {
-    const content = heading === 'Statement' && !new RegExp(`^## Statement[ \\t]*$`, 'm').test(body) ? statementOf(body) : strip(sectionContent(body, heading));
+    const content = heading === 'Statement' && !hasSection(body, 'Statement') ? statementOf(body) : strip(sectionContent(body, heading));
     return content ? `## ${heading}\n\n${content}` : '';
   }).filter(Boolean).join('\n\n');
 }
@@ -240,7 +249,7 @@ function renderItem(item: ContextItem, sources: ContextSources): string {
   if (item.kind === 'index') return `### Node index (id | type | status | deps | title)\n\n${nodeIndex(sources) || '(no nodes yet)'}`;
   if (item.kind === 'papers') return `### Paper index — ${item.file}\n\n${paperIndexOutline(sources.paperIndex) || '(no indexed papers)'}`;
   if (item.kind === 'project') {
-    const body = item.view === 'all' ? strip(sources.project) : (item.view as string[]).map((heading) => { const content = projectSection(sources.project, heading); return content ? `## ${heading}\n\n${content}` : ''; }).filter(Boolean).join('\n\n');
+    const body = item.view === 'all' ? strip(sources.project) : (item.view as string[]).map((heading) => { const content = projectPart(sources.project, heading); return content ? `## ${heading}\n\n${content}` : ''; }).filter(Boolean).join('\n\n');
     return `### Project — ${item.file}\n\n${body || '(empty)'}`;
   }
   const map = { asset: sources.assets, definition: sources.definitions, plan: sources.plans, idea: sources.ideas, check: sources.checks }[item.kind];

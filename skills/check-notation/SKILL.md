@@ -9,4 +9,4 @@ Read `.research-assistant.json` and the asset or LaTeX under review. For an asse
 
 Report missing or stale `uses_definitions` links, undefined symbols, conflicting uses of one symbol, multiple symbols for one object, and conflicts between approved definitions and `notations.tex`. Give locations and concise proposed corrections. Distinguish confirmed inconsistencies from cases needing researcher interpretation. Do not silently rewrite definitions or notation. If no approved definition covers a concept, say so and consider a draft definition candidate. If no notation file is configured, use definitions and local context and say so.
 
-When a verified definition or prerequisite asset is named in prose, check that its relationship ID and relative Markdown link are present. Use `link-research-nodes` to preview and apply links after correcting any missing relationship IDs.
+When a verified definition or prerequisite asset is named in prose, check that its relationship ID and relative Markdown link are present. After correcting missing relationship IDs, preview and apply links with `research-maintenance links`.

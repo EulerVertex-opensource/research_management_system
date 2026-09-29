@@ -5,7 +5,7 @@ description: Write one executable proof plan for a draft asset that survived fal
 
 # Plan a proof
 
-Input: the context pack from `research-loop next` (target statement, dependency statements, definitions, failed plans' Goal and Failure, related ideas). Read only the pack; for anything else run `research-loop show <id> [--section Heading]`. Approved or proved dependencies are black boxes; unproved draft dependencies may be assumed but must be listed.
+Input: the context pack from `research-loop next` (target statement, dependency statements, definitions, failed plans' Goal and Failure, earlier succeeded plans' Outcome, related ideas). Read only the pack; for anything else run `research-loop show <id> [--section Heading]`. Approved or proved dependencies are black boxes; unproved draft dependencies may be assumed but must be listed.
 
 - A `pending` plan for this asset already exists (the pack shows it): do not write a new one; report `complete --plan <id>` so the loop executes it.
 - Otherwise create `<plans>/<id>.md` with `type: plan`, `status: pending`, `target_asset`, and `inspired_by` idea IDs you used. Body:

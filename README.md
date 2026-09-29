@@ -33,12 +33,12 @@ overleaf-project/
 
   research/                        ← authored research context is shared
     README.md                     ← generated locally; ignored
-    project.md                     ← problem, goals, known results, open questions
+    project.md                     ← research contract: problem, scope, required results
     papers.md                      ← paper index keyed by BibTeX slug
     assets/                        ← theorem/lemma/etc. nodes
     definitions/                   ← definitions and their notation
     ideas/                         ← freeform research ideas
-    plans/                         ← executable plans and proof records
+    plans/                         ← proof plans, one per attempt (pending/failed/succeeded)
     writing/
       outline.md                  ← ordered manuscript section links
       sections/<id>.md            ← section briefs and asset IDs
@@ -231,11 +231,11 @@ Explain what the reader should learn in this section.
 - Record any unproved step or draft result here.
 ```
 
-Use `plan-manuscript` with a researcher to decide the section order, then `plan-section` to refine one brief. The agents begin with a compact node index and read full content only for selected results. To validate a brief and list the exact approved assets, dependency definitions, preamble files, and BibTeX keys needed for drafting, run:
+Use `plan-manuscript` with a researcher to decide the section order (scope `manuscript`) or to refine one brief (scope `section`). The agents begin with a compact node index and read full content only for selected results. To validate a brief and list the exact approved assets, dependency definitions, preamble files, and BibTeX keys needed for drafting, run:
 
 ```bash
-node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs prepare main_result --preview
-node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs prepare main_result --apply
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs prepare main_result --preview
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs prepare main_result --apply
 ```
 
 `--apply` creates `sections/main_result.tex` only if it is missing. The `draft-latex` skill replaces that untouched skeleton with a first draft and thereafter edits only requested passages. It marks uses of research nodes with `% [node_id]` comments; printed references use normal LaTeX labels and verified bibliography keys. Unknown or unapproved dependencies stop preparation.
@@ -243,8 +243,8 @@ node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs prepare ma
 When every listed TeX section exists, preview and apply the main document's input order:
 
 ```bash
-node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs sync --preview
-node .agents/skills/manuscript-writing/scripts/manuscript-writing.cjs sync --apply
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --preview
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --apply
 ```
 
 For a new document, Research Assistant creates the input markers in `main.tex`. In an adopted document, place `% research-assistant:sections:start` and `% research-assistant:sections:end` on their own lines around the section inputs once. The command changes only the text between them; it refuses to guess an insertion point in an existing manuscript. Review the Git diff and compile after syncing. Use Git changes for coauthor review; [Overleaf warns](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/advanced-git-operations) that Git pushes can displace comments and tracked changes.
@@ -269,15 +269,38 @@ Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everythin
 
 | Panel | Purpose |
 |---|---|
-| **Project** | Edit and preview the configured project description; initialize or refresh shared setup |
+| **Project** | Edit the project contract, with derived status (required results, open questions, manuscript sections) above it; initialize or refresh shared setup |
 | **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
 | **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and remark nodes |
-| **Definitions** | Browse and edit dependency ordered definitions and their notation |
+| **Definitions** | Browse and edit definitions and their notation, listed in dependency order |
 | **Ideas** | Browse and edit freeform research ideas |
-| **Plans** | Browse and edit executable proof plans and retained proof records |
+| **Plans** | Browse and edit proof plans, including failed and succeeded attempts |
 | **Manuscript** | Compile the configured main TeX file and read the generated PDF inside Research Assistant |
 
 Node changes are reflected live. New or materially changed assets and definitions remain `draft`; only a researcher should promote them to `approved`. New directions start `draft`, and new proof plans start `pending`.
+
+## Project contract
+
+`research/project.md` says why the work is done and when it is complete. Its frontmatter lists the results the project must establish; the research loop is `ready` when all of them and their dependencies are approved:
+
+```markdown
+---
+type: project
+schema_version: 2
+required_results:
+  - id: main_theorem
+    role: central contribution
+---
+
+# Project
+
+## Main Problem
+## Scope and Assumptions
+## Intended Contribution
+## Background
+```
+
+A project approval covers the main problem, scope (including project-level decisions and assumptions), intended contribution, and required results; background is context. Known results, open questions (ideas with `idea_kind: question`), researcher decisions (`research/decisions/`), and writing progress each live in their own files and are shown above the editor in the Project panel, so project.md does not restate them.
 
 ## Node format
 
@@ -296,8 +319,6 @@ depends_on:
   - frobenius_conjugacy_class
 uses_definitions:
   - subgroup
-used_in:
-  - main_counting_argument
 tags:
   - arithmetic-geometry
 ---
@@ -309,9 +330,13 @@ $$
 $$
 ```
 
+`source.kind` says where the content comes from: `paper` or `textbook` (a citation, with the paper index slug as `paper_id` and an exact `location`; the loop asks the researcher to check the citation instead of proving it), `note` (an informal source such as a talk or lecture notes; still proved here), or `original` (produced in this project; formerly `self_proved`, which is still read). Review state and lifecycle are the separate `status` field.
+
 An `example` may refute a result with `refutes: <asset_id>` plus `## Assumptions`, `## Calculation`, and after verification `## Verdict`; `draft` is a candidate, `approved` a researcher-confirmed counterexample (the refuted asset becomes `deprecated`), `archived` a rejected one. Provable assets keep the statement above `## Proof`; the statement is frozen while a plan is executed. Plans written after failures need `## Difference from failed plans` naming each failed plan ID and may list `## Assumed definitions`.
 
-A `type: idea` file in `research/ideas/` is a freeform intuition, possible approach, gap, or test case. It uses `status: draft` or `archived` and can name zero or more `related_assets`; it needs no checklist or target asset. A `type: plan` file in `research/plans/` uses `status: pending` or `failed`, one `target_asset`, and optional `inspired_by` idea IDs. Its body has `## Goal`, `## Plan` with ordered checkboxes (`1. [ ] ...`), and `## Verification`; a failed plan also explains the obstruction under `## Failure`. Failure of one approach does not declare the asset false.
+Only forward relations are stored (`depends_on`, `uses_definitions`, `related_assets`, `target_asset`, `inspired_by`, `refutes`). What uses a node, and which plans target an asset, are derived and shown in the dashboard. Filename IDs are unique across all research folders.
+
+A `type: idea` file in `research/ideas/` is a freeform intuition, possible approach, gap, or test case. It uses `status: draft`, `resolved` (answered, or turned into a plan or lemma; `resolved_by` names the decision, plan, or asset), or `archived` (dropped), an `idea_kind` (`approach`, `question`, `observation`, `test_case`, or `risk`), and zero or more `related_assets`; it needs no checklist or target asset. A `type: plan` file in `research/plans/` is one proof attempt for one `target_asset`, with optional `inspired_by` idea IDs. Its body has `## Goal`, `## Plan` with ordered checkboxes (`1. [ ] ...`), and `## Verification`. Its status is `pending`, `failed` (with the obstruction under `## Failure`; one failed approach does not make the asset false), `succeeded` (the proof is in the asset and `## Outcome` says where), or `abandoned`. Plans are kept whatever their outcome, so collaborators see what was tried.
 
 ```yaml
 ---
@@ -331,26 +356,25 @@ A direction keeps its prose freeform and may have no related assets:
 type: idea
 title: Explore prelimit toral collapse
 status: draft
+idea_kind: approach
 related_assets: [cfg_nilpotent_killing_structure, local_to_global_kernel_separation]
 tags: [collapse, holonomy]
 ---
 ```
 
-Create a new proof plan when an idea becomes actionable; keep the original idea. The plan can cite several origins through `inspired_by`. Assets list pending and failed proof plans, proof records, and draft and archived ideas separately. Ideas get a managed Markdown list linking back to their related assets, and plans link to their target and inspiring ideas. When a plan succeeds, incorporate its proof in the asset and change the retained plan file to status-free `type: proof_record` with an `## Outcome`, preserving its target and origins. Asset approval is a separate researcher decision.
+Create a new proof plan when an idea becomes actionable (`research-loop idea convert`), which marks the idea resolved and keeps it. A plan can cite several origins through `inspired_by`. When the loop records a proof, it stamps the plan's `proof_digest`; the dashboard marks a succeeded plan outdated if the asset's proof is edited later. When a counterexample is confirmed, the refuted asset's pending plans become `abandoned`. Node files store only forward relations: an asset's plans, related ideas, and counterexamples are shown in the dashboard and by `research-loop show <asset>`, never written into its body. Asset approval stays a separate researcher decision.
 
-Use the bundled `convert-proof-ideas` skill to classify legacy files conservatively and preserve their mathematical content. Existing files with `target_asset` and `pending` or `failed` status are recognized as plans before conversion. After refreshing project setup, preview the folder migration with `node .agents/skills/convert-proof-ideas/scripts/migrate-idea-plans.cjs --preview`, then run it with `--apply` after reviewing the moves. It converts legacy types, moves plans into the configured plans folder, rebases relative Markdown links, and rebuilds managed sections. To refresh links later, use `node .agents/skills/convert-proof-ideas/scripts/sync-proof-ideas.cjs --apply`. The extension also updates managed links when idea or plan files change.
+Definitions live in `research/definitions/<id>.md`, one commonly used concept per file. A definition has `type: definition`, a title such as `Definition (subgroup)`, `status`, `depends_on` listing other definition IDs, optional source and tags, and a Markdown body with its statement and notation. Project-specific conditions and assumptions belong in draft `remark` assets with verified relative Markdown links to relevant definitions and assets. Split passages that contain both a common definition and a local condition. Asset `depends_on` lists assets; `uses_definitions` lists definitions. Approved definitions are the primary source for notation checks; `notations.tex` remains a supplementary LaTeX reference.
 
-Definitions live in `research/definitions/<id>.md`, one commonly used concept per file. A definition has `type: definition`, a title such as `001. Definition (subgroup)`, `status`, `depends_on` listing other definition IDs, optional source and tags, and a Markdown body with its statement and notation. Project-specific conditions and assumptions belong in draft `remark` assets with verified relative Markdown links to relevant definitions and assets. Split passages that contain both a common definition and a local condition. Asset `depends_on` lists assets; `uses_definitions` lists definitions. Approved definitions are the primary source for notation checks; `notations.tex` remains a supplementary LaTeX reference.
+Dependency order is derived, never written into files: the Assets and Definitions panels list active nodes in `depends_on` order with their position, and titles stay as written. Missing IDs, cycles, or dependencies on deprecated or archived nodes are reported in the dashboard and the Research Assistant output. From a project root, `node .agents/skills/research-maintenance/scripts/research-maintenance.cjs validate` checks node schema, global IDs, and dependencies and prints the order.
 
-Definition titles are reordered when definition files change. After refreshing project setup, use `node .agents/skills/order-definitions/scripts/order-definitions.cjs --definitions --preview` to inspect their dependency order and `--apply` to update titles manually.
-
-Asset and definition bodies can link verified prose mentions with ordinary relative Markdown links. For example, an asset can link the term `subgroup` to `../definitions/subgroup.md` and `Subgroup Lemma` to `./subgroup_lemma.md`. The dashboard opens these links in the corresponding node tab, and relationship ID chips are clickable. After refreshing project setup, run `node .agents/skills/link-research-nodes/scripts/link-research-nodes.cjs --preview` to inspect a backfill across assets and definitions, then use `--apply` for the reviewed changes. Add `--file research/assets/<id>.md` to limit a run to one node. The linker skips math, code, headings, existing links, and ambiguous matches; it reports mentions without a verified relationship ID for review. Agents run this step after creating or materially revising nodes. The extension does not rewrite body links on every file change.
+Asset and definition bodies can link verified prose mentions with ordinary relative Markdown links. For example, an asset can link the term `subgroup` to `../definitions/subgroup.md` and `Subgroup Lemma` to `./subgroup_lemma.md`. The dashboard opens these links in the corresponding node tab, and relationship ID chips are clickable. Run `research-maintenance links --preview` to inspect a backfill across assets and definitions, then `--apply` for the reviewed changes; add `--file research/assets/<id>.md` to limit a run to one node. The linker skips math, code, headings, existing links, and ambiguous matches, and reports mentions without a verified relationship ID for review. Agents run this step after creating or materially revising nodes; the extension does not rewrite body links on every file change.
 
 Markdown can also link to a local paper PDF. From `research/assets/theorem.md`, use a Markdown link with text `source paper` and target `../../research-local/raw_papers/lang_weil.pdf` to open the PDF in VS Code's viewer when clicked in the dashboard preview. The path is relative to the Markdown file; use the configured `localSourcePdfs` folder if it differs from the default. PDFs stay local and ignored by Git. Links must point directly to a PDF in that folder; missing files show an error in the dashboard.
 
-After refreshing project setup, inspect older `type: definition` files under assets and reclassify project-specific conditions or assumptions as linked remarks. Then preview migration of the remaining commonly used definitions with `node .agents/skills/extract-definitions/scripts/migrate-definitions.cjs --preview`. Inspect the reported moves, converted links, and review items, then run `--apply`. The command preserves approval status and stops on collisions or dependencies it cannot map safely. New extracted definitions start as drafts. Agents run `check-notation` when they create or materially revise assets; ordinary dashboard edits do not launch an automatic language model review.
+### Upgrading an older project
 
-Draft and approved asset titles are numbered in dependency order using `depends_on` (for example, `001. Chebotarev Density Theorem`). Filenames remain stable IDs. The Assets panel displays numbered results in that order, and the extension watches asset files after VS Code startup, including when the dashboard is closed. Missing IDs, cycles, or dependencies on deprecated or archived assets stop ordering and are reported in the Research Assistant output. To preview or apply the same ordering from a project root, use `node .agents/skills/order-assets/scripts/order-assets.cjs --preview` or `--apply` after refreshing agent setup. The script reads the configured asset path from `.research-assistant.json`.
+Projects written by earlier versions stored plans under ideas, definitions under assets, successful plans as `type: proof_record`, `used_in` lists, numbered titles, managed link lists inside node bodies, `source.kind: self_proved`, and required results as a `## Required Results` list in project.md. When the extension opens such a project it offers to migrate it, showing every change before writing. From the command line, commit your work, then run `research-maintenance migrate --preview` and `--apply`. The migration moves files, rewrites only the affected frontmatter lines, moves project.md's required results into `required_results` frontmatter without discarding any paragraph, and carries a still-valid project approval over; it never approves anything that was not approved. Read the `REVIEW` lines it prints, for example to confirm that definitions moved out of assets are commonly used concepts.
 
 ## Paper format
 
@@ -369,7 +393,7 @@ The local file line is shared as a convention, but the PDF itself is ignored by 
 
 ## AI setup
 
-The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The bundled skills cover paper import, theorem and definition extraction, asset and definition ordering, proof idea conversion, research node interlinks, manuscript and section planning, writing sync, LaTeX drafting, notation review, node search, and node summaries. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. The dashboard keeps its prompt templates for in-panel chat. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
+The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The eleven bundled skills are: `research-loop` (the driver), `import-math-paper`, `extract-research-nodes`, `explore-research` (find and summarize nodes), `falsify-asset`, `plan-proof`, `execute-proof`, `check-notation`, `research-maintenance` (validate, links, backlinks, migrate), `plan-manuscript`, and `draft-latex`. Refresh removes installed copies of skills that earlier versions shipped and later merged. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
 
 Generated instructions are deliberately compact and deterministic. They point agents to canonical node and paper files instead of duplicating every node body, reducing Git noise and merge conflicts.
 

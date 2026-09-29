@@ -3,16 +3,19 @@ import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
+import { withoutFrontmatter } from '../../src/domain/sections';
 
 interface Props {
   content: string;
   style?: React.CSSProperties;
   onOpenNodeLink?: (href: string) => boolean;
+  /** Compact rendering for a short phrase inside other UI (no paragraph spacing). */
+  inline?: boolean;
 }
 
-export function MarkdownPreview({ content, style, onOpenNodeLink }: Props) {
+export function MarkdownPreview({ content, style, onOpenNodeLink, inline }: Props) {
   return (
-    <div className="md-preview" style={style}>
+    <div className={inline ? 'md-preview md-inline' : 'md-preview'} style={style}>
       <ReactMarkdown
         remarkPlugins={[remarkMath, remarkGfm]}
         rehypePlugins={[rehypeKatex]}
@@ -29,7 +32,8 @@ export function MarkdownPreview({ content, style, onOpenNodeLink }: Props) {
           ),
         }}
       >
-        {content}
+        {/* Frontmatter is metadata, edited in the editor pane; rendering it would show raw YAML as prose. */}
+        {withoutFrontmatter(content)}
       </ReactMarkdown>
     </div>
   );

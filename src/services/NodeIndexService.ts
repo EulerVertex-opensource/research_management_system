@@ -2,143 +2,12 @@ import * as path from 'path';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, ProjectPaths } from '../models/types';
 import { FileService } from './FileService';
-import { hasSectionContent, resolveIdeaType } from './ProofIdeas';
-
-const NODE_TEMPLATES: Record<string, string> = {
-  theorem: `---
-type: theorem
-title: {title}
-status: draft
-source:
-  kind: paper
-  paper_id: ""
-  location: ""
-depends_on: []
-uses_definitions: []
-tags: []
-used_in: []
----
-
-Write the theorem statement here.
-`,
-  lemma: `---
-type: lemma
-title: {title}
-status: draft
-source:
-  kind: paper
-  paper_id: ""
-  location: ""
-depends_on: []
-uses_definitions: []
-tags: []
-used_in: []
----
-
-Write the lemma statement here.
-`,
-  proposition: `---
-type: proposition
-title: {title}
-status: draft
-source:
-  kind: paper
-  paper_id: ""
-  location: ""
-depends_on: []
-uses_definitions: []
-tags: []
-used_in: []
----
-
-Write the proposition statement here.
-`,
-  definition: `---
-type: definition
-title: "Definition ({title})"
-status: draft
-source:
-  kind: self_proved
-depends_on: []
-tags: []
----
-
-Write the defining statement and the notation it introduces here.
-`,
-  example: `---
-type: example
-title: {title}
-status: draft
-source:
-  kind: self_proved
-depends_on: []
-uses_definitions: []
-tags: []
-used_in: []
----
-
-Describe the example here.
-`,
-  construction: `---
-type: construction
-title: {title}
-status: draft
-source:
-  kind: self_proved
-depends_on: []
-uses_definitions: []
-tags: []
-used_in: []
----
-
-Describe the construction here.
-`,
-  remark: `---
-type: remark
-title: {title}
-status: draft
-depends_on: []
-uses_definitions: []
-tags: []
-used_in: []
----
-
-Write the remark here.
-`,
-  plan: `---
-type: plan
-title: {title}
-status: pending
-target_asset: {target_asset}
-inspired_by: []
-tags: []
----
-
-## Goal
-
-Target: [asset]({target_link})
-
-Prove the claim stated in the target asset.
-
-## Plan
-
-1. [ ] Describe the first mathematical step.
-
-## Verification
-
-Explain how to check that the steps prove the asset's statement.
-`,
-  idea: `---
-type: idea
-title: {title}
-status: draft
-related_assets: []
-tags: []
----
-
-Describe the intuition, possible approach, open gap, or test case here.
-`,
-};
+import { resolveIdeaType } from './ProofIdeas';
+import { computeAssetOrder } from './AssetOrder';
+import { proofDigest } from './ResearchLoopModel';
+import { ASSET_TYPES, NodeKind, nodeKindOf, statusesFor } from '../domain/nodeKinds';
+import { nodeProblems, planProblems, stripForeignFields } from '../domain/schema';
+import { nodeTemplate } from '../domain/templates';
 
 function slugify(title: string): string {
   return title
@@ -148,29 +17,35 @@ function slugify(title: string): string {
     .substring(0, 64);
 }
 
-const ASSET_TYPES = new Set<NodeType>(['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark']);
+const list = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+
+/** Frontmatter as the dashboard edits it. A legacy proof_record reads as a succeeded plan until migrated. */
+function frontmatterOf(data: Record<string, any>): NodeFrontmatter {
+  const legacyRecord = data.type === 'proof_record';
+  const role = resolveIdeaType(data);
+  const type = (legacyRecord ? 'plan' : role ?? data.type ?? 'remark') as NodeType;
+  return {
+    type,
+    title: typeof data.title === 'string' ? data.title : '',
+    status: legacyRecord ? 'succeeded' : (data.status as ResearchStatus) ?? (type === 'plan' ? 'pending' : 'draft'),
+    tags: list(data.tags),
+    source: data.source,
+    depends_on: list(data.depends_on),
+    uses_definitions: list(data.uses_definitions),
+    related_assets: list(data.related_assets),
+    target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
+    inspired_by: list(data.inspired_by),
+    refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
+    idea_kind: typeof data.idea_kind === 'string' ? data.idea_kind as NodeFrontmatter['idea_kind'] : undefined,
+  };
+}
 
 function parseNode(relativePath: string, raw: string): ResearchNode | null {
   try {
     const { data, content } = parseMarkdown(raw);
     const id = path.basename(relativePath, '.md');
-    return {
-      id,
-      filePath: relativePath,
-      type: (resolveIdeaType(data) as NodeType | undefined) ?? (data.type as NodeType) ?? 'remark',
-      title: data.title ?? id,
-      status: data.type === 'proof_record' ? undefined : (data.status as ResearchStatus) ?? (resolveIdeaType(data) === 'plan' ? 'pending' : 'draft'),
-      tags: Array.isArray(data.tags) ? data.tags : [],
-      source: data.source,
-      depends_on: Array.isArray(data.depends_on) ? data.depends_on : [],
-      uses_definitions: Array.isArray(data.uses_definitions) ? data.uses_definitions : [],
-      used_in: Array.isArray(data.used_in) ? data.used_in : [],
-      related_assets: Array.isArray(data.related_assets) ? data.related_assets : [],
-      target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
-      inspired_by: Array.isArray(data.inspired_by) ? data.inspired_by : [],
-      refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
-      body: content.trim(),
-    };
+    const frontmatter = frontmatterOf(data);
+    return { ...frontmatter, title: frontmatter.title || id, id, filePath: relativePath, body: content.trim() };
   } catch {
     return null;
   }
@@ -178,6 +53,8 @@ function parseNode(relativePath: string, raw: string): ResearchNode | null {
 
 export class NodeIndexService {
   private nodes: Map<string, ResearchNode> = new Map();
+  /** Duplicate IDs and dependency errors found by the last refresh. */
+  private problems: string[] = [];
 
   constructor(
     private readonly fileService: FileService,
@@ -186,21 +63,41 @@ export class NodeIndexService {
 
   async refresh(): Promise<ResearchNode[]> {
     this.nodes.clear();
+    this.problems = [];
 
-    const assetPaths = await this.fileService.listFiles(this.paths.assets, '.md');
-    const definitionPaths = await this.fileService.listFiles(this.paths.definitions, '.md');
-    const ideaPaths = await this.fileService.listFiles(this.paths.ideas, '.md');
-    const planPaths = await this.fileService.listFiles(this.paths.plans, '.md');
-
-    for (const filePath of [...assetPaths, ...definitionPaths, ...ideaPaths, ...planPaths]) {
-      try {
-        const raw = await this.fileService.readFile(filePath);
-        const node = parseNode(filePath, raw);
-        if (node) {
+    const folders = [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans];
+    const raws = new Map<string, string>();
+    for (const folder of folders) {
+      for (const filePath of await this.fileService.listFiles(folder, '.md')) {
+        try {
+          const raw = await this.fileService.readFile(filePath);
+          const node = parseNode(filePath, raw);
+          if (!node) continue;
+          const existing = this.nodes.get(node.id);
+          if (existing) {
+            this.problems.push(`${filePath}: node ID ${node.id} is already used by ${existing.filePath}; IDs are global across research folders.`);
+            continue;
+          }
           this.nodes.set(node.id, node);
+          raws.set(filePath, raw);
+        } catch {
+          // skip unreadable files
         }
-      } catch {
-        // skip unreadable files
+      }
+    }
+    // A succeeded plan is outdated once its target's proof no longer matches the digest stamped on success.
+    for (const node of this.nodes.values()) {
+      if (node.type !== 'plan' || node.status !== 'succeeded') continue;
+      const stamped = parseMarkdown(raws.get(node.filePath)!).data.proof_digest;
+      const target = node.target_asset ? this.nodes.get(node.target_asset) : undefined;
+      if (typeof stamped === 'string' && target) node.outdated = proofDigest(raws.get(target.filePath)!) !== stamped;
+    }
+    for (const [folder, kind] of [[this.paths.assets, 'asset'], [this.paths.definitions, 'definition']] as const) {
+      const inputs = [...this.nodes.values()].filter((node) => path.posix.dirname(node.filePath) === folder).map((node) => ({ id: node.id, raw: raws.get(node.filePath)! }));
+      try {
+        computeAssetOrder(inputs, kind).order.forEach((id, index) => { this.nodes.get(id)!.order = index + 1; });
+      } catch (error: unknown) {
+        this.problems.push(`${kind === 'asset' ? 'Asset' : 'Definition'} order: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -211,17 +108,19 @@ export class NodeIndexService {
     return Array.from(this.nodes.values());
   }
 
+  getProblems(): string[] {
+    return [...this.problems];
+  }
+
   getById(id: string): ResearchNode | undefined {
     return this.nodes.get(id);
   }
 
   async createNode(nodeType: NodeType, title: string, targetAsset?: string): Promise<ResearchNode> {
-    if (nodeType === 'proof_record') throw new Error('Proof records are created by converting successful plans.');
+    const kind = nodeKindOf(nodeType) ?? 'asset';
     const concept = nodeType === 'definition' ? title.replace(/^Definition \((.*)\)$/, '$1') : title;
     const slug = slugify(concept) || 'untitled';
-    const folder = nodeType === 'idea' ? this.paths.ideas : nodeType === 'plan' ? this.paths.plans : nodeType === 'definition' ? this.paths.definitions : this.paths.assets;
-    const filename = `${slug}.md`;
-    const relativePath = `${folder}/${filename}`;
+    const relativePath = `${this.folderOf(kind)}/${slug}.md`;
     if (this.nodes.has(slug) || await this.fileService.exists(relativePath)) {
       throw new Error(`Node ID already exists: ${slug}`);
     }
@@ -229,15 +128,15 @@ export class NodeIndexService {
     if (nodeType === 'plan' && (!targetAsset || !this.isTargetAsset(targetAsset))) {
       throw new Error('Choose an existing target asset for the proof plan.');
     }
-    const template = NODE_TEMPLATES[nodeType] ?? NODE_TEMPLATES.remark;
     const targetLink = targetAsset ? path.posix.relative(path.posix.dirname(relativePath), `${this.paths.assets}/${targetAsset}.md`) : '';
-    const content = nodeType === 'definition'
-      ? template.replace('"Definition ({title})"', JSON.stringify(`Definition (${concept})`))
-      : template.replace('{title}', concept).replace(/\{target_link\}/g, targetLink.startsWith('.') ? targetLink : `./${targetLink}`).replace(/\{target_asset\}/g, targetAsset ?? '');
+    const content = nodeTemplate(nodeType, {
+      title: nodeType === 'definition' ? `Definition (${concept})` : concept,
+      targetAsset,
+      targetLink: targetLink.startsWith('.') ? targetLink : `./${targetLink}`,
+    });
 
     await this.fileService.writeFile(relativePath, content);
 
-    // Re-parse and index the new node
     const node = parseNode(relativePath, content)!;
     this.nodes.set(node.id, node);
     return node;
@@ -252,19 +151,15 @@ export class NodeIndexService {
     const raw = await this.fileService.readFile(node.filePath);
     const parsed = parseMarkdown(raw);
 
-    if (node.type === 'proof_record') throw new Error('Proof records have no status.');
-    if (node.type === 'idea' ? !['draft', 'archived'].includes(status) : node.type === 'plan' ? !['pending', 'failed'].includes(status) : !['draft', 'approved', 'deprecated', 'archived'].includes(status)) {
-      throw new Error(`Invalid status ${status} for ${node.type}.`);
-    }
-    if (node.type === 'plan' && status === 'failed' && !hasSectionContent(parsed.content, 'Failure')) {
-      throw new Error('Failed plans need a Failure explanation.');
+    if (!statusesFor(node.type).includes(status)) throw new Error(`Invalid status ${status} for ${node.type}.`);
+    if (node.type === 'plan') {
+      const problem = planProblems(id, { ...parsed.data, type: 'plan', status }, parsed.content)[0];
+      if (problem) throw new Error(problem);
+      parsed.data.type = 'plan';
     }
     parsed.data.status = status;
 
-    // Rebuild the file: stringify frontmatter + preserve body
-    const updated = stringifyMarkdown(parsed.content, parsed.data);
-    await this.fileService.writeFile(node.filePath, updated);
-
+    await this.fileService.writeFile(node.filePath, stringifyMarkdown(parsed.content, parsed.data));
     node.status = status;
   }
 
@@ -275,23 +170,8 @@ export class NodeIndexService {
     }
     const raw = await this.fileService.readFile(node.filePath);
     const { data, content } = parseMarkdown(raw);
-    return {
-      frontmatter: {
-        type: node.type,
-        title: data.title ?? node.title,
-        status: data.type === 'proof_record' ? undefined : (data.status as ResearchStatus) ?? node.status,
-        tags: Array.isArray(data.tags) ? data.tags : [],
-        source: data.source,
-        depends_on: Array.isArray(data.depends_on) ? data.depends_on : [],
-        uses_definitions: Array.isArray(data.uses_definitions) ? data.uses_definitions : [],
-        used_in: Array.isArray(data.used_in) ? data.used_in : [],
-        related_assets: Array.isArray(data.related_assets) ? data.related_assets : [],
-        target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
-        inspired_by: Array.isArray(data.inspired_by) ? data.inspired_by : [],
-        refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
-      },
-      body: content.trim(),
-    };
+    const frontmatter = frontmatterOf(data);
+    return { frontmatter: { ...frontmatter, title: frontmatter.title || node.title }, body: content.trim() };
   }
 
   async saveNode(id: string, frontmatter: NodeFrontmatter, body: string): Promise<void> {
@@ -299,59 +179,28 @@ export class NodeIndexService {
     if (!node) {
       throw new Error(`Node not found: ${id}`);
     }
-    // stringifyMarkdown(body, data) → produces "---\n<yaml>\n---\n<body>"
-    const data: Record<string, unknown> = { ...frontmatter };
-    delete data.kind;
-    if (frontmatter.type === 'idea') {
-      if (!['draft', 'archived'].includes(frontmatter.status ?? '')) throw new Error('Idea status must be draft or archived.');
-      delete data.target_asset;
-      delete data.inspired_by;
-      delete data.refutes;
-      delete data.depends_on;
-      delete data.uses_definitions;
-      delete data.used_in;
-    } else if (frontmatter.type === 'plan' || frontmatter.type === 'proof_record') {
-      if (!frontmatter.target_asset || !this.isTargetAsset(frontmatter.target_asset)) {
-        throw new Error('Choose an existing target asset.');
-      }
-      if (frontmatter.type === 'plan' && !['pending', 'failed'].includes(frontmatter.status ?? '')) throw new Error('Proof plan status must be pending or failed.');
-      if (frontmatter.type === 'plan' && frontmatter.status === 'failed' && !hasSectionContent(body, 'Failure')) {
-        throw new Error('Failed plans need a Failure explanation.');
-      }
-      if (node.type !== 'proof_record' && frontmatter.type === 'proof_record' && !hasSectionContent(body, 'Outcome')) {
-        throw new Error('Proof records need an Outcome section explaining where the proof was incorporated.');
-      }
+    const kind = nodeKindOf(frontmatter.type);
+    if (!kind) throw new Error(`Unknown node type: ${frontmatter.type}`);
+    // Keep fields the dashboard does not edit (origin, custom metadata), drop relations foreign to the kind.
+    const existing = parseMarkdown(await this.fileService.readFile(node.filePath)).data;
+    const data = stripForeignFields(kind, { ...existing, ...frontmatter }, frontmatter.type);
+    if (kind === 'plan') {
+      if (!frontmatter.target_asset || !this.isTargetAsset(frontmatter.target_asset)) throw new Error('Choose an existing target asset.');
       const targetPath = path.posix.relative(path.posix.dirname(node.filePath), `${this.paths.assets}/${frontmatter.target_asset}.md`);
       const targetLine = `Target: [asset](${targetPath.startsWith('.') ? targetPath : `./${targetPath}`})`;
       if (/^Target: \[asset\]\([^)]+\)$/m.test(body)) body = body.replace(/^Target: \[asset\]\([^)]+\)$/m, targetLine);
       else body = body.replace(/^## Goal\s*$/m, `## Goal\n\n${targetLine}`);
       if (!body.includes(targetLine)) body = `${targetLine}\n\n${body}`;
-      if (frontmatter.type === 'proof_record') delete data.status;
-      delete data.related_assets;
-      delete data.depends_on;
-      delete data.uses_definitions;
-      delete data.used_in;
-    } else {
-      delete data.target_asset;
-      delete data.kind;
-      delete data.inspired_by;
-      if (frontmatter.type !== 'example') delete data.refutes;
-      if (frontmatter.type === 'example' && frontmatter.refutes) {
-        if (!this.isTargetAsset(frontmatter.refutes)) throw new Error('Counterexample must refute an existing asset.');
-        if (!/^## Assumptions\s*$/m.test(body) || !/^## Calculation\s*$/m.test(body)) throw new Error('Counterexample needs Assumptions and Calculation sections.');
-      }
     }
-    if (frontmatter.type === 'definition') {
-      delete data.uses_definitions;
-      delete data.used_in;
-      delete data.related_assets;
-    }
+    if (frontmatter.type === 'example' && frontmatter.refutes && !this.isTargetAsset(frontmatter.refutes)) throw new Error('Counterexample must refute an existing asset.');
     for (const [key, value] of Object.entries(data)) if (value === undefined) delete data[key];
-    const fileContent = stringifyMarkdown(
-      '\n' + body,
-      data
-    );
-    await this.fileService.writeFile(node.filePath, fileContent);
+    const problem = nodeProblems(kind, id, data, body, { allowApproved: true })[0];
+    if (problem) throw new Error(problem);
+    await this.fileService.writeFile(node.filePath, stringifyMarkdown('\n' + body, data));
+  }
+
+  private folderOf(kind: NodeKind): string {
+    return kind === 'idea' ? this.paths.ideas : kind === 'plan' ? this.paths.plans : kind === 'definition' ? this.paths.definitions : this.paths.assets;
   }
 
   private isTargetAsset(id: string): boolean {

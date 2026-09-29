@@ -1,9 +1,10 @@
 import * as path from 'path';
-import matter from 'gray-matter';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import { parseMarkdown } from './Frontmatter';
+import { stripOrdinal } from './AssetOrder';
 
 export interface InterlinkInput { filePath: string; raw: string }
 export interface InterlinkChange { filePath: string; raw: string; links: number }
@@ -27,7 +28,6 @@ interface IndexedNode extends InterlinkInput {
 }
 
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkMath);
-const NUMBER_PREFIX = /^\d{3,}\. /;
 const WORD = /[\p{L}\p{N}_]/u;
 const BLOCKED = new Set(['link', 'linkReference', 'image', 'imageReference', 'inlineCode', 'code', 'math', 'inlineMath', 'html', 'heading', 'definition']);
 
@@ -40,10 +40,10 @@ function indexNode(input: InterlinkInput, assetFolder: string, definitionFolder:
   if (!kind || !input.filePath.endsWith('.md')) return null;
   const prefix = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(input.raw);
   if (!prefix) throw new Error(`${input.filePath} needs YAML frontmatter`);
-  const data = matter(input.raw).data;
+  const data = parseMarkdown(input.raw).data;
   const title = data.title;
   if (typeof title !== 'string') throw new Error(`${input.filePath} needs a title`);
-  const unnumbered = title.replace(NUMBER_PREFIX, '');
+  const unnumbered = stripOrdinal(title);
   const term = kind === 'definition' ? /^Definition \((.*)\)$/.exec(unnumbered)?.[1] ?? unnumbered : unnumbered;
   const id = path.posix.basename(input.filePath, '.md');
   return {

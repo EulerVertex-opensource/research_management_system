@@ -1,25 +1,10 @@
-export type NodeType =
-  | 'theorem'
-  | 'lemma'
-  | 'proposition'
-  | 'definition'
-  | 'example'
-  | 'construction'
-  | 'remark'
-  | 'idea'
-  | 'plan'
-  | 'proof_record';
+import type { IdeaKind, NodeType, ResearchStatus } from '../domain/nodeKinds';
+import type { NodeSource } from '../domain/schema';
 
-export type NodeStatus = 'draft' | 'approved' | 'deprecated' | 'archived';
-export type IdeaStatus = 'pending' | 'failed';
-export type ResearchStatus = NodeStatus | IdeaStatus;
+export type { IdeaKind, NodeStatus, NodeType, PlanStatus, IdeaStatus, ResearchStatus } from '../domain/nodeKinds';
+export type { NodeSource } from '../domain/schema';
 
-export interface NodeSource {
-  kind: 'paper' | 'self_proved' | 'textbook' | 'note';
-  paper_id?: string;
-  location?: string;
-}
-
+/** Frontmatter as the dashboard edits it: forward relations only; reverse ones are derived. */
 export interface NodeFrontmatter {
   type: NodeType;
   title: string;
@@ -28,29 +13,32 @@ export interface NodeFrontmatter {
   source?: NodeSource;
   depends_on: string[];
   uses_definitions: string[];
-  used_in: string[];
   related_assets: string[];
   target_asset?: string;
   inspired_by?: string[];
   refutes?: string;
+  idea_kind?: IdeaKind;
 }
 
-export interface ResearchNode {
+export interface ResearchNode extends NodeFrontmatter {
   id: string;
   filePath: string;
-  type: NodeType;
-  title: string;
-  status?: ResearchStatus;
-  tags: string[];
-  source?: NodeSource;
-  depends_on: string[];
-  uses_definitions: string[];
-  used_in: string[];
-  related_assets: string[];
-  target_asset?: string;
-  inspired_by?: string[];
-  refutes?: string;
   body: string;
+  /** 1-based position in dependency order among active assets or definitions; derived, never stored. */
+  order?: number;
+  /** A succeeded plan whose target's proof changed since the plan produced it; derived, never stored. */
+  outdated?: boolean;
+}
+
+/** What the dashboard derives for project.md instead of storing it there: progress, open questions, writing. */
+export interface ProjectSummary {
+  /** project.md predates schema 2; `research-maintenance migrate` upgrades it. */
+  legacy: boolean;
+  required: Array<{ id: string; role?: string; title?: string; status?: string }>;
+  assets: { approved: number; draft: number };
+  openQuestions: Array<{ id: string; title: string }>;
+  /** Section titles in manuscript order, or empty when there is no outline yet. */
+  writingSections: string[];
 }
 
 export type LayoutMode = 'editor' | 'preview' | 'split';
@@ -177,12 +165,4 @@ export interface ManuscriptStatus {
   autoBuild: boolean;
   configurationConflicts: string[];
   message?: string;
-}
-
-export interface AIService {
-  ask(
-    prompt: string,
-    context: ResearchNode[],
-    onChunk: (chunk: string) => void
-  ): Promise<void>;
 }

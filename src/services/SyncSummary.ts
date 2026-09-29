@@ -3,6 +3,7 @@ import { ProjectPaths } from '../models/types';
 import { parseMarkdown } from './Frontmatter';
 import { NameStatus } from './LoopGit';
 import { SharedFolders, statementDigest } from './ResearchLoopModel';
+import { hasSection, sectionContent } from '../domain/sections';
 
 /**
  * Turn a git name-status diff of the research folders into lines a
@@ -43,14 +44,15 @@ export async function summarizeResearchChanges(changes: NameStatus[], context: S
       if (change.status === 'A' || !old) { lines.push(`New ${String(now?.data.status ?? 'draft')} ${kind} ${name}${now?.data.title ? ` (${String(now.data.title)})` : ''}.`); continue; }
       const parts: string[] = [];
       if (before && after && statementDigest(before) !== statementDigest(after)) parts.push('statement changed');
-      else if (old.content !== now?.content) parts.push(/^## Proof/m.test(now?.content ?? '') ? 'proof updated' : 'text edited');
+      else if (old.content !== now?.content) parts.push(hasSection(now?.content ?? '', 'Proof') ? 'proof updated' : 'text edited');
       if (old.data.status !== now?.data.status) parts.push(`${String(old.data.status)} → ${String(now?.data.status)}`);
       lines.push(`${kind[0].toUpperCase()}${kind.slice(1)} ${name}: ${parts.join(', ') || 'metadata changed'}.`);
     } else if (folder === paths.plans) {
       if (change.status === 'D') { lines.push(`Removed plan ${name}.`); continue; }
       const target = String(now?.data.target_asset ?? '?');
-      if (now?.data.type === 'proof_record') { if (old?.data.type !== 'proof_record') lines.push(`Proof record ${name} for ${target}.`); continue; }
-      if (now?.data.status === 'failed' && old?.data.status !== 'failed') lines.push(`Failed plan ${name} for ${target}: ${firstLine(now.content.split(/^## Failure[ \t]*$/m)[1] ?? '')}`);
+      const succeeded = (front: typeof now) => front?.data.status === 'succeeded' || front?.data.type === 'proof_record';
+      if (succeeded(now)) { if (!succeeded(old)) lines.push(`Plan ${name} succeeded: proof of ${target} recorded.`); continue; }
+      if (now?.data.status === 'failed' && old?.data.status !== 'failed') lines.push(`Failed plan ${name} for ${target}: ${firstLine(sectionContent(now.content, 'Failure'))}`);
       else if (change.status === 'A') lines.push(`New ${String(now?.data.status ?? '')} plan ${name} for ${target}.`);
     } else if (folder === paths.ideas) {
       if (change.status === 'A') lines.push(`New idea ${name}: ${String(now?.data.title ?? '')}.`);
