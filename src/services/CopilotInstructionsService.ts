@@ -72,7 +72,8 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - To cite a local source PDF in Markdown, link to its configured \`${paths.localSourcePdfs}/<slug>.pdf\` path relative to the Markdown file. The dashboard opens these links in VS Code's PDF viewer; the PDF remains local and ignored by Git.
 - Do not invent a node or paper ID; verify it from the shared files.
 - Before editing LaTeX, read every configured macro/preamble file and the notation reference when present.
-- Cite manuscript use of a node with a \`% [node_id]\` comment.
+- Wrap manuscript passages that present a node in \`% research-assistant:block id=... sources=node@component\` ... \`% research-assistant:endblock\` markers (see draft-latex); follow each block's policy (managed, assisted, manual).
+- A section's lock (\`writing/bindings/<id>.json\`) records the research it was written from; \`manuscript-writing.cjs impact\` reports which sections are stale. Update only stale sections, and only the passages the change touches.
 - Block Markdown math must put opening and closing \`$$\` on separate lines.
 - Approval is a researcher action: never set \`status: approved\` and never edit approval records; request approval through the research loop's \`request_approval\` tool.
 - A failed proof plan is not a falsification; only a verified counterexample confirmed by the researcher refutes a statement.

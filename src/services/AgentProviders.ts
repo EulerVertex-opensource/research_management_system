@@ -87,6 +87,8 @@ export function allChatHints(): string { return PROVIDER_IDS.map((id) => `${invo
  * also the path SKILL.md documents; one spelling keeps instructions identical.
  */
 export const LOOP_COMMAND = `node ${AGENT_PROVIDERS.codex.skillsDir}/${LOOP_SKILL}/scripts/${LOOP_SCRIPT}`;
+/** The manuscript CLI as the draft-latex skill documents it. */
+export const MANUSCRIPT_COMMAND = `node ${AGENT_PROVIDERS.codex.skillsDir}/draft-latex/scripts/manuscript-writing.cjs`;
 
 /** Bundled skills that were merged or replaced; installs remove their copies and the generated .gitignore keeps ignoring them. */
 export const RETIRED_SKILLS = [

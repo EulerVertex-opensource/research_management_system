@@ -1,9 +1,8 @@
-import * as crypto from 'crypto';
 import * as path from 'path';
 import type matter from 'gray-matter';
 import { parseMarkdown } from './Frontmatter';
-import { LEGACY_SOURCE_KINDS, NodeKind } from '../domain/nodeKinds';
-import { approvedProjectParts } from '../domain/project';
+import { NodeKind } from '../domain/nodeKinds';
+import { researchDigest } from '../domain/digests';
 import { nodeProblems } from '../domain/schema';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 
@@ -118,46 +117,7 @@ export interface StageReport {
 
 export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; checks?: string; decisions?: string; handoffs?: string }
 
-function normalizeProse(text: string): string {
-  return stripManagedBlocks(text)
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/** Frontmatter keys a digest ignores: presentation, lifecycle, and fields older schemas stored. */
-const UNAPPROVED_KEYS = ['status', 'title', 'used_in', 'tags', 'proof_digest', 'resolved_by'];
-
-/** Frontmatter as a digest sees it: unapproved keys dropped, legacy names mapped so a rename never invalidates an approval. */
-function approvedData(data: Record<string, any>): Record<string, any> {
-  const result = { ...data };
-  for (const key of UNAPPROVED_KEYS) delete result[key];
-  if (result.source && typeof result.source === 'object' && LEGACY_SOURCE_KINDS[result.source.kind]) result.source = { ...result.source, kind: LEGACY_SOURCE_KINDS[result.source.kind] };
-  return result;
-}
-
-const sha = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
-
-/** Digest of the parts of a node or the project that a researcher approves. */
-export function researchDigest(raw: string, kind: 'project' | 'asset' | 'definition'): string {
-  if (kind === 'project') {
-    return sha(approvedProjectParts(raw).map(normalizeProse).join('\n'));
-  }
-  const parsed = parseMarkdown(raw);
-  return sha(JSON.stringify(sortKeys(approvedData(parsed.data))) + '\n' + normalizeProse(parsed.content));
-}
-
-/** Digest of the statement alone; changes here invalidate dependants and freeze proofs. */
-export function statementDigest(raw: string): string {
-  const parsed = parseMarkdown(raw);
-  return sha(JSON.stringify(sortKeys(approvedData(parsed.data))) + '\n' + normalizeProse(statementPart(parsed.content)));
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value as object).sort().map((key) => [key, sortKeys((value as Record<string, unknown>)[key])]));
-  return value;
-}
+export { researchDigest, statementDigest, proofDigest } from '../domain/digests';
 
 export function isApproved(records: ApprovalRecord[], kind: 'project' | 'asset' | 'definition', target: string, raw: string): boolean {
   return records.some((record) => record.kind === kind && record.target === target && record.digest === researchDigest(raw, kind));
@@ -170,8 +130,6 @@ export function safeRelativeFile(filePath: string): string {
 }
 
 export function proofText(body: string): string { return sectionContent(body, 'Proof'); }
-/** Digest of an asset's `## Proof`, stamped on the plan that produced it so a later edit marks that plan outdated. */
-export function proofDigest(raw: string): string { return sha(normalizeProse(proofText(parseMarkdown(raw).content))); }
 export function statementIncomplete(body: string): boolean {
   const statement = stripManagedBlocks(statementPart(body));
   return !statement.trim() || /Write the .* here\.|Describe the .* here\./.test(statement);

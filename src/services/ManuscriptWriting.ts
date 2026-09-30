@@ -1,4 +1,6 @@
 import { parseMarkdown } from './Frontmatter';
+import { ASSET_COMPONENTS, AssetComponent, PROJECT_FACETS, ProjectFacet } from '../domain/digests';
+import { BLOCK_END, blockStart } from '../domain/texBlocks';
 
 export const SECTION_START = '% research-assistant:sections:start';
 export const SECTION_END = '% research-assistant:sections:end';
@@ -9,9 +11,20 @@ export interface WritingSection {
   title: string;
 }
 
+/** How a section uses a node; drives which rhetoric a change touches, not freshness. */
+export const SOURCE_ROLES = ['central_result', 'supporting_result', 'definition', 'motivation', 'counterexample', 'citation', 'background'] as const;
+export type SourceRole = typeof SOURCE_ROLES[number];
+
+/** A node a section presents and the components it presents; a change to another component leaves the section current. */
+export interface BriefSource { id: string; role?: SourceRole; uses: AssetComponent[] }
+
 export interface SectionBrief {
   title: string;
+  /** Every source ID, `assets` entries first; kept for callers that only need the IDs. */
   assets: string[];
+  sources: BriefSource[];
+  /** Project facets a rhetorical section (introduction, abstract, conclusion) restates. */
+  projectFacets: ProjectFacet[];
   body: string;
 }
 
@@ -40,16 +53,45 @@ export function parseWritingOutline(raw: string): WritingSection[] {
   return sections;
 }
 
+/**
+ * `assets: [id]` is the plain form: each entry presents every component, so any
+ * change marks the section stale. `sources` narrows that with a role and the
+ * components actually presented.
+ */
 export function parseSectionBrief(raw: string, id: string): SectionBrief {
   const parsed = parseMarkdown(raw);
   const title = parsed.data.title;
   const assets = parsed.data.assets;
+  const sources = parsed.data.sources;
   if (typeof title !== 'string' || !title.trim()) throw new Error(`Section ${id} needs a title in YAML frontmatter`);
-  if (!Array.isArray(assets) || assets.some((asset) => typeof asset !== 'string' || !SECTION_ID.test(asset))) {
+  if (assets === undefined && sources === undefined) throw new Error(`Section ${id} needs an assets list of stable node IDs`);
+  if (assets !== undefined && (!Array.isArray(assets) || assets.some((asset) => typeof asset !== 'string' || !SECTION_ID.test(asset)))) {
     throw new Error(`Section ${id} needs an assets list of stable node IDs`);
   }
-  if (new Set(assets).size !== assets.length) throw new Error(`Section ${id} repeats an asset ID`);
-  return { title: title.trim(), assets, body: parsed.content };
+  if (sources !== undefined && !Array.isArray(sources)) throw new Error(`Section ${id}: sources must be a list`);
+  const list: BriefSource[] = [
+    ...((assets ?? []) as string[]).map((asset) => ({ id: asset, uses: [...ASSET_COMPONENTS] })),
+    ...((sources ?? []) as unknown[]).map((entry) => briefSource(entry, id)),
+  ];
+  const ids = list.map((source) => source.id);
+  if (new Set(ids).size !== ids.length) throw new Error(`Section ${id} repeats an asset ID`);
+  const facets = parsed.data.project_facets ?? [];
+  if (!Array.isArray(facets) || facets.some((facet) => !(PROJECT_FACETS as readonly string[]).includes(facet))) {
+    throw new Error(`Section ${id}: project_facets must list ${PROJECT_FACETS.join(', ')}`);
+  }
+  return { title: title.trim(), assets: ids, sources: list, projectFacets: facets as ProjectFacet[], body: parsed.content };
+}
+
+function briefSource(entry: unknown, section: string): BriefSource {
+  if (typeof entry === 'string') entry = { id: entry };
+  const source = entry as { id?: unknown; role?: unknown; uses?: unknown };
+  if (!source || typeof source.id !== 'string' || !SECTION_ID.test(source.id)) throw new Error(`Section ${section}: each source needs a stable node id`);
+  if (source.role !== undefined && !(SOURCE_ROLES as readonly unknown[]).includes(source.role)) throw new Error(`Section ${section}: source ${source.id} role must be one of ${SOURCE_ROLES.join(', ')}`);
+  const uses = source.uses ?? [...ASSET_COMPONENTS];
+  if (!Array.isArray(uses) || !uses.length || uses.some((use) => !(ASSET_COMPONENTS as readonly unknown[]).includes(use))) {
+    throw new Error(`Section ${section}: source ${source.id} uses must list ${ASSET_COMPONENTS.join(', ')}`);
+  }
+  return { id: source.id, ...(source.role ? { role: source.role as SourceRole } : {}), uses: [...new Set(uses as AssetComponent[])] };
 }
 
 /** Only the marked input block may change; all other manuscript text is retained. */
@@ -79,8 +121,9 @@ export function syncInputBlock(mainTex: string, inputs: string[]): { before: str
   return { before, after, updated: mainTex.slice(0, lineEnd + 1) + after + mainTex.slice(endLineStart) };
 }
 
-export function sectionTexSkeleton(id: string, title: string, assets: string[]): string {
+/** A new section: one assisted block per brief source, so later research changes point at the passage that presents it. */
+export function sectionTexSkeleton(id: string, title: string, sources: BriefSource[]): string {
   const escapedTitle = title.replace(/[\\&%$#_{}]/g, (character) => `\\${character}`);
-  const sourceComments = assets.map((asset) => `% [${asset}]`).join('\n');
-  return `% Manuscript section: ${id}\n\\section{${escapedTitle}}\\label{sec:${id}}\n\n${sourceComments ? `${sourceComments}\n` : ''}% TODO: Draft from the approved assets in the section brief.\n`;
+  const blocks = sources.map((source) => `${blockStart(source.id.replace(/_/g, '-'), [{ id: source.id, components: source.uses }])}\n% TODO: Present ${source.id} from its approved node.\n${BLOCK_END}\n`).join('\n');
+  return `% Manuscript section: ${id}\n\\section{${escapedTitle}}\\label{sec:${id}}\n\n${blocks ? `${blocks}\n` : ''}% TODO: Draft from the approved assets in the section brief.\n`;
 }

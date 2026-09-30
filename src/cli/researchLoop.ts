@@ -283,6 +283,8 @@ async function main(): Promise<void> {
       else if (args.flags.brief) out(core.briefStatus());
       else {
         out(core.briefStatus());
+        const manuscript = await core.manuscriptStatus();
+        if (manuscript) out(manuscript);
         const audit = await core.contextAudit();
         if (audit.tokens !== undefined) out(`Context: pack ~${audit.tokens}/${audit.budget} tokens; ${audit.requests.length} show request(s)${audit.requests.length ? ` (${audit.requests.join(', ')})` : ''}; ${audit.outside.length} read(s) outside the pack${audit.outside.length ? ` (${audit.outside.slice(0, 8).join(', ')})` : ''}.`);
         const events = await core.recentEvents(8); if (events.length) out('Recent events:\n' + events.map((event) => `- ${String(event.at)} ${String(event.type)}${event.stage ? ` ${String(event.stage)}` : ''}${event.assetId ? ` ${String(event.assetId)}` : ''}${event.summary ? ` — ${String(event.summary)}` : ''}`).join('\n')); }

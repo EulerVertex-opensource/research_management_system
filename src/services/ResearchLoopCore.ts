@@ -1,7 +1,9 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import type matter from 'gray-matter';
-import { LOOP_COMMAND } from './AgentProviders';
+import { LOOP_COMMAND, MANUSCRIPT_COMMAND } from './AgentProviders';
+import { loadManuscriptImpact } from './ManuscriptImpactLoader';
+import { renderImpact } from '../domain/manuscriptImpact';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
@@ -13,7 +15,7 @@ import { IdeaKind, MAX_FAILED_PLANS, PROVABLE_TYPES } from '../domain/nodeKinds'
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
 import { hasSection, sectionContent } from '../domain/sections';
-import { approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
+import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
 import {
   CheckInfo, DecisionInfo, DecisionKind, Provenance, checkMarkdown, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
@@ -159,7 +161,11 @@ export class ResearchLoopCore {
   // ---------- run control ----------
 
   async start(provider: AgentProvider, options: { goal?: string; sessionId?: string; force?: boolean } = {}): Promise<LoopState> {
-    if (this.state && this.state.status === 'running' && !options.force) throw new Error('A research loop is already running. Use resume, or stop it first.');
+    if (this.state && this.state.status === 'running' && !options.force) {
+      // A new goal for a running loop is an extension, never a reason to refuse it.
+      if (options.goal?.trim()) return this.extend(options.goal, { provider, sessionId: options.sessionId });
+      throw new Error('A research loop is already running. Use resume, or stop it first.');
+    }
     const state = newState(provider, this.id(), this.now(), this.iterationCap);
     if (options.goal?.trim()) state.researcherInput = { kind: 'goals', text: options.goal.trim(), at: this.now() };
     this.state = state;
@@ -174,12 +180,19 @@ export class ResearchLoopCore {
     return state;
   }
 
-  /** Add a new goal to an approved project: reopen project.md for new required results, keeping the existing ones. */
+  /**
+   * Add a new goal. On an approved project this reopens project.md for new required results, keeping the existing ones;
+   * on a project still under revision the goal is folded into the draft.
+   */
   async extend(goal: string, options: { provider?: AgentProvider; sessionId?: string; force?: boolean } = {}): Promise<LoopState> {
     if (!goal.trim()) throw new Error('Describe the new goal to add.');
-    if (!(await this.isProjectApproved())) throw new Error('project.md is not approved yet; finish or revise the current project instead of extending it.');
     const state = this.state;
-    if (!state || state.status === 'stopped' || state.status === 'idle') return this.start(options.provider ?? state?.provider ?? 'claude', { goal, sessionId: options.sessionId, force: true });
+    if (!state || state.status === 'stopped' || state.status === 'idle') {
+      const started = await this.start(options.provider ?? state?.provider ?? 'claude', { goal, sessionId: options.sessionId, force: true });
+      // An explicit extension of a project under revision drafts the goal in, rather than reviewing the old text.
+      if (started.stage !== 'draft_project' && !(await this.isProjectApproved())) await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined });
+      return started;
+    }
     if (options.provider) state.provider = options.provider;
     if (options.sessionId && !this.heartbeat(options.sessionId, options.force)) throw new Error(`Another session (${state.lock?.sessionId}) is driving this loop. Pass --force to take over.`);
     state.status = 'running';
@@ -268,6 +281,7 @@ export class ResearchLoopCore {
 
   private async record(kind: ApprovalRecord['kind'], target: string, raw: string, source: string): Promise<void> {
     const file = await this.approvals();
+    const previous = file.records.find((entry) => entry.kind === kind && entry.target === target);
     file.records = file.records.filter((entry) => !(entry.kind === kind && entry.target === target));
     const provenance = await this.provenance();
     const record: ApprovalRecord = { kind, target, digest: researchDigest(raw, kind), approvedAt: provenance.created_at, source, performed_by: provenance.performed_by };
@@ -276,6 +290,14 @@ export class ResearchLoopCore {
     if (provenance.extension_version) record.extension_version = provenance.extension_version;
     file.records.push(record);
     await this.writeApprovals(file);
+    if (kind === 'project') await this.recordProjectRevision(raw, record, previous);
+  }
+
+  private async recordProjectRevision(project: string, record: ApprovalRecord, previous?: ApprovalRecord): Promise<void> {
+    const written = await appendProjectRevision(this.files, this.paths.researchRoot, project, record, previous);
+    if (!written) return;
+    await this.refreshSnapshot([written]);
+    await this.event('project_revision', { file: written });
   }
 
   /** Record digests for nodes that were approved before the loop existed, so validation does not revert them. */
@@ -875,12 +897,28 @@ export class ResearchLoopCore {
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
     }
     const result = this.result();
+    if (state.stage === 'ready') {
+      const manuscript = await this.manuscriptStatus();
+      if (manuscript) result.instruction += `\n${manuscript}`;
+    }
     if (!hasContextPack(state.stage)) return result;
     const pack = await this.contextPack();
     result.brief.context = { file: CONTEXT_PACK_PATH, tokens: pack.tokens, items: pack.included.map((item) => `${item.id}${Array.isArray(item.view) ? `#${item.view.join(',')}` : item.view === 'all' ? '' : `#${item.view}`}`), omitted: pack.omitted.map((item) => item.id) };
     if (pack.manifest.worker) result.brief.worker = pack.manifest.worker;
     result.instruction += `\nContext pack (~${pack.tokens} tokens): ${CONTEXT_PACK_PATH}. Read it instead of the research folders; for anything else run ${LOOP_COMMAND} show <id> [--section Heading] and say why.${pack.manifest.worker ? ` Subagent: research-worker-${pack.manifest.worker}.` : ''}`;
     return result;
+  }
+
+  /**
+   * The manuscript's freshness against the research, a second status beside the loop stage:
+   * research can be ready while the manuscript is uncovered or stale. Undefined before an outline exists.
+   */
+  async manuscriptStatus(): Promise<string | undefined> {
+    let impact;
+    try { impact = await loadManuscriptImpact(this.files, this.paths); } catch (error) { return `Manuscript: unreadable (${error instanceof Error ? error.message : String(error)})`; }
+    if (!impact) return undefined;
+    if (impact.state === 'current') return renderImpact(impact).split('\n')[0];
+    return `${renderImpact(impact)}\nUpdate only these sections: plan-manuscript for uncovered results, draft-latex for stale ones (${MANUSCRIPT_COMMAND} prepare <section> lists only what changed). After the researcher reviews a section, they lock it with ${MANUSCRIPT_COMMAND} lock <section> --apply.`;
   }
 
   // ---------- context packs ----------
@@ -1513,6 +1551,7 @@ export class ResearchLoopCore {
     const unread = state.answers.filter((answer) => !answer.consumed);
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
+    if (state.stage === 'ready') lines.push(`If the researcher's message asks for a new result or goal, run: ${LOOP_COMMAND} extend --goal "<their goal>"`);
     lines.push(state.status === 'running' && !state.pendingQuestion ? `Continue with: ${LOOP_COMMAND} next` : 'Approval is a researcher action; never set status: approved.');
     return lines.join('\n');
   }

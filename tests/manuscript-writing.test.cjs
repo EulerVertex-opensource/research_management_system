@@ -113,7 +113,7 @@ test('prepare validates sources and creates a section once; sync changes only th
     assert.equal(p.run('prepare', 'main_result', '--apply').status, 0);
     const texPath = path.join(p.paths.sections, 'main_result.tex');
     assert.match(p.read(texPath), /\\section{Main result}/);
-    assert.match(p.read(texPath), /% \[main_theorem\]/);
+    assert.match(p.read(texPath), /% research-assistant:block id=main-theorem sources=main_theorem policy=assisted\n% TODO: Present main_theorem[^\n]*\n% research-assistant:endblock/);
     p.write(texPath, '\\section{Main result}\n% [main_theorem]\nAuthor edit.\n');
     assert.equal(p.run('prepare', 'main_result', '--apply').status, 0);
     assert.match(p.read(texPath), /Author edit/);

@@ -1,13 +1,21 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parseMarkdown } from '../services/Frontmatter';
-import { loadProjectConfig, loadProjectPaths } from './nodeFiles';
-import { parseSectionBrief, parseWritingOutline, sectionTexSkeleton, syncInputBlock, validSectionId, WritingSection } from '../services/ManuscriptWriting';
+import { NodeLoopFiles, loadProjectConfig, loadProjectPaths } from './nodeFiles';
+import { openGit } from './nodeGit';
+import { SectionBrief, parseSectionBrief, parseWritingOutline, sectionTexSkeleton, syncInputBlock, validSectionId, WritingSection } from '../services/ManuscriptWriting';
+import { bindingPath, loadImpactNodes, loadManuscriptImpact, loadProjectRevision, readSectionBinding } from '../services/ManuscriptImpactLoader';
+import { lockBinding, renderImpact, sectionImpact } from '../domain/manuscriptImpact';
+import { ProjectPaths } from '../models/types';
 import { isCited } from '../domain/schema';
 
 type Mode = 'preview' | 'apply';
 interface Paths {
   root: string;
+  /** Project-relative paths, for the shared loop file readers. */
+  config: ProjectPaths;
+  files: NodeLoopFiles;
+  project: string;
   latexRoot: string;
   main: string;
   sections: string;
@@ -32,6 +40,8 @@ async function projectPaths(root: string): Promise<Paths> {
   const inside = (relative: string): string => within(root, relative);
   return {
     root, latexRoot: inside(raw.latex.projectRoot),
+    config, files: new NodeLoopFiles(root),
+    project: inside(config.projectMd),
     main: inside(config.mainTex),
     sections: inside(config.sections),
     outline: inside(config.writingOutline),
@@ -44,25 +54,33 @@ async function projectPaths(root: string): Promise<Paths> {
   };
 }
 
-async function readBrief(paths: Paths, section: WritingSection, checkAssetFiles: boolean): Promise<string[]> {
+async function readBrief(paths: Paths, section: WritingSection, checkAssetFiles: boolean): Promise<SectionBrief> {
   const file = path.join(paths.briefs, `${section.id}.md`);
   const brief = parseSectionBrief(await fs.readFile(file, 'utf8'), section.id);
   if (brief.title !== section.title) throw new Error(`Outline title and brief title differ for ${section.id}`);
   if (checkAssetFiles) {
     for (const id of brief.assets) {
-      try { await fs.access(path.join(paths.assets, `${id}.md`)); }
-      catch { throw new Error(`Section ${section.id} references unknown asset: ${id}`); }
+      const found = await fs.access(path.join(paths.assets, `${id}.md`)).then(() => true, () => fs.access(path.join(paths.definitions, `${id}.md`)).then(() => true, () => false));
+      if (!found) throw new Error(`Section ${section.id} references unknown asset: ${id}`);
     }
   }
-  return brief.assets;
+  return brief;
 }
 
 async function sectionsAndBriefs(paths: Paths): Promise<{ section: WritingSection; assets: string[] }[]> {
   const sections = parseWritingOutline(await fs.readFile(paths.outline, 'utf8'));
   return Promise.all(sections.map(async (section) => ({
-    section, assets: await readBrief(paths, section, true),
+    section, assets: (await readBrief(paths, section, true)).assets,
   })));
 }
+
+const POLICY_ACTION = {
+  managed: 'Rewrite this block from its sources.',
+  assisted: 'Propose a patch to this block; the researcher confirms it.',
+  manual: 'Do not edit; tell the researcher what changed.',
+} as const;
+
+const texFileOf = (paths: Paths, id: string) => path.join(paths.sections, `${id}.tex`);
 
 function nodeIds(value: unknown, field: string, id: string): string[] {
   if (value === undefined) return [];
@@ -72,18 +90,23 @@ function nodeIds(value: unknown, field: string, id: string): string[] {
   return value;
 }
 
-async function prepare(paths: Paths, id: string, mode: Mode): Promise<void> {
+async function prepare(paths: Paths, id: string, mode: Mode, full: boolean): Promise<void> {
   if (!validSectionId(id)) throw new Error(`Invalid section ID: ${id}`);
   const sections = parseWritingOutline(await fs.readFile(paths.outline, 'utf8'));
   const selected = sections.find((entry) => entry.id === id);
   if (!selected) throw new Error(`Section ${id} is not listed in the writing outline`);
-  const selectedAssets = await readBrief(paths, selected, false);
+  const brief = await readBrief(paths, selected, false);
+  const selectedAssets = brief.assets;
   const assetFiles = new Set<string>();
   const definitionFiles = new Set<string>();
   const paperIds = new Set<string>();
 
   const visit = async (kind: 'asset' | 'definition', nodeId: string): Promise<void> => {
-    const folder = kind === 'asset' ? paths.assets : paths.definitions;
+    let folder = kind === 'asset' ? paths.assets : paths.definitions;
+    // A brief source may name a definition the section introduces.
+    if (kind === 'asset' && !(await fs.access(path.join(folder, `${nodeId}.md`)).then(() => true, () => false)) && (await fs.access(path.join(paths.definitions, `${nodeId}.md`)).then(() => true, () => false))) {
+      kind = 'definition'; folder = paths.definitions;
+    }
     const seen = kind === 'asset' ? assetFiles : definitionFiles;
     const file = path.join(folder, `${nodeId}.md`);
     if (seen.has(file)) return;
@@ -121,16 +144,46 @@ async function prepare(paths: Paths, id: string, mode: Mode): Promise<void> {
     catch { throw new Error(`Missing configured manuscript preamble file: ${path.relative(paths.root, file)}`); }
   }
 
-  const texFile = path.join(paths.sections, `${id}.tex`);
+  const texFile = texFileOf(paths, id);
   const existing = await fs.access(texFile).then(() => true, () => false);
   process.stdout.write(`Section: ${id}\nTeX: ${path.relative(paths.root, texFile)} (${existing ? 'existing; preserve edits' : 'missing; create on --apply'})\n`);
   process.stdout.write(`Brief: ${path.relative(paths.root, path.join(paths.briefs, `${id}.md`))}\n`);
-  for (const file of [...assetFiles, ...definitionFiles]) process.stdout.write(`Context: ${path.relative(paths.root, file)}\n`);
+  // With a lock, only what changed since then is context; the rest is already in the TeX.
+  const binding = await readSectionBinding(paths.files, paths.config, id);
+  let context = [...assetFiles, ...definitionFiles];
+  if (binding && existing && !full) {
+    const { project } = await loadProjectRevision(paths.files, paths.config);
+    const impact = sectionImpact({ id, title: selected.title, brief, binding, texRaw: await fs.readFile(texFile, 'utf8') }, await loadImpactNodes(paths.files, paths.config), project);
+    const changed = new Set([...impact.stale.map((item) => item.id), ...impact.added, ...impact.invalid.map((item) => item.id)]);
+    const bound = new Set(binding.sources.map((source) => source.id));
+    const isChanged = (file: string) => { const node = path.basename(file, '.md'); return changed.has(node) || !bound.has(node); };
+    process.stdout.write(`Lock: ${impact.state}${impact.lockedRevision ? ` at project revision ${impact.lockedRevision}` : ''}; locked ${binding.lockedAt}\n`);
+    for (const item of impact.stale) process.stdout.write(`Changed: ${item.id} (${item.components.join(', ')})\n`);
+    for (const facet of impact.facets) process.stdout.write(`Changed: project ${facet} (read that part of ${path.relative(paths.root, paths.project)})\n`);
+    const tex = path.relative(paths.root, texFile);
+    for (const block of impact.blocks.filter((item) => item.state !== 'current')) {
+      const where = block.lines ? `${tex}:${block.lines[0]}-${block.lines[1]}` : `${tex} (block removed)`;
+      const reasons = [...block.invalid.map((problem) => `${problem.id} ${problem.reason}`), ...block.stale.map((item) => `${item.id} ${item.components.join('+')}`)].join('; ');
+      process.stdout.write(`Block: ${block.id} ${where} [${block.policy}] — ${reasons}. ${POLICY_ACTION[block.policy]}\n`);
+    }
+    if (impact.blocks.length) {
+      for (const item of impact.outside) process.stdout.write(`Outside blocks: ${item.id} ${item.components.join('+')} changed; check the prose around the blocks.\n`);
+      const current = impact.blocks.filter((item) => item.state === 'current').map((item) => item.id);
+      if (current.length) process.stdout.write(`Current blocks (leave unchanged): ${current.join(', ')}\n`);
+      if (!impact.outside.length && !impact.facets.length && !impact.added.length) process.stdout.write('Read only the listed block lines of the TeX, not the whole section.\n');
+    }
+    for (const node of impact.added) process.stdout.write(`Added to brief: ${node}\n`);
+    for (const node of impact.removed) process.stdout.write(`Removed from brief: ${node}\n`);
+    const unchanged = context.filter((file) => !isChanged(file)).map((file) => path.basename(file, '.md'));
+    if (unchanged.length) process.stdout.write(`Unchanged since lock (already in the TeX; do not reread): ${unchanged.join(', ')}\n`);
+    context = context.filter(isChanged);
+  }
+  for (const file of context) process.stdout.write(`Context: ${path.relative(paths.root, file)}\n`);
   for (const file of [paths.main, ...paths.macros, ...(paths.notations ? [paths.notations] : [])]) process.stdout.write(`Preamble: ${path.relative(paths.root, file)}\n`);
   for (const key of paperIds) process.stdout.write(`Citation: ${key}\n`);
   if (mode === 'apply' && !existing) {
     await fs.mkdir(paths.sections, { recursive: true });
-    await fs.writeFile(texFile, sectionTexSkeleton(id, selected.title, selectedAssets), { flag: 'wx' });
+    await fs.writeFile(texFile, sectionTexSkeleton(id, selected.title, brief.sources), { flag: 'wx' });
     process.stdout.write(`Created ${path.relative(paths.root, texFile)}\n`);
   }
 }
@@ -157,24 +210,61 @@ async function sync(paths: Paths, mode: Mode): Promise<void> {
   }
 }
 
+async function impact(paths: Paths, only: string | undefined, json: boolean): Promise<void> {
+  const result = await loadManuscriptImpact(paths.files, paths.config, only);
+  if (!result) throw new Error(`No writing outline at ${paths.config.writingOutline}; plan the manuscript first.`);
+  process.stdout.write(json ? JSON.stringify(result, null, 2) + '\n' : renderImpact(result) + '\n');
+}
+
+async function lock(paths: Paths, id: string, mode: Mode): Promise<void> {
+  if (!validSectionId(id)) throw new Error(`Invalid section ID: ${id}`);
+  const selected = parseWritingOutline(await fs.readFile(paths.outline, 'utf8')).find((entry) => entry.id === id);
+  if (!selected) throw new Error(`Section ${id} is not listed in the writing outline`);
+  const texFile = texFileOf(paths, id);
+  const texRaw = await fs.readFile(texFile, 'utf8').catch(() => { throw new Error(`Missing TeX section: ${path.relative(paths.root, texFile)}. Draft it before locking.`); });
+  const { project, revision } = await loadProjectRevision(paths.files, paths.config);
+  const git = await openGit(paths.root);
+  const binding = lockBinding({
+    section: id, tex: path.relative(paths.root, texFile).split(path.sep).join('/'), texRaw, brief: await readBrief(paths, selected, true), nodes: await loadImpactNodes(paths.files, paths.config),
+    project, projectRevision: revision, lockedAt: new Date().toISOString(), performedBy: await git?.userEmail(),
+  });
+  const file = path.join(paths.root, bindingPath(paths.config, id));
+  process.stdout.write(`Binding: ${path.relative(paths.root, file)}\nProject revision: ${revision ?? 'unapproved'}\n`);
+  for (const source of binding.sources) process.stdout.write(`Source: ${source.id} (${source.uses.join(', ')})${source.via === 'direct' ? '' : ` via ${source.via}`}\n`);
+  if (Object.keys(binding.facets).length) process.stdout.write(`Project facets: ${Object.keys(binding.facets).join(', ')}\n`);
+  for (const block of binding.blocks ?? []) process.stdout.write(`Block: ${block.id} [${block.policy}] ${block.sources.map((source) => `${source.id}@${source.components.join('+')}`).join(', ')}\n`);
+  if (!binding.blocks?.length) process.stdout.write('No block markers: the section is tracked as a whole.\n');
+  if (mode === 'apply') {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify(binding, null, 2) + '\n');
+    process.stdout.write('Locked: the section is recorded as reconciled with the current research.\n');
+  } else {
+    process.stdout.write('Preview only; lock with --apply after the researcher has reviewed the TeX.\n');
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const action = args[0];
-  if (action !== 'sync' && action !== 'prepare') throw new Error('Usage: manuscript-writing <sync | prepare SECTION_ID> [--preview | --apply] [--project PROJECT_ROOT]');
+  const usage = 'Usage: manuscript-writing <sync | prepare SECTION_ID [--full] | impact [SECTION_ID] [--json] | lock SECTION_ID> [--preview | --apply] [--project PROJECT_ROOT]';
+  if (!['sync', 'prepare', 'impact', 'lock'].includes(action)) throw new Error(usage);
   const projectIndex = args.indexOf('--project');
   if (projectIndex >= 0 && !args[projectIndex + 1]) throw new Error('--project needs a path');
   if (args.includes('--apply') && args.includes('--preview')) throw new Error('Choose --preview or --apply');
-  const allowed = new Set(['--project', '--preview', '--apply']);
+  const allowed = new Set(['--project', '--preview', '--apply', '--json', '--full']);
   const positional = args.slice(1).filter((arg, index) => {
     const previous = args[index];
     return previous !== '--project' && !allowed.has(arg);
   });
   if (action === 'sync' && positional.length) throw new Error('sync takes no section ID');
-  if (action === 'prepare' && positional.length !== 1) throw new Error('prepare needs one section ID');
+  if ((action === 'prepare' || action === 'lock') && positional.length !== 1) throw new Error(`${action} needs one section ID`);
+  if (action === 'impact' && positional.length > 1) throw new Error('impact takes at most one section ID');
   const root = path.resolve(projectIndex >= 0 ? args[projectIndex + 1] : process.cwd());
   const paths = await projectPaths(root);
   const mode: Mode = args.includes('--apply') ? 'apply' : 'preview';
-  if (action === 'prepare') await prepare(paths, positional[0], mode);
+  if (action === 'prepare') await prepare(paths, positional[0], mode, args.includes('--full'));
+  else if (action === 'impact') await impact(paths, positional[0], args.includes('--json'));
+  else if (action === 'lock') await lock(paths, positional[0], mode);
   else await sync(paths, mode);
 }
 

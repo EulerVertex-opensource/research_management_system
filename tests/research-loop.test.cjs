@@ -176,6 +176,35 @@ test('starting with a goal on an approved project extends it instead of returnin
   assert.equal((await f.core.next()).stage, 'draft_project');
 });
 
+test('a goal given while the loop runs extends it, and an unapproved draft takes the goal before review', async () => {
+  const f = fixture();
+  await driveToReady(f);
+  assert.match(f.core.briefStatus(), /extend --goal/);
+  await f.core.start('claude', { goal: 'Add a new conjecture.' });
+  assert.equal(f.core.current.stage, 'draft_project');
+  assert.deepEqual(f.core.current.extension.baselineRequired, ['main_theorem']);
+
+  const g = fixture({ 'research/project.md': project });
+  await g.core.extend('Also prove B.');
+  assert.equal(g.core.current.stage, 'draft_project');
+  assert.match((await g.core.next()).instruction, /Also prove B/);
+  await g.core.report({ outcome: 'complete', summary: 'Drafted' });
+  assert.equal(g.core.current.stage, 'review_project');
+});
+
+test('ready reports the manuscript as a second status beside the research', async () => {
+  const f = fixture();
+  await driveToReady(f);
+  assert.doesNotMatch((await f.core.next()).instruction, /Manuscript:/);
+  f.map.set('research/writing/outline.md', '# Outline\n\n## Sections\n\n1. [Main result](sections/main_result.md)\n');
+  f.map.set('research/writing/sections/main_result.md', '---\ntitle: Main result\nassets: []\n---\n');
+  const ready = await f.core.next();
+  assert.equal(ready.stage, 'ready');
+  assert.match(ready.instruction, /Manuscript: uncovered \(project revision 1\)/);
+  assert.match(ready.instruction, /Uncovered required results: main_theorem\n- main_result: unlocked/);
+  assert.match(ready.instruction, /manuscript-writing\.cjs lock <section> --apply/);
+});
+
 test('execution may not change the statement, and failed plans need a difference section', async () => {
   const f = fixture();
   await driveToPlan(f);
@@ -429,7 +458,6 @@ test('CLI extend reopens an approved project for a new goal', () => {
   const p = tempProject();
   try {
     p.write('research/project.md', project);
-    assert.equal(p.run(['extend', '--goal', 'New conjecture']).status, 1);
     p.write('research/approvals.json', JSON.stringify({ version: 1, records: [{ kind: 'project', target: 'project', digest: researchDigest(project, 'project'), approvedAt: 'now' }] }));
     const extended = p.run(['extend', '--goal', 'New conjecture', '--provider', 'codex']);
     assert.equal(extended.status, 0, extended.stderr);
