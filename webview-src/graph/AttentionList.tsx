@@ -7,6 +7,8 @@ interface Props {
   onAction: (action: GraphAction) => void;
   onFocus: (id: string) => void;
   onSection: (id: string) => void;
+  /** Show a node in the dashboard's own detail view (preview and metadata) rather than a text editor. */
+  onNavigate: (id: string) => void;
 }
 
 const PRIORITY: Record<number, { label: string; hint: string; color: string }> = {
@@ -30,7 +32,7 @@ function withText(action: GraphAction, text: string): GraphAction {
   return action;
 }
 
-function Item({ item, onAction, onFocus, onSection }: { item: AttentionItem } & Omit<Props, 'items'>) {
+function Item({ item, onAction, onFocus, onSection, onNavigate }: { item: AttentionItem } & Omit<Props, 'items'>) {
   const [asking, setAsking] = useState<AttentionButton | undefined>();
   const [text, setText] = useState('');
   const priority = PRIORITY[item.priority];
@@ -50,7 +52,11 @@ function Item({ item, onAction, onFocus, onSection }: { item: AttentionItem } & 
       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
         {item.buttons.map((button) => (
           <button key={button.label} style={buttonStyle(button.kind)} title={button.action.action === 'agent' ? 'Copies an instruction and opens the agent chat; paste it there.' : undefined}
-            onClick={() => { if (button.needsText) { setAsking(button); setText(''); } else onAction(button.action); }}>
+            onClick={() => {
+              if (button.needsText) { setAsking(button); setText(''); }
+              else if (button.action.action === 'openNode') onNavigate(button.action.id);
+              else onAction(button.action);
+            }}>
             {button.action.action === 'agent' ? `${button.label} ↗` : button.label}
           </button>
         ))}
@@ -68,14 +74,14 @@ function Item({ item, onAction, onFocus, onSection }: { item: AttentionItem } & 
   );
 }
 
-export function AttentionList({ items, onAction, onFocus, onSection }: Props) {
+export function AttentionList({ items, onAction, onFocus, onSection, onNavigate }: Props) {
   if (!items.length) return <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Nothing needs you right now. The loop and the manuscript are up to date with the research.</div>;
   return (
     <div style={{ padding: 12, overflow: 'auto', height: '100%', boxSizing: 'border-box' }}>
       <div style={{ fontSize: 11, color: COLOR.muted, marginBottom: 10 }}>
         Your decisions are recorded here directly. Buttons marked ↗ copy an instruction for the agent and open its chat.
       </div>
-      {items.map((item) => <Item key={item.key} item={item} onAction={onAction} onFocus={onFocus} onSection={onSection} />)}
+      {items.map((item) => <Item key={item.key} item={item} onAction={onAction} onFocus={onFocus} onSection={onSection} onNavigate={onNavigate} />)}
     </div>
   );
 }

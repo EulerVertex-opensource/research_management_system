@@ -60,7 +60,7 @@ export function GraphTab({ payload, onAction, onNavigate }: Props) {
         )}
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
-        {subview === 'attention' && <AttentionList items={payload.attention} onAction={onAction} onFocus={showImpact} onSection={showSection} />}
+        {subview === 'attention' && <AttentionList items={payload.attention} onAction={onAction} onFocus={showImpact} onSection={showSection} onNavigate={onNavigate} />}
         {subview === 'progress' && (
           <ProgressView payload={payload} options={options} onOptions={setOptions} selectedId={selectedId} onSelect={setSelectedId}
             onImpact={showImpact} onNavigate={onNavigate} onAction={onAction} />
