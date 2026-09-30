@@ -15,6 +15,12 @@ import { ResearchSync } from './ResearchSync';
 import { NodeGitRunner, runShell } from '../cli/nodeGit';
 import { loadSyncConfig } from '../cli/nodeFiles';
 import { toIdeaKind } from '../domain/nodeKinds';
+import { ResearchNode } from '../models/types';
+import { GraphAction, GraphPayload } from '../models/graph';
+import { collectGraphPayload } from './GraphViewModel';
+import { bindingPath, loadImpactNodes, loadProjectRevision, readSectionBriefFile, sectionTexPath } from './ManuscriptImpactLoader';
+import { parseWritingOutline } from './ManuscriptWriting';
+import { lockBinding } from '../domain/manuscriptImpact';
 
 function extensionVersion(): string | undefined {
   return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === 'tianhao.research-management-system')?.packageJSON?.version;
@@ -46,6 +52,11 @@ export class LoopHost implements vscode.Disposable {
   private busy: Promise<unknown> = Promise.resolve();
   private readonly interactions = new Map<string, Promise<ToolResult>>();
   private readonly git: LoopGit;
+  /** Answers given in the dashboard for a question or approval whose popup is still open. */
+  private readonly dashboardAnswers = new Map<string, (outcome: { decision: string; text: string }) => void>();
+  private readonly stateChanged = new vscode.EventEmitter<void>();
+  /** Fires when the loop state or an approval changes, so the dashboard can refresh its Graph tab. */
+  readonly onDidChangeState = this.stateChanged.event;
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel) {
     this.git = new LoopGit(new NodeGitRunner(files.rootUri.fsPath));
@@ -60,7 +71,7 @@ export class LoopHost implements vscode.Disposable {
     else this.core = new ResearchLoopCore(this.files, paths, { iterationCap: setting('iterationCap', 10), git: this.git, extensionVersion: extensionVersion() });
     this.watcher?.dispose();
     this.watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, STATE_PATH));
-    const refresh = () => { void this.refreshStatusBar(); };
+    const refresh = () => { void this.refreshStatusBar(); this.stateChanged.fire(); };
     this.watcher.onDidChange(refresh); this.watcher.onDidCreate(refresh); this.watcher.onDidDelete(refresh);
     void this.startBridge();
     void this.refreshStatusBar();
@@ -69,6 +80,7 @@ export class LoopHost implements vscode.Disposable {
   dispose(): void {
     this.watcher?.dispose();
     this.statusBar.dispose();
+    this.stateChanged.dispose();
     this.subscriptions.forEach((item) => item.dispose());
     this.server?.close();
     void vscode.workspace.fs.delete(this.files.resolve(BRIDGE_PATH)).then(undefined, () => undefined);
@@ -97,6 +109,7 @@ export class LoopHost implements vscode.Disposable {
     this.busy = run.catch(() => undefined);
     const result = await run;
     void this.refreshStatusBar();
+    this.stateChanged.fire();
     return result;
   }
 
@@ -198,12 +211,20 @@ export class LoopHost implements vscode.Disposable {
     return { status: 'final', id, ...result };
   }
 
+  /** Settles when the researcher answers `id` in the dashboard instead of the popup. */
+  private fromDashboard<T>(id: string): Promise<T> {
+    return new Promise<T>((resolve) => {
+      this.dashboardAnswers.set(id, (outcome) => { this.dashboardAnswers.delete(id); resolve(outcome as T); });
+    });
+  }
+
   private timeout<T>(ms: number): Promise<T | 'timeout'> { return new Promise((resolve) => setTimeout(() => resolve('timeout'), ms)); }
 
   private async askResearcher(questionId: string, prompt: string, kind: QuestionKind, options: string[] | undefined, waitSeconds: number): Promise<ToolResult> {
     const question = { id: questionId };
-    const popup = this.showQuestion(prompt, kind, options);
+    const popup = Promise.race([this.showQuestion(prompt, kind, options), this.fromDashboard<{ decision: 'answer' | 'skip' | 'pause'; text: string }>(questionId)]);
     const outcome = await Promise.race([popup, this.timeout<{ decision: 'answer' | 'skip' | 'pause'; text: string }>(waitSeconds * 1000)]);
+    if (outcome !== 'timeout') this.dashboardAnswers.delete(questionId);
     if (outcome === 'timeout') {
       await this.withCore((core) => core.autoResolveQuestion(question.id));
       void popup.then(async (late) => {
@@ -252,8 +273,9 @@ export class LoopHost implements vscode.Disposable {
 
   private async requestApproval(requestId: string, kind: ApprovalKind, target: string, summary: string, waitSeconds: number): Promise<ToolResult> {
     const request = { id: requestId };
-    const popup = this.showApproval(kind, target, summary);
+    const popup = Promise.race([this.showApproval(kind, target, summary), this.fromDashboard<{ decision: 'approved' | 'changes_requested' | 'later'; text: string }>(requestId)]);
     const outcome = await Promise.race([popup, this.timeout<{ decision: 'approved' | 'changes_requested' | 'later'; text: string }>(waitSeconds * 1000)]);
+    if (outcome !== 'timeout') this.dashboardAnswers.delete(requestId);
     const apply = async (result: { decision: 'approved' | 'changes_requested' | 'later'; text: string } | undefined) => {
       if (!result || result.decision === 'later') return;
       await this.withCore((core) => core.resolveApproval(request.id, result.decision, result.text, 'popup'));
@@ -282,6 +304,88 @@ export class LoopHost implements vscode.Disposable {
       }
       return { decision: 'later', text: '' };
     }
+  }
+
+  // ---------- dashboard graph ----------
+
+  async graphPayload(nodes: ResearchNode[]): Promise<GraphPayload> {
+    if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
+    const paths = this.paths;
+    let state: LoopState | undefined;
+    try { state = await this.core?.load(); } catch { state = undefined; }
+    return collectGraphPayload(this.files, paths, nodes, state);
+  }
+
+  /** Researcher actions from the Graph tab. Agent work is never started here: it is copied for the chat. */
+  async graphAction(request: GraphAction): Promise<void> {
+    if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
+    const paths = this.paths;
+    switch (request.action) {
+      case 'approve':
+      case 'requestChanges': {
+        const decision = request.action === 'approve' ? 'approved' : 'changes_requested';
+        const text = request.action === 'requestChanges' ? request.text.trim() : '';
+        if (request.action === 'requestChanges' && !text) throw new Error('Say what should change.');
+        const live = this.dashboardAnswers.get(request.requestId);
+        if (live) live({ decision, text });
+        else await this.withCore((core) => core.resolveApproval(request.requestId, decision, text, 'dashboard'));
+        this.stateChanged.fire();
+        return;
+      }
+      case 'answer': {
+        if (!request.text.trim()) throw new Error('Write an answer first.');
+        const live = this.dashboardAnswers.get(request.questionId);
+        if (live) live({ decision: 'answer', text: request.text.trim() });
+        else await this.withCore((core) => core.answerQuestion(request.questionId, 'answer', request.text.trim(), 'dashboard'));
+        this.stateChanged.fire();
+        return;
+      }
+      case 'park': await this.withCore((core) => core.park(request.assetId, 'researcher', 'Parked from the dashboard.')); return;
+      case 'unpark': await this.withCore((core) => core.unpark(request.assetId)); return;
+      case 'lock': await this.lockSection(request.section); return;
+      case 'openNode': {
+        const file = (await this.files.exists(`${paths.definitions}/${request.id}.md`)) ? `${paths.definitions}/${request.id}.md` : `${paths.assets}/${request.id}.md`;
+        await vscode.window.showTextDocument(this.files.resolve(file));
+        return;
+      }
+      case 'openTex': {
+        const document = await vscode.workspace.openTextDocument(this.files.resolve(sectionTexPath(paths, request.section)));
+        const line = Math.max(0, (request.line ?? 1) - 1);
+        await vscode.window.showTextDocument(document, { selection: new vscode.Range(line, 0, line, 0) });
+        return;
+      }
+      case 'agent': {
+        await vscode.env.clipboard.writeText(request.prompt);
+        await this.openChat(this.core?.current?.provider);
+        void vscode.window.showInformationMessage('Research Assistant: the instruction is on your clipboard; paste it into the agent chat.');
+        return;
+      }
+    }
+  }
+
+  /** Lock a section after the researcher confirms the snapshot in a modal: the lock asserts the TeX matches the research. */
+  private async lockSection(sectionId: string): Promise<void> {
+    const paths = this.paths!;
+    const section = parseWritingOutline(await this.files.readFile(paths.writingOutline)).find((entry) => entry.id === sectionId);
+    if (!section) throw new Error(`Section ${sectionId} is not listed in the writing outline`);
+    const texFile = sectionTexPath(paths, sectionId);
+    const texRaw = await this.files.readFile(texFile).catch(() => { throw new Error(`Missing TeX section ${texFile}; draft it before locking.`); });
+    const { project, revision } = await loadProjectRevision(this.files, paths);
+    const binding = lockBinding({
+      section: sectionId, tex: texFile, texRaw, brief: await readSectionBriefFile(this.files, paths, section), nodes: await loadImpactNodes(this.files, paths),
+      project, projectRevision: revision, lockedAt: new Date().toISOString(), performedBy: await this.git.userEmail(),
+    });
+    const detail = [
+      `Project revision: ${revision ?? 'unapproved'}`,
+      `Sources: ${binding.sources.map((source) => `${source.id} (${source.uses.join(', ')})${source.via === 'direct' ? '' : ` via ${source.via}`}`).join('; ')}`,
+      binding.blocks?.length ? `Blocks: ${binding.blocks.map((block) => `${block.id} [${block.policy}]`).join(', ')}` : 'No block markers: the section is tracked as a whole.',
+      '', 'Lock only after reviewing the TeX: later research changes are measured against this snapshot.',
+    ].join('\n');
+    const choice = await vscode.window.showWarningMessage(`Lock section "${section.title}" as reconciled with the current research?`, { modal: true, detail }, 'Lock');
+    if (choice !== 'Lock') return;
+    await this.files.writeFile(bindingPath(paths, sectionId), JSON.stringify(binding, null, 2) + '\n');
+    this.output.appendLine(`[manuscript] Locked ${sectionId} at project revision ${revision ?? 'unapproved'}`);
+    this.stateChanged.fire();
   }
 
   // ---------- status bar ----------

@@ -41,6 +41,9 @@ export class WebviewProvider {
   private manuscriptPhase: ManuscriptBuildPhase = 'idle';
   private manuscriptMessage: string | undefined;
   private readonly output: vscode.OutputChannel;
+  /** The Graph tab asked for data at least once; only then are updates pushed. */
+  private graphWanted = false;
+  private graphTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri, output: vscode.OutputChannel) {
     this.context = context;
@@ -51,6 +54,7 @@ export class WebviewProvider {
     this.agentIntegration = new AgentIntegrationService(this.fileService, context.extensionUri.fsPath, output);
     this.loopHost = new LoopHost(this.fileService, output);
     this.manuscriptBuildService = new ManuscriptBuildService(this.fileService, workspaceRoot);
+    this.loopHost.onDidChangeState(() => this.scheduleGraph());
   }
 
   start(): Promise<void> {
@@ -282,6 +286,7 @@ export class WebviewProvider {
         if (changedId && (uri.path.includes(`/${paths.assets}/`) || uri.path.includes(`/${paths.definitions}/`))) await this.loopHost.reconcile(changedId);
         const nodes = await this.refreshIndex();
         this.send({ type: 'nodesUpdated', nodes });
+        this.scheduleGraph();
         generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
 
         const filename = uri.path.split('/').pop();
@@ -299,6 +304,7 @@ export class WebviewProvider {
       try {
         const nodes = await this.refreshIndex();
         this.send({ type: 'nodesUpdated', nodes });
+        this.scheduleGraph();
         generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
       } catch { /* non-fatal */ }
     };
@@ -323,6 +329,15 @@ export class WebviewProvider {
     );
     projectWatcher.onDidChange(async () => {
       try { await this.sendProjectMd(); } catch { /* non-fatal */ }
+      this.scheduleGraph();
+    });
+
+    // Manuscript plans, locks, section TeX, and shared approvals feed the Graph tab.
+    const graphWatchers = [`${paths.writingRoot}/**`, `${paths.sections}/*.tex`, `${paths.researchRoot === '.' ? '' : `${paths.researchRoot}/`}approvals/**`].map((pattern) => {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, pattern));
+      const refresh = () => this.scheduleGraph();
+      watcher.onDidChange(refresh); watcher.onDidCreate(refresh); watcher.onDidDelete(refresh);
+      return watcher;
     });
 
     // Watch the configured paper index and bibliography.
@@ -360,7 +375,7 @@ export class WebviewProvider {
       await this.sendManuscriptStatus();
     });
 
-    this.watchers = [...nodeWatchers, projectWatcher, papersWatcher, bibWatcher, pdfWatcher];
+    this.watchers = [...nodeWatchers, projectWatcher, ...graphWatchers, papersWatcher, bibWatcher, pdfWatcher];
   }
 
   private async sendManuscriptStatus(forceReload = false): Promise<void> {
@@ -392,6 +407,22 @@ export class WebviewProvider {
     this.send({ type: 'manuscriptStatus', status });
   }
 
+  /** Coalesce bursts of file events (an agent writing several files) into one Graph refresh. */
+  private scheduleGraph(): void {
+    if (!this.graphWanted || !this.panel) return;
+    if (this.graphTimer) clearTimeout(this.graphTimer);
+    this.graphTimer = setTimeout(() => { this.graphTimer = undefined; void this.sendGraph(); }, 300);
+  }
+
+  private async sendGraph(): Promise<void> {
+    if (!this.nodeIndex || !this.panel) return;
+    try {
+      this.send({ type: 'graphData', payload: await this.loopHost.graphPayload(this.nodeIndex.getAll()) });
+    } catch (error: unknown) {
+      this.output.appendLine(`[graph] ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private send(message: ExtensionMessage): void {
     this.panel?.webview.postMessage(message);
   }
@@ -417,6 +448,7 @@ export class WebviewProvider {
     if (!this.nodeIndex || !this.paths) return;
     const nodes = await this.refreshIndex();
     this.send({ type: 'nodesUpdated', nodes });
+    this.scheduleGraph();
     generateAgentInstructions(nodes, this.fileService, this.paths).catch(() => { /* non-fatal */ });
   }
 
@@ -576,6 +608,18 @@ export class WebviewProvider {
           const uri = this.fileService.resolve(paperPdf);
           // Use the same VS Code PDF viewer as the dashboard's Open PDF button.
           await vscode.commands.executeCommand('vscode.open', uri);
+          break;
+        }
+
+        case 'getGraph': {
+          this.graphWanted = true;
+          await this.sendGraph();
+          break;
+        }
+
+        case 'graphAction': {
+          await this.loopHost.graphAction(msg.request);
+          if (msg.request.action !== 'agent' && msg.request.action !== 'openNode' && msg.request.action !== 'openTex') await this.sendGraph();
           break;
         }
 

@@ -251,19 +251,24 @@ export function manuscriptImpact(input: { project: string; projectRevision?: num
   return { state, ...(input.projectRevision ? { projectRevision: input.projectRevision } : {}), uncovered, sections };
 }
 
+/** Why a section is stale or invalid, one phrase per cause; shared by the CLI and the dashboard. */
+export function sectionReasons(section: SectionImpact): string[] {
+  return [
+    ...section.invalid.map((problem) => `${problem.id} ${problem.reason}`),
+    ...section.stale.map((item) => `${item.id} ${item.components.join('+')} changed${item.via === 'direct' ? '' : ` (dependency of ${item.via})`}`),
+    ...section.facets.map((facet) => `project ${facet} changed`),
+    ...section.added.map((id) => `brief added ${id}`),
+    ...section.removed.map((id) => `brief removed ${id}`),
+    ...section.orphaned.map((id) => `${id} no longer required`),
+  ];
+}
+
 /** One line per section for the loop brief and the CLI. */
 export function renderImpact(impact: ManuscriptImpact): string {
   const lines = [`Manuscript: ${impact.state}${impact.projectRevision ? ` (project revision ${impact.projectRevision})` : ''}`];
   if (impact.uncovered.length) lines.push(`Uncovered required results: ${impact.uncovered.map((item) => `${item.id}${item.pending ? ' (research in progress)' : ''}`).join(', ')}`);
   for (const section of impact.sections) {
-    const details = [
-      ...section.invalid.map((problem) => `${problem.id} ${problem.reason}`),
-      ...section.stale.map((item) => `${item.id} ${item.components.join('+')} changed${item.via === 'direct' ? '' : ` (dependency of ${item.via})`}`),
-      ...section.facets.map((facet) => `project ${facet} changed`),
-      ...section.added.map((id) => `brief added ${id}`),
-      ...section.removed.map((id) => `brief removed ${id}`),
-      ...section.orphaned.map((id) => `${id} no longer required`),
-    ];
+    const details = sectionReasons(section);
     const revision = section.lockedRevision && impact.projectRevision && section.lockedRevision !== impact.projectRevision ? ` [locked at revision ${section.lockedRevision}]` : '';
     lines.push(`- ${section.id}: ${section.state}${revision}${details.length ? ` — ${details.join('; ')}` : ''}${section.texEdited ? ' (TeX edited since lock)' : ''}`);
     for (const block of section.blocks.filter((item) => item.state !== 'current')) {

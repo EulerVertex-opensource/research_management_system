@@ -29,6 +29,8 @@ const webviewConfig = {
   format: 'iife',
   platform: 'browser',
   sourcemap: true,
+  // The dashboard bundle carries React, KaTeX, and pdf.js; minifying keeps the webview quick to load. Sourcemaps keep it debuggable.
+  minify: !isWatch,
   define: {
     'process.env.NODE_ENV': '"production"',
   },

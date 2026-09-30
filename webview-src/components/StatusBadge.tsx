@@ -1,16 +1,18 @@
 import React from 'react';
 import { ResearchStatus } from '../../src/models/types';
+import { COLOR } from '../graph/colors';
 
+/** Theme colors, drawn as an outline so the text keeps contrast in light and dark themes. */
 const COLORS: Record<ResearchStatus, string> = {
-  draft: '#6c757d',
-  approved: '#28a745',
-  deprecated: '#dc3545',
-  archived: '#856404',
-  pending: '#6c757d',
-  failed: '#dc3545',
-  succeeded: '#28a745',
-  abandoned: '#856404',
-  resolved: '#17a2b8',
+  draft: COLOR.draft,
+  approved: COLOR.approved,
+  deprecated: COLOR.error,
+  archived: COLOR.inactive,
+  pending: COLOR.draft,
+  failed: COLOR.error,
+  succeeded: COLOR.approved,
+  abandoned: COLOR.inactive,
+  resolved: COLOR.link,
 };
 
 interface Props {
@@ -18,16 +20,17 @@ interface Props {
 }
 
 export function StatusBadge({ status }: Props) {
+  const color = COLORS[status] ?? COLOR.draft;
   return (
     <span
       style={{
         display: 'inline-block',
-        padding: '1px 7px',
+        padding: '0 6px',
         borderRadius: '10px',
         fontSize: '11px',
         fontWeight: 600,
-        color: '#fff',
-        backgroundColor: COLORS[status] ?? '#6c757d',
+        color,
+        border: `1px solid ${color}`,
         textTransform: 'uppercase',
         letterSpacing: '0.5px',
       }}

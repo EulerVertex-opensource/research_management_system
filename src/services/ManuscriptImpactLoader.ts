@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { researchDigest } from '../domain/digests';
-import { ImpactNode, ManuscriptImpact, SectionBinding, manuscriptImpact } from '../domain/manuscriptImpact';
+import { ImpactNode, ImpactSectionInput, ManuscriptImpact, SectionBinding, manuscriptImpact } from '../domain/manuscriptImpact';
 import { parseMarkdown } from './Frontmatter';
 import { LoopFiles } from './ResearchLoopModel';
 import { currentProjectRevision, projectRevisionHistory, readApprovals } from './ApprovalStore';
@@ -58,8 +58,16 @@ export async function readSectionBriefFile(files: LoopFiles, paths: ManuscriptPa
   return brief;
 }
 
-/** Impact of the current research on the manuscript; undefined when there is no writing outline yet. */
-export async function loadManuscriptImpact(files: LoopFiles, paths: ManuscriptPaths, only?: string): Promise<ManuscriptImpact | undefined> {
+export interface ManuscriptModel {
+  impact: ManuscriptImpact;
+  sections: ImpactSectionInput[];
+  nodes: Map<string, ImpactNode>;
+  project: string;
+  revision?: number;
+}
+
+/** The outline's sections with their briefs, locks, and TeX, and the impact computed from them; undefined without an outline. */
+export async function loadManuscriptModel(files: LoopFiles, paths: ManuscriptPaths, only?: string): Promise<ManuscriptModel | undefined> {
   const raw = await files.readFile(paths.writingOutline).catch(() => '');
   let outline: WritingSection[];
   try { outline = parseWritingOutline(raw); } catch { return undefined; }
@@ -71,5 +79,11 @@ export async function loadManuscriptImpact(files: LoopFiles, paths: ManuscriptPa
     binding: await readSectionBinding(files, paths, section.id),
     texRaw: await files.readFile(sectionTexPath(paths, section.id)).catch(() => undefined),
   })));
-  return manuscriptImpact({ project, projectRevision: revision, sections, nodes: await loadImpactNodes(files, paths) });
+  const nodes = await loadImpactNodes(files, paths);
+  return { impact: manuscriptImpact({ project, projectRevision: revision, sections, nodes }), sections, nodes, project, revision };
+}
+
+/** Impact of the current research on the manuscript; undefined when there is no writing outline yet. */
+export async function loadManuscriptImpact(files: LoopFiles, paths: ManuscriptPaths, only?: string): Promise<ManuscriptImpact | undefined> {
+  return (await loadManuscriptModel(files, paths, only))?.impact;
 }

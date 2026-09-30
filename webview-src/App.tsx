@@ -13,6 +13,8 @@ import { CreateNodeModal } from './components/CreateNodeModal';
 import { ManuscriptView } from './components/ManuscriptView';
 import { resolvePaperPdfLink, resolveResearchNodeLink } from './researchLinks';
 import { ASSET_TYPES, ASSET_TYPE_LIST } from '../src/domain/nodeKinds';
+import type { GraphPayload } from '../src/models/graph';
+import { GraphTab } from './graph/GraphTab';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -35,6 +37,7 @@ interface State {
   showCreateModal: boolean;
   error: string | null;
   manuscriptStatus: ManuscriptStatus | null;
+  graph: GraphPayload | null;
   uiState: UIState;
 }
 
@@ -50,6 +53,7 @@ type Action =
   | { type: 'TOGGLE_CREATE_MODAL' }
   | { type: 'SET_ERROR'; message: string | null }
   | { type: 'MANUSCRIPT_STATUS'; status: ManuscriptStatus }
+  | { type: 'GRAPH_DATA'; payload: GraphPayload }
   | { type: 'SET_LAYOUT'; layoutMode: LayoutMode }
   | { type: 'SET_SPLIT_RATIO'; splitRatio: number }
   | { type: 'SET_NODE_LIST_WIDTH'; width: number }
@@ -88,6 +92,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, error: action.message };
     case 'MANUSCRIPT_STATUS':
       return { ...state, manuscriptStatus: action.status };
+    case 'GRAPH_DATA':
+      return { ...state, graph: action.payload };
     case 'SET_LAYOUT':
       return { ...state, uiState: { ...state.uiState, layoutMode: action.layoutMode } };
     case 'SET_SPLIT_RATIO':
@@ -117,6 +123,7 @@ const initialState: State = {
   showCreateModal: false,
   error: null,
   manuscriptStatus: null,
+  graph: null,
   uiState: DEFAULT_UI_STATE,
 };
 
@@ -143,6 +150,9 @@ export function App() {
       case 'manuscriptStatus':
         dispatch({ type: 'MANUSCRIPT_STATUS', status: msg.status });
         break;
+      case 'graphData':
+        dispatch({ type: 'GRAPH_DATA', payload: msg.payload });
+        break;
       case 'error':
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
@@ -165,6 +175,9 @@ export function App() {
     }
     if (view === 'manuscript') {
       send({ type: 'getManuscriptStatus' });
+    }
+    if (view === 'graph') {
+      send({ type: 'getGraph' });
     }
   };
 
@@ -431,6 +444,12 @@ export function App() {
             ) : (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Select a node to view and edit</div>
             )
+          ) : state.activeView === 'graph' ? (
+            <GraphTab
+              payload={state.graph}
+              onAction={(request) => send({ type: 'graphAction', request })}
+              onNavigate={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
+            />
           ) : state.activeView === 'manuscript' ? (
             <ManuscriptView
               status={state.manuscriptStatus}
