@@ -218,7 +218,7 @@ test('the generated .gitignore covers every preinstalled skill and generated age
   for (const dir of ['.claude/skills', '.agents/skills']) {
     for (const skill of [...skills, 'summarize', 'order-assets', 'prove-asset']) assert.ok(ignores.includes(`/${dir}/${skill}/`), `${dir}/${skill}`);
   }
-  for (const file of ['/.claude/agents/research-worker-light.md', '/.claude/agents/research-worker-deep.md', '/.claude/settings.local.json', '/.mcp.json', '/.codex/hooks.json']) assert.ok(ignores.includes(file), file);
+  for (const file of ['/.claude/agents/research-worker-light.md', '/.claude/agents/research-worker-deep.md', '/.claude/settings.local.json', '/.mcp.json', '/.codex/hooks.json', '/.codex/agents/research-worker-light.toml', '/.codex/agents/research-worker-deep.toml']) assert.ok(ignores.includes(file), file);
   assert.ok(!ignores.some((entry) => entry === '/.claude/agents/' || entry === '/.claude/skills/' || entry === '/.agents/skills/'));
   assert.equal(new Set(ignores).size, ignores.length);
 });

@@ -141,6 +141,7 @@ export function generatedAgentIgnores(bundledSkillNames: string[]): string[] {
     return [
       ...skills.map((name) => `/${spec.skillsDir}/${name}/`),
       ...(spec.agentsDir ? WORKER_TIERS.map((tier) => `/${spec.agentsDir}/${workerAgentName(tier)}.md`) : []),
+      ...(spec.externalWorkers ? WORKER_TIERS.map((tier) => `/${spec.externalWorkers!.dir}/${workerAgentName(tier)}${spec.externalWorkers!.extension}`) : []),
       `/${spec.hooksFile}`,
       ...(spec.mcp.kind === 'project-json' ? [`/${spec.mcp.file}`] : []),
     ];

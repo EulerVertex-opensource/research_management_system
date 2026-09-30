@@ -25,6 +25,8 @@ export interface AgentProviderSpec {
   readToolMatcher?: string;
   /** Subagent definitions folder; absent where the agent has no project-level subagent files. */
   agentsDir?: string;
+  /** Where the agent itself keeps research-worker subagents the extension does not write (ignored, never generated). */
+  externalWorkers?: { dir: string; extension: string };
   /** Whether the hooks file also carries permission allow rules (Claude settings). */
   hooksFileHasPermissions: boolean;
   /** How the MCP bridge is registered: a project `.mcp.json`, or Codex's user config via `codex mcp add`. */
@@ -55,6 +57,7 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     skillsDir: '.agents/skills',
     hooksFile: '.codex/hooks.json',
     writeToolMatcher: 'apply_patch|Bash|Write|Edit',
+    externalWorkers: { dir: '.codex/agents', extension: '.toml' },
     hooksFileHasPermissions: false,
     mcp: { kind: 'codex-cli' },
   },
