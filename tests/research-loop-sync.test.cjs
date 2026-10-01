@@ -16,6 +16,8 @@ function load(file) {
 }
 
 const { researchDigest, statementDigest } = load('../src/services/ResearchLoopModel.ts');
+const { autoPullDecision } = load('../src/services/ResearchSync.ts');
+const { defaultLatexCommand } = load('../src/services/ProjectPathsCore.ts');
 const cli = path.resolve(__dirname, '../out/research-loop.cjs');
 
 const config = { version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [], notations: null, sections: 'sections' }, research: { root: 'research', project: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' } };
@@ -271,4 +273,36 @@ test('legacy approvals.json splits into per-target files that merge without conf
     assert.match(pulled.stdout, /Approval of asset lemma_a recorded/);
     assert.ok(fs.existsSync(path.join(bob.dir, 'research/approvals/assets/lemma_b.json')));
   } finally { t.cleanup(); }
+});
+
+test('auto-pull pulls only when the clone is clean and the loop is idle; otherwise it notifies', () => {
+  const t = team();
+  try {
+    const { alice, bob } = t;
+    const status = () => { const result = bob.run(['sync', 'status', '--json']); assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout); };
+    assert.deepEqual(autoPullDecision(status(), 'pull'), { action: 'none' });
+    alice.write('main.tex', '\\documentclass{article}\\begin{document}Edited on Overleaf.\\end{document}\n');
+    alice.commit('overleaf edit');
+    alice.git('push', '-q');
+    const behind = status();
+    assert.equal(behind.behind, 1);
+    assert.deepEqual(autoPullDecision(behind, 'pull'), { action: 'pull' });
+    assert.equal(autoPullDecision(behind, 'notify').action, 'notify');
+    assert.deepEqual(autoPullDecision(behind, 'off'), { action: 'none' });
+    assert.deepEqual(autoPullDecision({ ...behind, fetchError: 'auth failed' }, 'pull'), { action: 'none' });
+    assert.deepEqual(autoPullDecision({ ...behind, phase: 'conflict' }, 'pull'), { action: 'none' });
+    assert.match(autoPullDecision({ ...behind, loop: { status: 'running' } }, 'pull').reason, /loop is running/);
+    bob.write('research/ideas/idea_local.md', matter.stringify('\nLocal note.\n', { type: 'idea', title: 'Local', status: 'draft', origin: 'researcher' }));
+    assert.match(autoPullDecision(status(), 'pull').reason, /uncommitted/);
+    fs.rmSync(path.join(bob.dir, 'research/ideas/idea_local.md'));
+    assert.equal(bob.run(['sync', 'pull']).status, 0);
+    assert.match(bob.read('main.tex'), /Edited on Overleaf/);
+    assert.deepEqual(autoPullDecision(status(), 'pull'), { action: 'none' });
+  } finally { t.cleanup(); }
+});
+
+test('the LaTeX check defaults to latexmk on the configured main file, writing to the root .latex-out', () => {
+  assert.equal(defaultLatexCommand(config.latex), 'latexmk -pdf -interaction=nonstopmode -halt-on-error -cd -outdir=.latex-out main.tex');
+  assert.equal(defaultLatexCommand({ ...config.latex, projectRoot: 'manuscript', main: 'paper.tex' }), 'latexmk -pdf -interaction=nonstopmode -halt-on-error -cd -outdir=../.latex-out manuscript/paper.tex');
+  assert.match(defaultLatexCommand({ ...config.latex, main: 'my paper.tex' }), / 'my paper\.tex'$/);
 });

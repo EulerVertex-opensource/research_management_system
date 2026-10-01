@@ -67,5 +67,6 @@ Research files are shared through git; the loop's run state is not. Use only the
 - Never invent a paper, theorem, location, proof step, or researcher answer.
 - A failed plan is not a falsification. Only a verified counterexample confirmed by the researcher refutes a statement, and only the researcher deprecates an asset.
 - Do not change a statement while proving it; a revised statement gets a new asset ID.
+- The library (`library/<collection>/`, `lib_` IDs) holds known results the researcher approves once; the loop never falsifies or proves them. Find them with `library search <words>`. Library files may be added or edited at any stage (editing an approved one sends it back for approval); `library promote <lib_id>` copies one into the project as a variant to prove here.
 - Load only the context pack and what you request with `show`; earlier stages live in the pack's report summaries, not in rereading their files.
 - If you stop while the loop is running, the Stop hook asks you to continue; that is expected. It stops asking when the loop waits for the researcher, is paused, or reaches its per-session cap.

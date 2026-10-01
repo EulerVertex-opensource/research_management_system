@@ -13,10 +13,12 @@ export interface NodeSource { kind: SourceKind; paper_id?: string; location?: st
 interface NodeBase { title: string; tags?: string[] }
 export interface ResultNodeData extends NodeBase {
   type: AssetType; status: NodeStatus; source?: NodeSource; depends_on?: string[]; uses_definitions?: string[];
+  /** The library result this project node was promoted from. */
+  derived_from?: string;
   /** Only on a counterexample (`type: example`). */
   refutes?: string;
 }
-export interface DefinitionNodeData extends NodeBase { type: 'definition'; status: NodeStatus; source?: NodeSource; depends_on?: string[] }
+export interface DefinitionNodeData extends NodeBase { type: 'definition'; status: NodeStatus; source?: NodeSource; depends_on?: string[]; derived_from?: string }
 export interface IdeaNodeData extends NodeBase {
   type: 'idea'; status: IdeaStatus; idea_kind?: IdeaKind; related_assets?: string[]; origin?: string;
   /** The decision, plan, or asset that resolved it. */
@@ -33,10 +35,12 @@ export type NodeData = ResultNodeData | DefinitionNodeData | IdeaNodeData | Plan
  * Relation fields each kind may carry. Only forward relations are stored;
  * reverse ones (used in, plans of, refuted by) are derived by `reverseRelations`.
  */
-export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'refutes'] as const;
+export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'refutes', 'derived_from'] as const;
+/** Relations that hold one node ID rather than a list. */
+const SINGLE_RELATIONS = new Set(['target_asset', 'refutes', 'derived_from']);
 export const NODE_RELATIONS: Record<NodeKind, readonly string[]> = {
-  asset: ['depends_on', 'uses_definitions', 'refutes'],
-  definition: ['depends_on'],
+  asset: ['depends_on', 'uses_definitions', 'refutes', 'derived_from'],
+  definition: ['depends_on', 'derived_from'],
   idea: ['related_assets'],
   plan: ['target_asset', 'inspired_by'],
 };
@@ -65,7 +69,8 @@ export function nodeProblems(kind: NodeKind, id: string, data: Record<string, an
   const problems: string[] = [];
   const statuses: readonly string[] = options.allowApproved ? NODE_STATUS_LIST : NODE_STATUS_LIST.filter((status) => status !== 'approved');
   if (typeof data.title !== 'string' || !data.title.trim()) problems.push(`${id}: title is required.`);
-  for (const field of RELATION_FIELDS) if (field !== 'target_asset' && field !== 'refutes' && !isStringList(data[field])) problems.push(`${id}: ${field} must be a list of node IDs.`);
+  for (const field of RELATION_FIELDS) if (!SINGLE_RELATIONS.has(field) && !isStringList(data[field])) problems.push(`${id}: ${field} must be a list of node IDs.`);
+  if (data.derived_from !== undefined && typeof data.derived_from !== 'string') problems.push(`${id}: derived_from must be one node ID.`);
   switch (kind) {
     case 'asset': {
       if (!ASSET_TYPES.has(data.type)) problems.push(`${id}: invalid asset type.`);

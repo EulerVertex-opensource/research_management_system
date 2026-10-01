@@ -48,6 +48,9 @@ const USAGE = `Usage: research-loop <command> [options]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
   question pending | question answer --text "..." | question skip | question poll <id>
   handoff [--note "..."]   (write a shared handoff for the next collaborator)
+  library search <words...> [--type T] [--collection C] [--limit N]   (find known results to reuse)
+  library list [--collection C] [--unapproved]
+  library promote <lib_id> [--as <id>]   (copy a library result into the project as a draft to change it)
   sync status [--no-fetch] | sync pull [--remote NAME] [--continue] | sync prepare [--latex] [--no-fetch] [--note "..."]
   sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
   migrate-approvals   (split research/approvals.json into one file per approved target)
@@ -385,6 +388,29 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('question pending|answer|skip|poll');
+    }
+    case 'library': {
+      if (sub === 'search' || sub === 'list') {
+        const query = sub === 'search' ? args.positional.slice(2).join(' ') : '';
+        if (sub === 'search' && !query.trim()) throw new Error('library search needs words to search for.');
+        const limit = typeof args.flags.limit === 'string' ? Number(args.flags.limit) : undefined;
+        const hits = await core.librarySearch(query, {
+          type: typeof args.flags.type === 'string' ? args.flags.type : undefined,
+          collection: typeof args.flags.collection === 'string' ? args.flags.collection : undefined,
+          limit: sub === 'list' ? limit ?? Number.MAX_SAFE_INTEGER : limit, unapproved: args.flags.unapproved === true,
+        });
+        if (json) { out(hits); return; }
+        if (!hits.length) { out(sub === 'search' ? 'No library results match.' : 'The library is empty.'); return; }
+        for (const hit of hits) out(`${hit.id} | ${hit.type} | ${hit.approved ? 'approved' : hit.status === 'approved' ? 'approval stale' : hit.status} | ${hit.collection ?? ''} | ${hit.title}${hit.summary ? `\n    ${hit.summary}` : ''}`);
+        if (sub === 'search') out(`Use one in depends_on/uses_definitions by ID; read it with: show <id>.`);
+        return;
+      }
+      if (sub === 'promote') {
+        const file = await core.promote(text(third, 'lib_id'), typeof args.flags.as === 'string' ? args.flags.as : undefined);
+        out(json ? { file } : `Promoted ${third} to ${file} (draft, derived_from: ${third}). Point project references at the new ID where the changed version is meant.`);
+        return;
+      }
+      throw new Error('library search|list|promote');
     }
     case 'handoff': {
       const file = await core.writeHandoff(typeof args.flags.note === 'string' ? args.flags.note : undefined);

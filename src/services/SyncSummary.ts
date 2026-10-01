@@ -4,6 +4,7 @@ import { parseMarkdown } from './Frontmatter';
 import { NameStatus } from './LoopGit';
 import { SharedFolders, statementDigest } from './ResearchLoopModel';
 import { hasSection, sectionContent } from '../domain/sections';
+import { locateNodeFile } from '../domain/registry';
 
 /**
  * Turn a git name-status diff of the research folders into lines a
@@ -38,8 +39,9 @@ export async function summarizeResearchChanges(changes: NameStatus[], context: S
     const after = change.status === 'D' ? undefined : await context.after(file);
     const old = front(before); const now = front(after);
     const name = id(file);
-    if (folder === paths.assets || folder === paths.definitions) {
-      const kind = folder === paths.definitions ? 'definition' : String(now?.data.type ?? old?.data.type ?? 'asset');
+    const location = locateNodeFile(file, paths);
+    if (location) {
+      const kind = `${location.origin === 'library' ? 'library ' : ''}${location.kind === 'definition' ? 'definition' : String(now?.data.type ?? old?.data.type ?? 'asset')}`;
       if (change.status === 'D') { lines.push(`Removed ${kind} ${name}.`); continue; }
       if (change.status === 'A' || !old) { lines.push(`New ${String(now?.data.status ?? 'draft')} ${kind} ${name}${now?.data.title ? ` (${String(now.data.title)})` : ''}.`); continue; }
       const parts: string[] = [];

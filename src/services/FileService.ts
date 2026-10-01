@@ -89,6 +89,15 @@ export class FileService {
     }
   }
 
+  async listDirs(relativeDir: string): Promise<string[]> {
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(this.resolve(relativeDir));
+      return entries.filter(([name, type]) => type === vscode.FileType.Directory && !name.startsWith('.')).map(([name]) => path.posix.join(relativeDir, name)).sort();
+    } catch {
+      return [];
+    }
+  }
+
   async listFilesRecursive(relativeDir: string, extension: string): Promise<string[]> {
     const uri = this.resolve(relativeDir);
     const results: string[] = [];
@@ -121,6 +130,7 @@ export class FileService {
       paths.definitions,
       paths.ideas,
       paths.plans,
+      paths.library,
       paths.writingSections,
       paths.papers,
       paths.localSourcePdfs,
@@ -193,6 +203,7 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${paths.definitions}/\` contains mathematical definitions and their notation.
 - \`${paths.ideas}/\` contains freeform research ideas.
 - \`${paths.plans}/\` contains proof plans, one per attempt; failed and succeeded plans are kept as the record of what was tried.
+- \`${paths.library}/<collection>/assets|definitions/\` holds known results imported from earlier work or papers, grouped by source (one folder per collection). Their IDs start with \`lib_\`; project results reference them in \`depends_on\`/\`uses_definitions\`. A researcher approves each one once; the loop never re-proves them. Library files can be edited at any time (git keeps the history); editing an approved one returns it to draft for re-approval.
 - \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
 - \`${shared.checks}/\` records falsification checks: what was tried against which statement, and what was not covered.
@@ -205,7 +216,8 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
 `;
   }
 
-  private async upsertGitignore(paths: ProjectPaths, bundledSkillNames: string[]): Promise<void> {
+  /** Rewrite the managed .gitignore block; writes only when it changed (e.g. a newer extension bundles a new skill). */
+  async upsertGitignore(paths: ProjectPaths, bundledSkillNames: string[]): Promise<void> {
     const current = await this.readFile('.gitignore').catch(() => '');
     const managed = [
       GITIGNORE_START,

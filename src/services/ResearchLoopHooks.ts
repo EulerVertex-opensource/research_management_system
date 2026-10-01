@@ -74,7 +74,7 @@ export function researchReads(paths: ProjectPaths, input: HookInput, root?: stri
   const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
   if (command) for (const match of command.matchAll(/[\w./-]+/g)) raw.push(match[0]);
   const shared = sharedFolders(paths.researchRoot);
-  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks];
+  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks, ...(paths.library ? [paths.library] : [])];
   const result = new Set<string>();
   for (const value of raw) {
     let relative = value.replace(/\\/g, '/');
@@ -88,7 +88,11 @@ export function researchReads(paths: ProjectPaths, input: HookInput, root?: stri
   return [...result];
 }
 
-/** Deny agent writes that would forge an approval or touch loop-internal files. */
+/**
+ * Deny agent writes that would forge an approval or touch loop-internal files.
+ * Library files may be added and edited like any research file (git keeps the
+ * history); only setting them approved is the researcher's.
+ */
 export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
   const tool = (input.tool_name ?? '').toLowerCase();
   const writes = /write|edit|patch|shell|bash|notebook/.test(tool);
@@ -111,6 +115,13 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
     }
     if ((under(target, paths.assets, root) || under(target, paths.definitions, root)) && APPROVED.test(text)) {
       return { deny: true, reason: `Research loop: ${target} may not be set to status: approved by the agent. Leave it draft and call request_approval so the researcher can approve it.` };
+    }
+  }
+  if (paths.library) {
+    for (const target of targets.filter((item) => under(item, paths.library, root))) {
+      if (APPROVED.test(text) || (isShell && shellWrites && /status:\s*['"]?approved/.test(text))) {
+        return { deny: true, reason: `Research loop: ${target} may not be set to status: approved by the agent. Library results are approved by the researcher; leave it draft.` };
+      }
     }
   }
   if (isShell && shellWrites && /status:\s*['"]?approved/.test(text) && (text.includes(paths.assets) || text.includes(paths.definitions))) {

@@ -52,7 +52,8 @@ export function NodeDetail({
   onOpenNodeLink,
 }: Props) {
   const isDefinition = initialFm.type === 'definition';
-  const definitions = allNodes.filter((node) => node.filePath.startsWith(`${definitionPath}/`));
+  // Project and library nodes alike, so a project result can pick a library dependency.
+  const definitions = allNodes.filter((node) => node.filePath.startsWith(`${definitionPath}/`) || (node.origin === 'library' && node.type === 'definition'));
   const assets = allNodes.filter((node) => ASSET_TYPES.includes(node.type) && !node.filePath.startsWith(`${definitionPath}/`));
   const [fm, setFm] = useState<NodeFrontmatter>(initialFm);
   const [body, setBody] = useState(initialBody);

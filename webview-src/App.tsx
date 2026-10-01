@@ -188,7 +188,7 @@ export function App() {
   };
 
   const handleNavigateNode = (node: ResearchNode) => {
-    const view: SidebarView = node.type === 'idea' ? 'ideas' : node.type === 'plan' ? 'plans'
+    const view: SidebarView = node.type === 'idea' ? 'ideas' : node.type === 'plan' ? 'plans' : node.origin === 'library' ? 'library'
       : node.filePath.startsWith(`${state.paths?.definitions ?? 'research/definitions'}/`) ? 'definitions' : 'assets';
     dispatch({ type: 'SET_VIEW', view });
     dispatch({ type: 'SELECT_NODE', id: node.id });
@@ -297,10 +297,11 @@ export function App() {
   const filterType =
     state.activeView === 'assets' ? 'asset' :
     state.activeView === 'definitions' ? 'definition' :
+    state.activeView === 'library' ? 'library' :
     state.activeView === 'ideas' ? 'idea' :
     state.activeView === 'plans' ? 'plan' : undefined;
 
-  const showNodeList = state.activeView === 'assets' || state.activeView === 'definitions' || state.activeView === 'ideas' || state.activeView === 'plans';
+  const showNodeList = state.activeView === 'assets' || state.activeView === 'definitions' || state.activeView === 'library' || state.activeView === 'ideas' || state.activeView === 'plans';
   const showPaperList = state.activeView === 'papers';
   const showListColumn = showNodeList || showPaperList;
 
@@ -330,9 +331,9 @@ export function App() {
                 }}
               >
                 <span style={{ fontWeight: 600, fontSize: 13 }}>
-                  {state.activeView === 'assets' ? 'Assets' : state.activeView === 'definitions' ? 'Definitions' : state.activeView === 'ideas' ? 'Ideas' : state.activeView === 'plans' ? 'Plans' : 'Papers'}
+                  {state.activeView === 'assets' ? 'Assets' : state.activeView === 'definitions' ? 'Definitions' : state.activeView === 'library' ? 'Library' : state.activeView === 'ideas' ? 'Ideas' : state.activeView === 'plans' ? 'Plans' : 'Papers'}
                 </span>
-                {showNodeList && (
+                {showNodeList && state.activeView !== 'library' && (
                   <button
                     onClick={() => dispatch({ type: 'TOGGLE_CREATE_MODAL' })}
                     title="Create new node"
@@ -354,6 +355,7 @@ export function App() {
                   onSelect={handleSelectNode}
                   filterType={filterType}
                   definitionPath={state.paths?.definitions ?? 'research/definitions'}
+                  onApprove={(ids, label) => send({ type: 'approveNodes', ids, label })}
                 />
               )}
               {showPaperList && (

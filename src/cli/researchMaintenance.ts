@@ -9,6 +9,7 @@ import { OverlayFiles, migrateProject, migrationReasons } from '../services/Sche
 import { NodeKind } from '../domain/nodeKinds';
 import { duplicateIds, nodeProblems } from '../domain/schema';
 import { ProjectPaths } from '../models/types';
+import { RegistryNode, libraryProblems, nodeFolders } from '../domain/registry';
 
 const USAGE = `Usage: research-maintenance <command> [--preview | --apply] [--project ROOT]
 
@@ -51,27 +52,38 @@ async function readFolder(files: NodeLoopFiles, folder: string) {
   return Promise.all((await files.listFiles(folder)).map(async (file) => ({ filePath: file, raw: await files.readFile(file) })));
 }
 
+/** Project and library nodes of one kind. */
+async function readNodes(files: NodeLoopFiles, paths: ProjectPaths, kind: 'asset' | 'definition') {
+  const result: Array<{ filePath: string; raw: string }> = [];
+  for (const folder of await nodeFolders(files, paths, kind)) result.push(...await readFolder(files, folder));
+  return result;
+}
+
 async function validate(files: NodeLoopFiles, paths: ProjectPaths, only?: 'asset' | 'definition'): Promise<number> {
   const problems: string[] = [];
   const index = await files.readFile(paths.paperIndex).catch(() => '');
   const paperIds = new Set([...index.matchAll(/^##\s+([a-z][a-z0-9_]*)\s*$/gm)].map((match) => match[1]));
   const folders: Array<[NodeKind, string]> = [['asset', paths.assets], ['definition', paths.definitions], ['idea', paths.ideas], ['plan', paths.plans]];
+  for (const kind of ['asset', 'definition'] as const) for (const folder of (await nodeFolders(files, paths, kind)).slice(1)) folders.push([kind, folder]);
   const all: string[] = [];
+  const registry: RegistryNode[] = [];
   for (const [kind, folder] of folders) {
     for (const { filePath, raw } of await readFolder(files, folder)) {
       all.push(filePath);
       try {
         const { data, content } = parseMarkdown(raw);
         const id = path.posix.basename(filePath, '.md');
+        registry.push({ id, file: filePath, data });
         problems.push(...nodeProblems(kind, id, data, content, { allowApproved: true, paperIds }).map((problem) => `${filePath}: ${problem.slice(id.length + 2)}`));
       } catch (error) { problems.push(`${filePath}: invalid YAML (${String(error)})`); }
     }
   }
   problems.push(...duplicateIds(all));
+  problems.push(...libraryProblems(registry, paths));
   problems.push(...ideaPlanProblems(await readFolder(files, paths.assets), [...await readFolder(files, paths.ideas), ...await readFolder(files, paths.plans)]));
-  for (const [kind, folder, label] of [['asset', paths.assets, 'Assets'], ['definition', paths.definitions, 'Definitions']] as const) {
+  for (const [kind, label] of [['asset', 'Assets'], ['definition', 'Definitions']] as const) {
     if (only && only !== kind) continue;
-    const nodes = await readFolder(files, folder);
+    const nodes = await readNodes(files, paths, kind);
     try {
       const { order } = computeAssetOrder(nodes.map(({ filePath, raw }) => ({ id: path.posix.basename(filePath, '.md'), raw })), kind);
       const titles = new Map(nodes.map(({ filePath, raw }) => [path.posix.basename(filePath, '.md'), String(parseMarkdown(raw).data.title ?? '')]));
@@ -88,9 +100,9 @@ async function validate(files: NodeLoopFiles, paths: ProjectPaths, only?: 'asset
 }
 
 async function links(files: NodeLoopFiles, paths: ProjectPaths, apply: boolean, requested?: string): Promise<void> {
-  const inputs = [...await readFolder(files, paths.assets), ...await readFolder(files, paths.definitions)];
-  if (requested && !inputs.some((item) => item.filePath === requested)) throw new Error(`Node file not found in assets or definitions: ${requested}`);
-  const plan = planResearchInterlinks(inputs, paths.assets, paths.definitions);
+  const inputs = [...await readNodes(files, paths, 'asset'), ...await readNodes(files, paths, 'definition')];
+  if (requested && !inputs.some((item) => item.filePath === requested)) throw new Error(`Node file not found in assets, definitions, or the library: ${requested}`);
+  const plan = planResearchInterlinks(inputs, paths.assets, paths.definitions, paths.library);
   const changes = requested ? plan.changes.filter((item) => item.filePath === requested) : plan.changes;
   const issues = requested ? plan.issues.filter((item) => item.filePath === requested) : plan.issues;
   const original = new Map(inputs.map((item) => [item.filePath, item.raw]));

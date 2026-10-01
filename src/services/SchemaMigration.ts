@@ -49,6 +49,7 @@ export class OverlayFiles implements LoopFiles {
     }
     return [...listed].sort();
   }
+  async listDirs(dir: string): Promise<string[]> { return this.base.listDirs ? this.base.listDirs(dir) : []; }
 
   /** Net changes against the base, skipping writes that leave a file as it was. */
   async changes(): Promise<FileChange[]> {

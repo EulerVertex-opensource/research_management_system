@@ -28,6 +28,9 @@ export interface ResearchNode extends NodeFrontmatter {
   order?: number;
   /** A succeeded plan whose target's proof changed since the plan produced it; derived, never stored. */
   outdated?: boolean;
+  /** Set on library nodes (known results under the library folder); derived from the path. */
+  origin?: 'library';
+  collection?: string;
 }
 
 /** What the dashboard derives for project.md instead of storing it there: progress, open questions, writing. */
@@ -106,6 +109,8 @@ export interface ResearchAssistantConfig {
     plans: string;
     papers: string;
     localSourcePdfs: string;
+    /** Known results imported from earlier work or papers; defaults to `<root>/library`. */
+    library?: string;
   };
 }
 
@@ -124,6 +129,8 @@ export interface ProjectPaths {
   definitions: string;
   ideas: string;
   plans: string;
+  /** Library of known results: `<library>/<collection>/assets|definitions/lib_*.md`. */
+  library: string;
   writingRoot: string;
   writingOutline: string;
   writingSections: string;

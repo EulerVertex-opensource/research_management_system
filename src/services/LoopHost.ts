@@ -11,10 +11,11 @@ import { ResearchLoopCore } from './ResearchLoopCore';
 import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
 import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
 import { LoopGit } from './LoopGit';
-import { ResearchSync } from './ResearchSync';
+import { AutoPullMode, PullResult, ResearchSync, autoPullDecision } from './ResearchSync';
 import { NodeGitRunner, runShell } from '../cli/nodeGit';
 import { loadSyncConfig } from '../cli/nodeFiles';
 import { toIdeaKind } from '../domain/nodeKinds';
+import { findNodeFile, locateNodeFile } from '../domain/registry';
 import { ResearchNode } from '../models/types';
 import { GraphAction, GraphPayload } from '../models/graph';
 import { collectGraphPayload } from './GraphViewModel';
@@ -35,6 +36,13 @@ function sliceSeconds(value: unknown): number { return typeof value === 'number'
 function setting<T>(key: string, fallback: T): T {
   return vscode.workspace.getConfiguration('researchAssistant').get<T>(`loop.${key}`, fallback);
 }
+
+function syncSetting<T>(key: string, fallback: T): T {
+  return vscode.workspace.getConfiguration('researchAssistant').get<T>(`sync.${key}`, fallback);
+}
+
+/** Refocusing the window re-checks the remote at most this often. */
+const AUTO_SYNC_MIN_GAP_MS = 60_000;
 
 /**
  * Extension-side home of the research loop: the shared core over the workspace
@@ -57,15 +65,25 @@ export class LoopHost implements vscode.Disposable {
   private readonly stateChanged = new vscode.EventEmitter<void>();
   /** Fires when the loop state or an approval changes, so the dashboard can refresh its Graph tab. */
   readonly onDidChangeState = this.stateChanged.event;
+  private autoSyncTimer: ReturnType<typeof setInterval> | undefined;
+  private autoSyncRunning = false;
+  private lastAutoSync = 0;
+  /** Remote commit already announced, so the same upstream state is not announced twice. */
+  private announcedUpstream: string | undefined;
+  private reportedFetchError: string | undefined;
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel) {
     this.git = new LoopGit(new NodeGitRunner(files.rootUri.fsPath));
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
     this.statusBar.command = 'research-assistant.loop.openChat';
     this.subscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => { void this.onEditorSave(document); }));
+    // Coming back from the Overleaf browser tab is the moment its edits matter.
+    this.subscriptions.push(vscode.window.onDidChangeWindowState((state) => { if (state.focused) void this.autoSync(false); }));
+    this.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('researchAssistant.sync')) this.scheduleAutoSync(); }));
   }
 
   configure(paths: ProjectPaths): void {
+    const first = !this.core;
     this.paths = paths;
     if (this.core) this.core.setPaths(paths);
     else this.core = new ResearchLoopCore(this.files, paths, { iterationCap: setting('iterationCap', 10), git: this.git, extensionVersion: extensionVersion() });
@@ -75,9 +93,11 @@ export class LoopHost implements vscode.Disposable {
     this.watcher.onDidChange(refresh); this.watcher.onDidCreate(refresh); this.watcher.onDidDelete(refresh);
     void this.startBridge();
     void this.refreshStatusBar();
+    if (first) { this.scheduleAutoSync(); void this.autoSync(true); }
   }
 
   dispose(): void {
+    if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
     this.watcher?.dispose();
     this.statusBar.dispose();
     this.stateChanged.dispose();
@@ -117,7 +137,7 @@ export class LoopHost implements vscode.Disposable {
 
   async recordApprovalIfHuman(id: string, source: string): Promise<void> {
     if (!this.paths) return;
-    const kind = (await this.files.exists(`${this.paths.definitions}/${id}.md`)) ? 'definition' : 'asset';
+    const kind = (await findNodeFile(this.files, this.paths, 'definition', id)) ? 'definition' : 'asset';
     const recorded = await this.withCore((core) => core.recordExisting(kind, id, source)).catch(() => false);
     if (recorded) this.output.appendLine(`[loop] Recorded ${source} approval of ${id}`);
   }
@@ -134,8 +154,7 @@ export class LoopHost implements vscode.Disposable {
     if (!this.paths || vscode.window.activeTextEditor?.document !== document) return;
     const relative = path.relative(this.files.rootUri.fsPath, document.uri.fsPath).split(path.sep).join('/');
     if (!relative.endsWith('.md')) return;
-    const folder = path.posix.dirname(relative);
-    if (folder !== this.paths.assets && folder !== this.paths.definitions) return;
+    if (!locateNodeFile(relative, this.paths)) return;
     let status: unknown;
     try { status = parseMarkdown(document.getText()).data.status; } catch { return; }
     if (status === 'approved') await this.recordApprovalIfHuman(path.posix.basename(relative, '.md'), 'editor');
@@ -291,7 +310,7 @@ export class LoopHost implements vscode.Disposable {
 
   private async showApproval(kind: ApprovalKind, target: string, summary: string): Promise<{ decision: 'approved' | 'changes_requested' | 'later'; text: string } | undefined> {
     const paths = this.paths!;
-    const file = kind === 'project' ? paths.projectMd : kind === 'definition' ? `${paths.definitions}/${target}.md` : `${paths.assets}/${target}.md`;
+    const file = kind === 'project' ? paths.projectMd : (await findNodeFile(this.files, paths, kind === 'definition' ? 'definition' : 'asset', target)) ?? `${paths.assets}/${target}.md`;
     const approveLabel = kind === 'counterexample' ? 'Confirm counterexample' : 'Approve';
     const rejectLabel = kind === 'counterexample' ? 'Reject…' : 'Request changes…';
     for (;;) {
@@ -344,7 +363,7 @@ export class LoopHost implements vscode.Disposable {
       case 'unpark': await this.withCore((core) => core.unpark(request.assetId)); return;
       case 'lock': await this.lockSection(request.section); return;
       case 'openNode': {
-        const file = (await this.files.exists(`${paths.definitions}/${request.id}.md`)) ? `${paths.definitions}/${request.id}.md` : `${paths.assets}/${request.id}.md`;
+        const file = (await findNodeFile(this.files, paths, 'definition', request.id)) ?? (await findNodeFile(this.files, paths, 'asset', request.id)) ?? `${paths.assets}/${request.id}.md`;
         await vscode.window.showTextDocument(this.files.resolve(file));
         return;
       }
@@ -495,12 +514,75 @@ export class LoopHost implements vscode.Disposable {
   }
 
   async syncPullCommand(): Promise<void> {
-    const result = await this.withSync((sync) => sync.pull());
-    this.report(`pull: ${result.status}`, [...result.summary, ...result.problems.map((line) => `PROBLEM ${line}`), ...result.warnings.map((line) => `WARNING ${line}`)]);
-    this.output.show(true);
+    this.showPullResult(await this.withSync((sync) => sync.pull()), false);
+  }
+
+  private showPullResult(result: PullResult, automatic: boolean): void {
+    this.report(`${automatic ? 'auto-' : ''}pull: ${result.status}`, [...result.summary, ...result.problems.map((line) => `PROBLEM ${line}`), ...result.warnings.map((line) => `WARNING ${line}`)]);
+    if (!automatic || result.status !== 'pulled' || result.problems.length || result.warnings.length) this.output.show(true);
     if (result.status === 'conflict') void vscode.window.showWarningMessage(`Research sync stopped on conflicts in ${result.conflicted?.join(', ')}. Resolve them, then ask the agent to run sync pull --continue.`);
     else if (result.problems.length) void vscode.window.showWarningMessage(`Pulled, but ${result.problems.length} research file problem(s) need fixing; the loop is paused. See Output.`);
+    else if (automatic) void vscode.window.showInformationMessage(`Research Assistant pulled collaborators' changes (incl. Overleaf). ${result.summary[0] ?? ''}`.trim(), 'Show details').then((choice) => { if (choice) this.output.show(true); });
     else void vscode.window.showInformationMessage(result.summary[0] ?? 'Research sync: pulled.');
+  }
+
+  // ---------- automatic pull ----------
+
+  private scheduleAutoSync(): void {
+    if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
+    this.autoSyncTimer = undefined;
+    const minutes = syncSetting('autoPullIntervalMinutes', 5);
+    if (syncSetting<AutoPullMode>('autoPull', 'pull') === 'off' || !(minutes > 0)) return;
+    this.autoSyncTimer = setInterval(() => { void this.autoSync(true); }, Math.max(1, minutes) * 60_000);
+  }
+
+  /**
+   * Fetch the sync remote and, when it is ahead, pull if nothing local could be
+   * mixed in; otherwise announce it once. Never surfaces errors as popups:
+   * a project without git, config, or credentials just stays quiet.
+   */
+  private async autoSync(force: boolean): Promise<void> {
+    const mode = syncSetting<AutoPullMode>('autoPull', 'pull');
+    if (mode === 'off' || !this.core || this.autoSyncRunning) return;
+    if (!force && Date.now() - this.lastAutoSync < AUTO_SYNC_MIN_GAP_MS) return;
+    this.autoSyncRunning = true;
+    this.lastAutoSync = Date.now();
+    try {
+      if ((await this.git.run(['rev-parse', '--is-inside-work-tree'])).stdout.trim() !== 'true') return;
+      const outcome = await this.withSync(async (sync) => {
+        const status = await sync.status();
+        const decision = autoPullDecision(status, mode);
+        if (decision.action !== 'pull') return { status, decision };
+        try { return { status, decision, pulled: await sync.pull() }; }
+        catch (error: unknown) { return { status, decision: { action: 'notify' as const, reason: error instanceof Error ? error.message.split('\n')[0] : String(error) } }; }
+      });
+      const { status, decision } = outcome;
+      const ref = `${status.remote}/${status.branch}`;
+      if (typeof status.fetchError === 'string') {
+        if (status.fetchError !== this.reportedFetchError) this.output.appendLine(`[sync] auto-pull could not fetch ${status.remote}: ${status.fetchError}`);
+        this.reportedFetchError = status.fetchError;
+        return;
+      }
+      this.reportedFetchError = undefined;
+      if (outcome.pulled) { this.announcedUpstream = undefined; this.showPullResult(outcome.pulled, true); return; }
+      if (decision.action !== 'notify') return;
+      const upstream = (await this.git.run(['rev-parse', ref])).stdout.trim();
+      if (upstream && upstream === this.announcedUpstream) return;
+      this.announcedUpstream = upstream;
+      const behind = status.behind as number;
+      this.output.appendLine(`[sync] ${ref} is ${behind} commit(s) ahead; not pulled automatically because ${decision.reason}.`);
+      // Not awaited: an unanswered toast must not hold the auto-sync lock.
+      void vscode.window.showInformationMessage(`${ref} has ${behind} new commit(s) (e.g. from Overleaf). Not pulled automatically because ${decision.reason}.`, 'Pull now', 'Show status').then(async (choice) => {
+        try {
+          if (choice === 'Pull now') await this.syncPullCommand();
+          else if (choice === 'Show status') await this.syncStatusCommand();
+        } catch (error: unknown) { void vscode.window.showErrorMessage(`Research sync: ${error instanceof Error ? error.message : String(error)}`); }
+      });
+    } catch (error: unknown) {
+      this.output.appendLine(`[sync] auto-pull skipped: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.autoSyncRunning = false;
+    }
   }
 
   async syncPrepareCommand(): Promise<void> {

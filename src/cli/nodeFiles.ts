@@ -3,7 +3,7 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 import { ProjectPaths, ResearchAssistantConfig, SyncConfig } from '../models/types';
 import { LoopFiles } from '../services/ResearchLoopModel';
-import { PROJECT_CONFIG_PATH, normalizeConfig, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
+import { PROJECT_CONFIG_PATH, defaultLatexCommand, normalizeConfig, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
 
 /** Node `fs` implementation of the small file interface used by the research loop. */
 export class NodeLoopFiles implements LoopFiles {
@@ -37,6 +37,13 @@ export class NodeLoopFiles implements LoopFiles {
       return entries.filter((entry) => entry.isFile() && entry.name.endsWith(extension)).map((entry) => path.posix.join(relativeDir, entry.name)).sort();
     } catch { return []; }
   }
+
+  async listDirs(relativeDir: string): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(this.resolve(relativeDir), { withFileTypes: true });
+      return entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => path.posix.join(relativeDir, entry.name)).sort();
+    } catch { return []; }
+  }
 }
 
 /** Walk up from `start` to the nearest folder containing `.research-assistant.json`. */
@@ -59,6 +66,8 @@ export async function loadProjectPaths(root: string): Promise<ProjectPaths> {
 }
 
 export async function loadSyncConfig(root: string): Promise<SyncConfig> {
-  const raw = JSON.parse(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8')) as { sync?: Partial<SyncConfig> };
-  return normalizeSyncConfig(raw.sync);
+  const raw = JSON.parse(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8')) as Partial<ResearchAssistantConfig> & { sync?: Partial<SyncConfig> };
+  const sync = normalizeSyncConfig(raw.sync);
+  // Derived, not saved, so it follows later changes to latex.main.
+  return { ...sync, latexCommand: sync.latexCommand ?? defaultLatexCommand(normalizeConfig(raw).latex) };
 }

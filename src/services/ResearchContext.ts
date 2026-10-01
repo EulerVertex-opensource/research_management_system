@@ -9,7 +9,11 @@ import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '.
  * the core, the CLI, and tests. Must not import vscode.
  */
 
-export interface ContextNode { id: string; file: string; raw: string; data: Record<string, any>; body: string }
+export interface ContextNode {
+  id: string; file: string; raw: string; data: Record<string, any>; body: string;
+  /** Set on library nodes: known results the loop approves once and never proves. */
+  origin?: 'library'; collection?: string;
+}
 
 /** What of a node to show: everything, the statement (body before ## Proof), the title and first paragraph, or named sections. */
 export type ContextView = 'all' | 'statement' | 'summary' | string[];
@@ -236,10 +240,23 @@ export function sectionsOf(body: string, headings: string[]): string {
   }).filter(Boolean).join('\n\n');
 }
 
+/**
+ * Project nodes, plus the library nodes they reference. The library can be
+ * large, so the rest of it is only counted and found on demand by search.
+ */
 function nodeIndex(sources: ContextSources): string {
-  const line = (node: ContextNode) => `${node.id} | ${node.data.type ?? '?'} | ${node.data.status ?? '-'} | deps=[${list(node.data.depends_on).join(',')}] | ${String(node.data.title ?? '').replace(/\s+/g, ' ')}`;
-  return [...sources.assets.values(), ...sources.definitions.values()].map(line).join('\n');
+  const line = (node: ContextNode) => `${node.id} | ${node.data.type ?? '?'} | ${node.data.status ?? '-'} | deps=[${list(node.data.depends_on).join(',')}] | ${String(node.data.title ?? '').replace(/\s+/g, ' ')}${node.origin === 'library' ? ` | library:${node.collection ?? ''}` : ''}`;
+  const all = [...sources.assets.values(), ...sources.definitions.values()];
+  const project = all.filter((node) => node.origin !== 'library');
+  const referenced = new Set(project.flatMap((node) => [...list(node.data.depends_on), ...list(node.data.uses_definitions)]));
+  const library = all.filter((node) => node.origin === 'library');
+  const shown = library.filter((node) => referenced.has(node.id));
+  const hidden = library.length - shown.length;
+  const more = hidden ? [`(${hidden} more library result(s) not referenced yet: ${LIBRARY_SEARCH_HINT})`] : [];
+  return [...project, ...shown].map(line).concat(more).join('\n');
 }
+
+export const LIBRARY_SEARCH_HINT = 'research-loop library search <words>';
 
 function paperIndexOutline(text: string): string {
   return text.split('\n').filter((line) => /^#{1,3} /.test(line) || /https?:\/\//.test(line)).join('\n').trim();

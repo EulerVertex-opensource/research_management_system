@@ -32,11 +32,10 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
   const { state, manuscript } = input;
   const all = input.nodes.map((node) => ({ node, kind: nodeKindOf(node.type) })).filter((entry): entry is { node: ResearchNode; kind: 'asset' | 'definition' | 'idea' | 'plan' } => Boolean(entry.kind));
   const graph = buildGraph({ project: input.project, nodes: all.map(({ node, kind }) => ({ id: node.id, kind, data: node as unknown as Record<string, any> })) });
-  const research = all.filter((entry) => RESEARCH_KINDS.has(entry.kind));
-  const ids = new Set(research.map((entry) => entry.node.id));
   const required = requiredAssetIds(input.project);
   const math = ['depends_on', 'uses_definition'] as const;
-  const keyOf = (id: string) => nodeKey(research.find((entry) => entry.node.id === id)?.kind ?? 'asset', id);
+  const kinds = new Map(all.map((entry) => [entry.node.id, entry.kind]));
+  const keyOf = (id: string) => nodeKey(kinds.get(id) ?? 'asset', id);
   const idOf = (key: string) => key.slice(key.indexOf(':') + 1);
 
   // Which required results each node serves.
@@ -44,6 +43,10 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
   for (const id of required) {
     for (const reached of [id, ...graph.reachable([keyOf(id)], math).map(idOf)]) blocks.set(reached, [...(blocks.get(reached) ?? []), id]);
   }
+  // The library can be large: show only its nodes the research reaches or a project node references directly, as boundary leaves.
+  const referenced = new Set(all.filter((entry) => !entry.node.origin).flatMap((entry) => [...(entry.node.depends_on ?? []), ...(entry.node.uses_definitions ?? [])]));
+  const research = all.filter((entry) => RESEARCH_KINDS.has(entry.kind) && (!entry.node.origin || blocks.has(entry.node.id) || referenced.has(entry.node.id)));
+  const ids = new Set(research.map((entry) => entry.node.id));
 
   // Manuscript: who presents what, and which nodes a stale or invalid lock points at.
   const presentedIn = new Map<string, string[]>();
@@ -96,6 +99,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       sections: presentedIn.get(node.id) ?? [],
       blocks: served,
       ...(typeof node.refutes === 'string' && node.refutes ? { refutes: node.refutes } : {}),
+      ...(node.origin ? { origin: node.origin, collection: node.collection } : {}),
       filePath: node.filePath,
     };
   });

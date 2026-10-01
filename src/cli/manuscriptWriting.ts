@@ -8,6 +8,7 @@ import { bindingPath, loadImpactNodes, loadManuscriptImpact, loadProjectRevision
 import { lockBinding, renderImpact, sectionImpact } from '../domain/manuscriptImpact';
 import { ProjectPaths } from '../models/types';
 import { isCited } from '../domain/schema';
+import { findNodeFile } from '../domain/registry';
 
 type Mode = 'preview' | 'apply';
 interface Paths {
@@ -60,7 +61,7 @@ async function readBrief(paths: Paths, section: WritingSection, checkAssetFiles:
   if (brief.title !== section.title) throw new Error(`Outline title and brief title differ for ${section.id}`);
   if (checkAssetFiles) {
     for (const id of brief.assets) {
-      const found = await fs.access(path.join(paths.assets, `${id}.md`)).then(() => true, () => fs.access(path.join(paths.definitions, `${id}.md`)).then(() => true, () => false));
+      const found = Boolean(await findNodeFile(paths.files, paths.config, 'asset', id) ?? await findNodeFile(paths.files, paths.config, 'definition', id));
       if (!found) throw new Error(`Section ${section.id} references unknown asset: ${id}`);
     }
   }
@@ -102,13 +103,14 @@ async function prepare(paths: Paths, id: string, mode: Mode, full: boolean): Pro
   const paperIds = new Set<string>();
 
   const visit = async (kind: 'asset' | 'definition', nodeId: string): Promise<void> => {
-    let folder = kind === 'asset' ? paths.assets : paths.definitions;
-    // A brief source may name a definition the section introduces.
-    if (kind === 'asset' && !(await fs.access(path.join(folder, `${nodeId}.md`)).then(() => true, () => false)) && (await fs.access(path.join(paths.definitions, `${nodeId}.md`)).then(() => true, () => false))) {
-      kind = 'definition'; folder = paths.definitions;
+    // Project or library node; a brief source may name a definition the section introduces.
+    let relative = await findNodeFile(paths.files, paths.config, kind, nodeId);
+    if (!relative && kind === 'asset') {
+      relative = await findNodeFile(paths.files, paths.config, 'definition', nodeId);
+      if (relative) kind = 'definition';
     }
     const seen = kind === 'asset' ? assetFiles : definitionFiles;
-    const file = path.join(folder, `${nodeId}.md`);
+    const file = relative ? path.join(paths.root, relative) : path.join(kind === 'asset' ? paths.assets : paths.definitions, `${nodeId}.md`);
     if (seen.has(file)) return;
     let raw: string;
     try { raw = await fs.readFile(file, 'utf8'); }

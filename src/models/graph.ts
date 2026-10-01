@@ -38,6 +38,9 @@ export interface GraphNodeView {
   blocks: string[];
   /** For a counterexample: the asset it refutes. */
   refutes?: string;
+  /** Library node (a known result); `collection` is its library folder. */
+  origin?: 'library';
+  collection?: string;
   filePath: string;
 }
 

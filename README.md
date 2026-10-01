@@ -39,6 +39,8 @@ overleaf-project/
     definitions/                   ← definitions and their notation
     ideas/                         ← freeform research ideas
     plans/                         ← proof plans, one per attempt (pending/failed/succeeded)
+    library/<collection>/          ← known results (earlier theorems, useful papers), lib_ IDs
+      assets/ definitions/        ← approved once, used as known, never re-proved; edits return them to draft
     writing/
       outline.md                  ← ordered manuscript section links
       sections/<id>.md            ← section briefs and asset IDs
@@ -124,6 +126,10 @@ Overleaf [warns](https://docs.overleaf.com/integrations-and-add-ons/git-integrat
 
 Prefer one node per file so independent results merge cleanly. Approvals are one file per target for the same reason; `research-loop migrate-approvals` (also run on **Refresh Project Setup**) splits a legacy `research/approvals.json`. Avoid renaming files that have active Overleaf comments or tracked changes, because a Git-side rename is represented as delete-and-create by Overleaf.
 
+### Automatic pull
+
+The extension fetches `sync.remote` on startup, when the VS Code window regains focus (at most once a minute), and every `researchAssistant.sync.autoPullIntervalMinutes` minutes (default 5; `0` disables the timer). If the remote is ahead, it runs the same `sync pull` as the command, but only when the working tree has no uncommitted changes and the research loop is not running. Otherwise it shows a notification with **Pull now**, once per new remote commit. Set `researchAssistant.sync.autoPull` to `notify` to only be told, or `off` to disable it. Fetch failures, such as missing Overleaf credentials, are logged to the Research Assistant output channel without a popup.
+
 ## Configuration
 
 The default generated `.research-assistant.json` is:
@@ -164,13 +170,13 @@ An optional `sync` block configures git collaboration. Defaults are shown; `over
   "overleafBranch": "master",
   "strategy": "rebase",
   "include": [],
-  "latexCommand": "latexmk -pdf -interaction=nonstopmode main.tex",
+  "latexCommand": "latexmk -pdf -interaction=nonstopmode -halt-on-error -cd -outdir=.latex-out main.tex",
   "signCommits": false,
   "identity": "alice@example.edu"
 }
 ```
 
-`branch` defaults to the current branch. `include` adds paths to publish commits beyond the research folders, the manuscript files, and `.research-assistant.json`. `identity` overrides `git config user.email` as the name recorded on approvals, checks, decisions, and handoffs.
+`branch` defaults to the current branch. `overleafBranch` is used only for pushes and pulls to `overleafRemote`; when `remote` is itself the Overleaf clone, the current branch (Overleaf's `master`) is used. When `latexCommand` is unset, `sync prepare --latex` runs `latexmk -pdf` on `latex.main` with output in `.latex-out/`. `include` adds paths to publish commits beyond the research folders, the manuscript files, and `.research-assistant.json`. `identity` overrides `git config user.email` as the name recorded on approvals, checks, decisions, and handoffs.
 
 All paths must remain within the workspace. LaTeX paths are relative to `latex.projectRoot`; research paths are workspace-relative. Macro files may be an empty array and `notations` may be `null` for projects without dedicated files.
 

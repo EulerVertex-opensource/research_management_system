@@ -172,6 +172,10 @@ export class WebviewProvider {
     if (initialized) {
       const reinstalled = await this.skillInstaller.ensureCurrentDrivers().catch((error: unknown) => { this.output.appendLine(`[skills] Could not check the loop driver: ${String(error)}`); return false; });
       if (reinstalled) this.output.appendLine('[skills] Project skills and loop driver were older than this extension; reinstalled them.');
+      // Skills added in a newer extension version are installed above; keep them out of git too.
+      await this.skillInstaller.listBundledSkillNames()
+        .then((names) => this.fileService.upsertGitignore(paths, names))
+        .catch((error: unknown) => this.output.appendLine(`[skills] Could not update .gitignore: ${String(error)}`));
     }
     if (initialized && !this.integrationEnsured) {
       this.integrationEnsured = true;
@@ -276,14 +280,14 @@ export class WebviewProvider {
     const paths = this.paths;
 
     // Watch shared asset and idea node files.
-    const nodeWatchers = [paths.assets, paths.definitions, paths.ideas, paths.plans].map((folder) =>
-      vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, `${folder}/*.md`))
+    const nodeWatchers = [`${paths.assets}/*.md`, `${paths.definitions}/*.md`, `${paths.ideas}/*.md`, `${paths.plans}/*.md`, `${paths.library}/*/*/*.md`].map((pattern) =>
+      vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, pattern))
     );
 
     const onNodeFileChange = async (uri: vscode.Uri) => {
       try {
         const changedId = uri.path.split('/').pop()?.replace(/\.md$/, '');
-        if (changedId && (uri.path.includes(`/${paths.assets}/`) || uri.path.includes(`/${paths.definitions}/`))) await this.loopHost.reconcile(changedId);
+        if (changedId && (uri.path.includes(`/${paths.assets}/`) || uri.path.includes(`/${paths.definitions}/`) || uri.path.includes(`/${paths.library}/`))) await this.loopHost.reconcile(changedId);
         const nodes = await this.refreshIndex();
         this.send({ type: 'nodesUpdated', nodes });
         this.scheduleGraph();
@@ -590,6 +594,25 @@ export class WebviewProvider {
           await this.nodeIndex.updateStatus(msg.id, msg.status as ResearchStatus);
           if (msg.status === 'approved') await this.loopHost.recordApprovalIfHuman(msg.id, 'dashboard');
           await this.refreshNodes();
+          break;
+        }
+
+        case 'approveNodes': {
+          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
+          // Batch approval is for library results only; project results are approved one by one after review.
+          const targets = msg.ids.map((id) => this.nodeIndex!.getById(id)).filter((node): node is ResearchNode => Boolean(node && node.origin === 'library' && node.status === 'draft'));
+          if (!targets.length) break;
+          const confirm = `Approve ${targets.length}`;
+          const choice = await vscode.window.showWarningMessage(
+            `Approve ${targets.length} library result${targets.length > 1 ? 's' : ''} in ${msg.label}? The research loop will use them as known and never re-prove them; an edit later reverts the edited one to draft.`,
+            { modal: true }, confirm);
+          if (choice !== confirm) break;
+          for (const node of targets) {
+            await this.nodeIndex.updateStatus(node.id, 'approved');
+            await this.loopHost.recordApprovalIfHuman(node.id, 'dashboard');
+          }
+          await this.refreshNodes();
+          this.scheduleGraph();
           break;
         }
 

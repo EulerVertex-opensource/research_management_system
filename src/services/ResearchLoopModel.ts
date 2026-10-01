@@ -4,6 +4,7 @@ import { parseMarkdown } from './Frontmatter';
 import { NodeKind } from '../domain/nodeKinds';
 import { researchDigest } from '../domain/digests';
 import { nodeProblems } from '../domain/schema';
+import { LIBRARY_PREFIX, isLibraryId, locateNodeFile } from '../domain/registry';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 
 /**
@@ -45,6 +46,8 @@ export interface LoopFiles {
   writeFile(relativePath: string, content: string): Promise<void>;
   exists(relativePath: string): Promise<boolean>;
   listFiles(relativeDir: string, extension?: string): Promise<string[]>;
+  /** Immediate subfolders (paths relative to the project); used to discover library collections. */
+  listDirs?(relativeDir: string): Promise<string[]>;
   deleteFile?(relativePath: string): Promise<void>;
 }
 
@@ -115,7 +118,7 @@ export interface StageReport {
   assumedDefinitions?: string[];
 }
 
-export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; checks?: string; decisions?: string; handoffs?: string }
+export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; library?: string; checks?: string; decisions?: string; handoffs?: string }
 
 export { researchDigest, statementDigest, proofDigest } from '../domain/digests';
 
@@ -149,7 +152,10 @@ export function validateResearchFile(filePath: string, raw: string, folders: Res
   if (!/^[a-z][a-z0-9_]*$/.test(id)) throw new Error(`Invalid node ID: ${id}`);
   if (typeof data.title !== 'string' || !data.title.trim()) throw new Error(`${id}: title is required.`);
   const folder = path.posix.dirname(filePath);
-  const kind: NodeKind | undefined = folder === folders.assets ? 'asset' : folder === folders.definitions ? 'definition' : folder === folders.ideas ? 'idea' : folder === folders.plans ? 'plan' : undefined;
+  const location = folders.library ? locateNodeFile(filePath, { assets: folders.assets, definitions: folders.definitions, library: folders.library }) : undefined;
+  if (location?.origin === 'library' && !isLibraryId(id)) throw new Error(`${filePath}: library node IDs must start with ${LIBRARY_PREFIX}.`);
+  if (location?.origin === 'project' && isLibraryId(id)) throw new Error(`${filePath}: the ${LIBRARY_PREFIX} prefix is reserved for library nodes.`);
+  const kind: NodeKind | undefined = location?.kind ?? (folder === folders.assets ? 'asset' : folder === folders.definitions ? 'definition' : folder === folders.ideas ? 'idea' : folder === folders.plans ? 'plan' : undefined);
   if (kind) {
     const problems = nodeProblems(kind, id, data, content, { allowApproved: options.committed, paperIds });
     if (kind === 'asset' && !problems.length && data.status === 'draft' && statementIncomplete(content)) problems.push(`${id}: asset statement is incomplete.`);

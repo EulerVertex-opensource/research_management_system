@@ -8,6 +8,7 @@ import { proofDigest } from './ResearchLoopModel';
 import { ASSET_TYPES, NodeKind, nodeKindOf, statusesFor } from '../domain/nodeKinds';
 import { nodeProblems, planProblems, stripForeignFields } from '../domain/schema';
 import { nodeTemplate } from '../domain/templates';
+import { libraryFolders, libraryProblems, locateNodeFile } from '../domain/registry';
 
 function slugify(title: string): string {
   return title
@@ -65,7 +66,7 @@ export class NodeIndexService {
     this.nodes.clear();
     this.problems = [];
 
-    const folders = [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans];
+    const folders = [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, ...await libraryFolders(this.fileService, this.paths)];
     const raws = new Map<string, string>();
     for (const folder of folders) {
       for (const filePath of await this.fileService.listFiles(folder, '.md')) {
@@ -73,6 +74,8 @@ export class NodeIndexService {
           const raw = await this.fileService.readFile(filePath);
           const node = parseNode(filePath, raw);
           if (!node) continue;
+          const location = locateNodeFile(filePath, this.paths);
+          if (location?.origin === 'library') { node.origin = 'library'; node.collection = location.collection; }
           const existing = this.nodes.get(node.id);
           if (existing) {
             this.problems.push(`${filePath}: node ID ${node.id} is already used by ${existing.filePath}; IDs are global across research folders.`);
@@ -92,8 +95,10 @@ export class NodeIndexService {
       const target = node.target_asset ? this.nodes.get(node.target_asset) : undefined;
       if (typeof stamped === 'string' && target) node.outdated = proofDigest(raws.get(target.filePath)!) !== stamped;
     }
-    for (const [folder, kind] of [[this.paths.assets, 'asset'], [this.paths.definitions, 'definition']] as const) {
-      const inputs = [...this.nodes.values()].filter((node) => path.posix.dirname(node.filePath) === folder).map((node) => ({ id: node.id, raw: raws.get(node.filePath)! }));
+    this.problems.push(...libraryProblems([...this.nodes.values()].map((node) => ({ id: node.id, file: node.filePath, data: node })), this.paths));
+    for (const kind of ['asset', 'definition'] as const) {
+      // Project and library nodes are ordered together, so a project result may depend on a library one.
+      const inputs = [...this.nodes.values()].filter((node) => locateNodeFile(node.filePath, this.paths)?.kind === kind).map((node) => ({ id: node.id, raw: raws.get(node.filePath)! }));
       try {
         computeAssetOrder(inputs, kind).order.forEach((id, index) => { this.nodes.get(id)!.order = index + 1; });
       } catch (error: unknown) {

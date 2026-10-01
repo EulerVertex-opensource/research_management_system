@@ -81,6 +81,7 @@ export function normalizeConfig(raw: Partial<ResearchAssistantConfig>): Research
       plans: normalizeRelative(research.plans, path.posix.join(path.posix.dirname(ideaPath), 'plans')),
       papers: normalizeRelative(research.papers, researchDefaults.papers),
       localSourcePdfs: normalizeRelative(research.localSourcePdfs, researchDefaults.localSourcePdfs),
+      ...(research.library ? { library: normalizeRelative(research.library, joinProjectPath(normalizeRelative(research.root, researchDefaults.root), 'library')) } : {}),
     },
   };
 }
@@ -100,6 +101,16 @@ export function normalizeSyncConfig(raw: Partial<SyncConfig> | undefined): SyncC
     signCommits: sync.signCommits === true,
     identity: optionalText(sync.identity),
   };
+}
+
+/** Build command for `sync prepare --latex` when sync.latexCommand is unset: latexmk with Overleaf's default pdflatex engine, output in .latex-out. */
+export function defaultLatexCommand(latex: ResearchAssistantConfig['latex']): string {
+  const root = normalizeRelative(latex.projectRoot, '.');
+  const main = joinProjectPath(root, normalizeRelative(latex.main, 'main.tex'));
+  // -cd runs latexmk in the main file's folder, so the repository-root .latex-out is relative to it.
+  const outdir = path.posix.relative(path.posix.dirname(main), '.latex-out');
+  const quote = (value: string) => /^[\w./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  return `latexmk -pdf -interaction=nonstopmode -halt-on-error -cd -outdir=${quote(outdir)} ${quote(main)}`;
 }
 
 export function resolvePaths(config: ResearchAssistantConfig): ProjectPaths {
@@ -122,6 +133,7 @@ export function resolvePaths(config: ResearchAssistantConfig): ProjectPaths {
     definitions: normalizeRelative(config.research.definitions, 'research/definitions'),
     ideas: normalizeRelative(config.research.ideas, 'research/ideas'),
     plans: normalizeRelative(config.research.plans, path.posix.join(path.posix.dirname(config.research.ideas), 'plans')),
+    library: config.research.library ? normalizeRelative(config.research.library, 'research/library') : joinProjectPath(normalizeRelative(config.research.root, 'research'), 'library'),
     writingRoot: path.posix.join(normalizeRelative(config.research.root, 'research'), 'writing'),
     writingOutline: path.posix.join(normalizeRelative(config.research.root, 'research'), 'writing', 'outline.md'),
     writingSections: path.posix.join(normalizeRelative(config.research.root, 'research'), 'writing', 'sections'),

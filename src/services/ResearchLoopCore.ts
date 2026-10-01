@@ -25,6 +25,7 @@ import {
   ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, projectPart, renderContext, renderShow,
 } from './ResearchContext';
 import { ideaPlanProblems } from './ProofIdeas';
+import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLibraryPath, libraryFolders, libraryProblems, listNodeFiles, locateNodeFile, nodeFolders, searchLibrary } from '../domain/registry';
 
 export interface CoreOptions {
   now?: () => string;
@@ -304,8 +305,8 @@ export class ResearchLoopCore {
   async adoptExistingApprovals(): Promise<string[]> {
     const file = await this.approvals();
     const adopted: string[] = [];
-    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
-      for (const filePath of await this.files.listFiles(folder)) {
+    for (const kind of ['asset', 'definition'] as const) {
+      for (const filePath of await listNodeFiles(this.files, this.paths, kind)) {
         const raw = await this.files.readFile(filePath);
         let data: Record<string, any>;
         try { data = parseMarkdown(raw).data; } catch { continue; }
@@ -335,7 +336,7 @@ export class ResearchLoopCore {
       if (!requiredAssetIds(raw).length) throw new Error('Add asset IDs to required_results in project.md before approving the project.');
       await this.record('project', 'project', raw, source);
     } else {
-      const file = `${kind === 'asset' ? this.paths.assets : this.paths.definitions}/${target}.md`;
+      const file = await this.nodeFile(kind, target);
       const raw = await this.files.readFile(file);
       const parsed = parseMarkdown(raw);
       parsed.data.status = 'approved';
@@ -353,7 +354,7 @@ export class ResearchLoopCore {
 
   /** Record a researcher's approval made in the dashboard or editor (file already says approved). */
   async recordExisting(kind: 'asset' | 'definition', target: string, source: string): Promise<boolean> {
-    const file = `${kind === 'asset' ? this.paths.assets : this.paths.definitions}/${target}.md`;
+    const file = await this.nodeFile(kind, target);
     if (!(await this.files.exists(file))) return false;
     const raw = await this.files.readFile(file);
     let data: Record<string, any>;
@@ -434,8 +435,8 @@ export class ResearchLoopCore {
     const approvals = await this.approvals();
     const reverted: string[] = [];
     const nodes = new Map<string, { kind: 'asset' | 'definition'; file: string; raw: string; data: Record<string, any> }>();
-    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
-      for (const file of await this.files.listFiles(folder)) {
+    for (const kind of ['asset', 'definition'] as const) {
+      for (const file of await listNodeFiles(this.files, this.paths, kind)) {
         const raw = await this.files.readFile(file);
         try { nodes.set(path.posix.basename(file, '.md'), { kind, file, raw, data: parseMarkdown(raw).data }); } catch { /* skip */ }
       }
@@ -549,7 +550,7 @@ export class ResearchLoopCore {
 
   async enqueueApproval(kind: ApprovalKind, target: string, reason: string): Promise<ApprovalRequest> {
     const state = this.require();
-    const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(`${kind === 'definition' ? this.paths.definitions : this.paths.assets}/${target}.md`).catch(() => '');
+    const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(await this.nodeFile(kind === 'definition' ? 'definition' : 'asset', target)).catch(() => '');
     const digest = raw ? researchDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : 'asset') : '';
     const existing = state.approvalQueue.find((item) => item.kind === kind && item.target === target);
     if (existing) {
@@ -705,6 +706,45 @@ export class ResearchLoopCore {
     return migrated;
   }
 
+  // ---------- library ----------
+
+  /** Library results matching the words, best first (no words: all of them), each with whether its approval is current. */
+  async librarySearch(query: string, options: { type?: string; collection?: string; limit?: number; unapproved?: boolean } = {}): Promise<Array<LibraryHit & { approved: boolean }>> {
+    const nodes = [...(await this.collectKind('asset')).values(), ...(await this.collectKind('definition')).values()];
+    const records = (await this.approvals()).records;
+    const raw = new Map(nodes.map((node) => [node.id, node.raw]));
+    const hits = searchLibrary(nodes, this.paths, query, { ...options, limit: options.unapproved ? Number.MAX_SAFE_INTEGER : options.limit })
+      .map((hit) => ({ ...hit, approved: hit.status === 'approved' && isApproved(records, hit.kind, hit.id, raw.get(hit.id)!) }));
+    return (options.unapproved ? hits.filter((hit) => !hit.approved) : hits).slice(0, options.limit ?? (options.unapproved ? Number.MAX_SAFE_INTEGER : 20));
+  }
+
+  /**
+   * Copy a library result into the project as a draft that records where it
+   * came from, so it can be changed or generalized; the library copy stays as it is.
+   */
+  async promote(libraryId: string, newId?: string): Promise<string> {
+    const assetFile = await findNodeFile(this.files, this.paths, 'asset', libraryId);
+    const file = assetFile ?? await findNodeFile(this.files, this.paths, 'definition', libraryId);
+    if (!file || locateNodeFile(file, this.paths)?.origin !== 'library') throw new Error(`No library result named ${libraryId}.`);
+    const kind: ResultKind = assetFile ? 'asset' : 'definition';
+    const id = newId ?? libraryId.slice(LIBRARY_PREFIX.length);
+    if (!/^[a-z][a-z0-9_]*$/.test(id) || isLibraryId(id)) throw new Error(`Invalid project ID ${id}: use lowercase letters, digits, and underscores, without the ${LIBRARY_PREFIX} prefix.`);
+    if (await findNodeFile(this.files, this.paths, 'asset', id) || await findNodeFile(this.files, this.paths, 'definition', id)) throw new Error(`Node ID already exists: ${id}`);
+    const target = `${kind === 'asset' ? this.paths.assets : this.paths.definitions}/${id}.md`;
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    parsed.data.status = 'draft';
+    parsed.data.derived_from = libraryId;
+    // Relative links in the body were written for the library folder; re-point them from the new one.
+    const body = parsed.content.replace(/\]\((?!https?:|#|\/)([^)\s]+\.md)\)/g, (_match, link: string) => {
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(file), link));
+      const relative = path.posix.relative(path.posix.dirname(target), resolved);
+      return `](${relative.startsWith('.') ? relative : `./${relative}`})`;
+    });
+    await this.files.writeFile(target, stringifyMarkdown(body, parsed.data));
+    await this.event('library_promoted', { libraryId, id, kind });
+    return target;
+  }
+
   // ---------- ideas ----------
 
   async saveIdea(title: string, body: string, relatedAssets: string[], origin: 'researcher' | 'agent' = 'researcher', tags: string[] = [], ideaKind: IdeaKind = 'approach', extra: Record<string, string> = {}): Promise<string> {
@@ -766,9 +806,23 @@ export class ResearchLoopCore {
     const nodes = new Map<string, AssetInfo>();
     for (const file of await this.files.listFiles(folder)) {
       const raw = await this.files.readFile(file);
-      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), file, raw, data: parsed.data, body: parsed.content }); } catch { /* skip unparsable */ }
+      const location = locateNodeFile(file, this.paths);
+      const library = location?.origin === 'library' ? { origin: 'library' as const, collection: location.collection } : {};
+      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), file, raw, data: parsed.data, body: parsed.content, ...library }); } catch { /* skip unparsable */ }
     }
     return nodes;
+  }
+
+  /** Project and library nodes of one kind, keyed by ID; a project node wins over a library node with the same ID. */
+  private async collectKind(kind: ResultKind): Promise<Map<string, AssetInfo>> {
+    const nodes = new Map<string, AssetInfo>();
+    for (const folder of await nodeFolders(this.files, this.paths, kind)) for (const [id, node] of await this.collect(folder)) if (!nodes.has(id)) nodes.set(id, node);
+    return nodes;
+  }
+
+  /** The file of an asset or definition, in the project or the library; the project path when it does not exist yet. */
+  private async nodeFile(kind: ResultKind, id: string): Promise<string> {
+    return (await findNodeFile(this.files, this.paths, kind, id)) ?? `${kind === 'asset' ? this.paths.assets : this.paths.definitions}/${id}.md`;
   }
 
   private async plans(): Promise<AssetInfo[]> { return [...(await this.collect(this.paths.plans)).values()]; }
@@ -799,8 +853,8 @@ export class ResearchLoopCore {
       }
       return state.researcherInput ? { stage: 'draft_project' } : { stage: 'discuss_goals' };
     }
-    const assets = await this.collect(this.paths.assets);
-    const definitions = await this.collect(this.paths.definitions);
+    const assets = await this.collectKind('asset');
+    const definitions = await this.collectKind('definition');
     const inactive = required.filter((id) => ['deprecated', 'archived'].includes(assets.get(id)?.data.status));
     if (inactive.length) {
       state.researcherInput = { kind: 'project', text: `Required result(s) ${inactive.join(', ')} were deprecated or archived. Revise the goals and required results; give a revised statement a new asset ID.`, at: this.now() };
@@ -809,7 +863,7 @@ export class ResearchLoopCore {
     const { order, missing, cycle } = assetClosure(required, assets);
     if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.` };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
-    const incomplete = order.filter((id) => assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
+    const incomplete = order.filter((id) => !assets.get(id)!.origin && assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
     if (incomplete.length) return { stage: 'scaffold', missing: [], incomplete };
     const examples = [...assets.values()].filter((asset) => asset.data.type === 'example' && typeof asset.data.refutes === 'string');
     const checks = await this.checks();
@@ -822,9 +876,15 @@ export class ResearchLoopCore {
       if (asset.data.status === 'approved') {
         // Approved without a matching record: the researcher must re-approve.
         const parsed = parseMarkdown(asset.raw); parsed.data.status = 'draft';
-        await this.files.writeFile(`${this.paths.assets}/${id}.md`, stringifyMarkdown(parsed.content, parsed.data));
+        await this.files.writeFile(asset.file, stringifyMarkdown(parsed.content, parsed.data));
         await this.event('approval_invalidated', { id, reason: 'no_record' });
         asset.data.status = 'draft';
+      }
+      if (asset.origin === 'library') {
+        // A known result: approved once by the researcher, never falsified or proved by the loop.
+        const cited = isCited(asset.data.source);
+        await this.enqueueApproval(cited ? 'citation' : 'asset', id, `Library result${asset.collection ? ` (${asset.collection})` : ''}${cited ? ` citing ${asset.data.source.kind} ${asset.data.source.paper_id} (${asset.data.source.location ?? 'location missing'})` : ''}: approve once to use it as known.`);
+        settled.add(id); continue;
       }
       if (isCited(asset.data.source)) {
         await this.enqueueApproval('citation', id, `Check the cited ${asset.data.source.kind} ${asset.data.source.paper_id} (${asset.data.source.location ?? 'location missing'}) against the statement.`);
@@ -928,7 +988,7 @@ export class ResearchLoopCore {
     return {
       project: await this.files.readFile(this.paths.projectMd).catch(() => ''), projectFile: this.paths.projectMd,
       paperIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''), paperIndexFile: this.paths.paperIndex,
-      assets: await this.collect(this.paths.assets), definitions: await this.collect(this.paths.definitions),
+      assets: await this.collectKind('asset'), definitions: await this.collectKind('definition'),
       plans: await this.collect(this.paths.plans), ideas: await this.collect(this.paths.ideas), checks: await this.collect(this.shared.checks),
       reports: events.filter((event) => event.type === 'report').map((event) => event as ContextSources['reports'][number]),
     };
@@ -961,9 +1021,12 @@ export class ResearchLoopCore {
       await this.event('context_request', { id, sections, stage: this.state?.stage });
       return sections.length ? sections.map((heading) => `## ${heading}\n\n${projectPart(project, heading)}`).join('\n\n') : project;
     }
-    const folders: Array<[string, string]> = [['asset', this.paths.assets], ['definition', this.paths.definitions], ['plan', this.paths.plans], ['idea', this.paths.ideas], ['check', this.shared.checks]];
-    for (const [kind, folder] of folders) {
-      const file = `${folder}/${id}.md`;
+    const files: Array<[string, string | undefined]> = [
+      ['asset', await findNodeFile(this.files, this.paths, 'asset', id)], ['definition', await findNodeFile(this.files, this.paths, 'definition', id)],
+      ['plan', `${this.paths.plans}/${id}.md`], ['idea', `${this.paths.ideas}/${id}.md`], ['check', `${this.shared.checks}/${id}.md`],
+    ];
+    for (const [kind, file] of files) {
+      if (!file) continue;
       const raw = await this.files.readFile(file).catch(() => undefined);
       if (raw === undefined) continue;
       const parsed = parseMarkdown(raw);
@@ -1035,7 +1098,7 @@ export class ResearchLoopCore {
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
         const brief = state.scaffoldBrief;
-        return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
+        return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Before creating a dependency or definition, search the library of known results (${LOOP_COMMAND} library search <words>) and reference a matching lib_ ID in depends_on/uses_definitions instead of re-creating it. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
       }
       case 'sources':
         return `Stage sources. Find results from indexed papers (or a verifiable new paper) that the required results can use; import-math-paper and extract-research-nodes cover transcription and extraction. For a new paper append a ## slug section with a stable DOI/arXiv/publisher URL to ${this.paths.paperIndex} and a matching BibTeX entry to ${this.paths.bibliography}; never change existing entries. Create only draft, paper-sourced assets (paper_id and exact location) and draft definitions. If a source cannot be verified, do not cite it: ask the researcher or record an idea. Return none when nothing verifiable exists.${report('complete|none|question')}`;
@@ -1080,7 +1143,7 @@ export class ResearchLoopCore {
     const map: Record<string, string> = {};
     const add = async (file: string) => { const raw = await this.files.readFile(file).catch(() => undefined); if (raw !== undefined) map[file] = crypto.createHash('sha256').update(raw).digest('hex'); };
     const shared = this.shared;
-    for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, shared.checks, shared.decisions, shared.handoffs]) for (const file of await this.files.listFiles(folder)) await add(file);
+    for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, shared.checks, shared.decisions, shared.handoffs, ...await libraryFolders(this.files, this.paths)]) for (const file of await this.files.listFiles(folder)) await add(file);
     for (const file of [this.paths.projectMd, this.paths.paperIndex, this.paths.bibliography, ...await approvalFiles(this.files, this.paths.researchRoot)]) await add(file);
     return map;
   }
@@ -1094,7 +1157,7 @@ export class ResearchLoopCore {
     return { added, modified, before };
   }
 
-  private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, checks: this.shared.checks, decisions: this.shared.decisions, handoffs: this.shared.handoffs }; }
+  private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, library: this.paths.library, checks: this.shared.checks, decisions: this.shared.decisions, handoffs: this.shared.handoffs }; }
 
   private async paperIds(): Promise<Set<string>> {
     const index = await this.files.readFile(this.paths.paperIndex).catch(() => '');
@@ -1119,11 +1182,15 @@ export class ResearchLoopCore {
     if (stage === 'draft_project') allowedFiles.add(this.paths.projectMd);
     if (stage === 'sources') { allowedFiles.add(this.paths.paperIndex); allowedFiles.add(this.paths.bibliography); }
     const paperIds = await this.paperIds();
+    const knownAssets = new Set((await listNodeFiles(this.files, this.paths, 'asset')).map((file) => path.posix.basename(file, '.md')));
+    const knownDefinitions = new Set((await listNodeFiles(this.files, this.paths, 'definition')).map((file) => path.posix.basename(file, '.md')));
     for (const file of [...added, ...modified]) {
       if (isApprovalPath(this.paths.researchRoot, file)) { problems.push(`${file}: approval records were modified; only the researcher may approve. Restore it with git.`); continue; }
       const folder = path.posix.dirname(file);
       if (folder === folders.decisions || folder === folders.handoffs) { problems.push(`${file}: decisions and handoffs are written only by the loop. Restore it with git.`); continue; }
-      if (!allowedFiles.has(file) && !allowedFolders.has(folder)) { problems.push(`${file}: not writable during stage ${stage}.`); continue; }
+      // The library is curated alongside the research at any stage; git keeps its history, and an edit to an approved result reverts it to draft.
+      const inLibrary = isLibraryPath(file, this.paths);
+      if (!inLibrary && !allowedFiles.has(file) && !allowedFolders.has(folder)) { problems.push(`${file}: not writable during stage ${stage}.`); continue; }
       if (file === this.paths.paperIndex || file === this.paths.bibliography) continue; // append-only check below
       if (file === this.paths.projectMd) {
         if (!requiredAssetIds(await this.files.readFile(file)).length) problems.push('project.md needs required_results with asset IDs.');
@@ -1132,7 +1199,7 @@ export class ResearchLoopCore {
       const raw = await this.files.readFile(file);
       try { validateResearchFile(file, raw, folders, paperIds); } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); continue; }
       const data = parseMarkdown(raw).data;
-      if (modified.includes(file) && ['scaffold', 'sources', 'falsify', 'plan'].includes(stage) && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
+      if (modified.includes(file) && ['scaffold', 'sources', 'falsify', 'plan'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
       if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.counterexampleId}.md`) problems.push(`${file}: verification may change only the candidate example.`);
       if (stage === 'execute' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md`) problems.push(`${file}: execution may change only its target asset.`);
       if (stage === 'execute' && isIn(file, folders.plans) && file !== `${folders.plans}/${state.current.planId}.md`) problems.push(`${file}: execution may change only its active plan.`);
@@ -1147,11 +1214,11 @@ export class ResearchLoopCore {
           if (missing.length) problems.push(`${file}: ## Difference from failed plans must mention ${missing.join(', ')}.`);
         }
       }
+      const isDefinition = locateNodeFile(file, this.paths)?.kind === 'definition';
       for (const dep of Array.isArray(data.depends_on) ? data.depends_on : []) {
-        const known = isIn(file, folders.definitions) ? `${folders.definitions}/${dep}.md` : `${folders.assets}/${dep}.md`;
-        if (typeof dep !== 'string' || !(await this.files.exists(known))) problems.push(`${file}: unknown dependency ${String(dep)}.`);
+        if (typeof dep !== 'string' || !(isDefinition ? knownDefinitions : knownAssets).has(dep)) problems.push(`${file}: unknown dependency ${String(dep)}.`);
       }
-      for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (typeof definition !== 'string' || !(await this.files.exists(`${folders.definitions}/${definition}.md`))) problems.push(`${file}: unknown definition ${String(definition)}.`);
+      for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (typeof definition !== 'string' || !knownDefinitions.has(definition)) problems.push(`${file}: unknown definition ${String(definition)}.`);
       if (data.type === 'example' && typeof data.refutes === 'string' && !(await this.files.exists(`${folders.assets}/${data.refutes}.md`))) problems.push(`${file}: refutes unknown asset ${data.refutes}.`);
     }
     if (stage === 'sources') {
@@ -1355,8 +1422,8 @@ export class ResearchLoopCore {
     const problems: string[] = [];
     const fixed: string[] = [];
     const approvals = await this.approvals();
-    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
-      for (const file of await this.files.listFiles(folder)) {
+    for (const kind of ['asset', 'definition'] as const) {
+      for (const file of await listNodeFiles(this.files, this.paths, kind)) {
         const raw = await this.files.readFile(file);
         let parsed: matter.GrayMatterFile<string>;
         try { parsed = parseMarkdown(raw); } catch { problems.push(`${file}: invalid YAML`); continue; }
@@ -1387,8 +1454,8 @@ export class ResearchLoopCore {
   async restoreApprovals(): Promise<string[]> {
     const records = (await this.approvals()).records;
     const restored: string[] = [];
-    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
-      for (const file of await this.files.listFiles(folder)) {
+    for (const kind of ['asset', 'definition'] as const) {
+      for (const file of await listNodeFiles(this.files, this.paths, kind)) {
         const raw = await this.files.readFile(file);
         let parsed: matter.GrayMatterFile<string>;
         try { parsed = parseMarkdown(raw); } catch { continue; }
@@ -1416,21 +1483,23 @@ export class ResearchLoopCore {
     const problems: string[] = [];
     const folders = this.folders();
     const paperIds = await this.paperIds();
-    const assets = await this.collect(this.paths.assets);
-    const definitions = await this.collect(this.paths.definitions);
+    const assets = await this.collectKind('asset');
+    const definitions = await this.collectKind('definition');
+    const library = await libraryFolders(this.files, this.paths);
     const nodeFiles: string[] = [];
-    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans]) nodeFiles.push(...await this.files.listFiles(folder));
+    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, ...library]) nodeFiles.push(...await this.files.listFiles(folder));
     problems.push(...duplicateIds(nodeFiles));
+    problems.push(...libraryProblems([...assets.values(), ...definitions.values()], this.paths));
     const nodeInputs = async (folder: string) => Promise.all((await this.files.listFiles(folder)).map(async (file) => ({ filePath: file, raw: await this.files.readFile(file) })));
     problems.push(...ideaPlanProblems(await nodeInputs(folders.assets), [...await nodeInputs(folders.ideas), ...await nodeInputs(folders.plans)]));
-    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, folders.checks, folders.decisions, folders.handoffs]) {
+    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, folders.checks, folders.decisions, folders.handoffs, ...library]) {
       for (const file of await this.files.listFiles(folder)) {
         const raw = await this.files.readFile(file);
         if (/^<{7} |^>{7} |^={7}$/m.test(raw)) { problems.push(`${file}: unresolved merge conflict markers.`); continue; }
         try { validateResearchFile(file, raw, folders, paperIds, { committed: true }); } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); continue; }
         const data = parseMarkdown(raw).data;
         for (const dep of Array.isArray(data.depends_on) ? data.depends_on : []) {
-          const known = folder === folders.definitions ? definitions.has(String(dep)) : assets.has(String(dep));
+          const known = locateNodeFile(file, this.paths)?.kind === 'definition' ? definitions.has(String(dep)) : assets.has(String(dep));
           if (!known) problems.push(`${file}: unknown dependency ${String(dep)}.`);
         }
         for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (!definitions.has(String(definition))) problems.push(`${file}: unknown definition ${String(definition)}.`);
@@ -1453,8 +1522,8 @@ export class ResearchLoopCore {
   async approvalProblems(): Promise<string[]> {
     const problems: string[] = [];
     const records = (await this.approvals()).records;
-    for (const [kind, folder] of [['asset', this.paths.assets], ['definition', this.paths.definitions]] as const) {
-      for (const file of await this.files.listFiles(folder)) {
+    for (const kind of ['asset', 'definition'] as const) {
+      for (const file of await listNodeFiles(this.files, this.paths, kind)) {
         const raw = await this.files.readFile(file);
         let data: Record<string, any>;
         try { data = parseMarkdown(raw).data; } catch { continue; }
@@ -1515,7 +1584,7 @@ export class ResearchLoopCore {
     const records = (await this.approvals()).records;
     const keep: ApprovalRequest[] = [];
     for (const item of this.state.approvalQueue) {
-      const file = item.kind === 'project' ? this.paths.projectMd : `${item.kind === 'definition' ? this.paths.definitions : this.paths.assets}/${item.target}.md`;
+      const file = item.kind === 'project' ? this.paths.projectMd : await this.nodeFile(item.kind === 'definition' ? 'definition' : 'asset', item.target);
       const raw = await this.files.readFile(file).catch(() => '');
       if (!raw) continue;
       const kind = item.kind === 'project' ? 'project' : item.kind === 'definition' ? 'definition' : 'asset';

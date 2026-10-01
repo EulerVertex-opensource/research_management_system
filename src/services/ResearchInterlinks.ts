@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import { parseMarkdown } from './Frontmatter';
 import { stripOrdinal } from './AssetOrder';
+import { locateNodeFile } from '../domain/registry';
 
 export interface InterlinkInput { filePath: string; raw: string }
 export interface InterlinkChange { filePath: string; raw: string; links: number }
@@ -25,6 +26,7 @@ interface IndexedNode extends InterlinkInput {
   bodyOffset: number;
   dependencies: string[];
   definitions: string[];
+  library: boolean;
 }
 
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkMath);
@@ -35,8 +37,9 @@ function contains(folder: string, filePath: string): boolean {
   return path.posix.dirname(filePath) === folder.replace(/\/$/, '');
 }
 
-function indexNode(input: InterlinkInput, assetFolder: string, definitionFolder: string): IndexedNode | null {
-  const kind = contains(assetFolder, input.filePath) ? 'asset' : contains(definitionFolder, input.filePath) ? 'definition' : null;
+function indexNode(input: InterlinkInput, assetFolder: string, definitionFolder: string, libraryFolder?: string): IndexedNode | null {
+  const location = libraryFolder ? locateNodeFile(input.filePath, { assets: assetFolder, definitions: definitionFolder, library: libraryFolder }) : undefined;
+  const kind = location?.kind ?? (contains(assetFolder, input.filePath) ? 'asset' : contains(definitionFolder, input.filePath) ? 'definition' : null);
   if (!kind || !input.filePath.endsWith('.md')) return null;
   const prefix = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(input.raw);
   if (!prefix) throw new Error(`${input.filePath} needs YAML frontmatter`);
@@ -51,6 +54,7 @@ function indexNode(input: InterlinkInput, assetFolder: string, definitionFolder:
     body: input.raw.slice(prefix[0].length), bodyOffset: prefix[0].length,
     dependencies: Array.isArray(data.depends_on) ? data.depends_on.filter((value: unknown): value is string => typeof value === 'string') : [],
     definitions: Array.isArray(data.uses_definitions) ? data.uses_definitions.filter((value: unknown): value is string => typeof value === 'string') : [],
+    library: location?.origin === 'library',
   };
 }
 
@@ -59,16 +63,22 @@ function boundary(text: string, start: number, length: number): boolean {
     (start + length === text.length || !WORD.test(text[start + length]));
 }
 
-/** Plans raw offset edits, leaving frontmatter and all Markdown syntax intact. */
-export function planResearchInterlinks(inputs: InterlinkInput[], assetFolder: string, definitionFolder: string): InterlinkPlan {
-  const indexed = inputs.map((item) => indexNode(item, assetFolder, definitionFolder)).filter((item): item is IndexedNode => item !== null);
+/**
+ * Plans raw offset edits, leaving frontmatter and all Markdown syntax intact.
+ * A project node matches library terms only for library nodes it already
+ * references, so a large library does not flood the review list.
+ */
+export function planResearchInterlinks(inputs: InterlinkInput[], assetFolder: string, definitionFolder: string, libraryFolder?: string): InterlinkPlan {
+  const indexed = inputs.map((item) => indexNode(item, assetFolder, definitionFolder, libraryFolder)).filter((item): item is IndexedNode => item !== null);
   const assets = new Map(indexed.filter((item) => item.kind === 'asset').map((item) => [item.id, item]));
   const definitions = new Map(indexed.filter((item) => item.kind === 'definition').map((item) => [item.id, item]));
   const changes: InterlinkChange[] = [];
   const issues: InterlinkIssue[] = [];
 
   for (const source of indexed) {
-    const targets = source.kind === 'definition' ? [...definitions.values()] : [...assets.values(), ...definitions.values()];
+    const referenced = new Set([...source.dependencies, ...source.definitions]);
+    const targets = (source.kind === 'definition' ? [...definitions.values()] : [...assets.values(), ...definitions.values()])
+      .filter((target) => source.library || !target.library || referenced.has(target.id));
     const linked = new Set(source.dependencies.map((id) => `${source.kind}:${id}`));
     if (source.kind === 'asset') for (const id of source.definitions) linked.add(`definition:${id}`);
     for (const id of source.dependencies) {

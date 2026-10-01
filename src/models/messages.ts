@@ -19,6 +19,8 @@ export type WebviewMessage =
   | { type: 'saveNode'; id: string; frontmatter: NodeFrontmatter; body: string }
   | { type: 'createNode'; nodeType: NodeType; title: string; targetAsset?: string }
   | { type: 'updateStatus'; id: string; status: ResearchStatus }
+  /** Approve several library results at once (the extension asks the researcher to confirm). */
+  | { type: 'approveNodes'; ids: string[]; label: string }
   | { type: 'getProjectMd' }
   | { type: 'saveProjectMd'; content: string }
   | { type: 'getPapers' }

@@ -10,6 +10,7 @@ import { ResearchLoopCore } from './ResearchLoopCore';
 import { parseHandoff } from './ResearchRecords';
 import { summarizeResearchChanges } from './SyncSummary';
 import { isCited } from '../domain/schema';
+import { listNodeFiles } from '../domain/registry';
 
 /**
  * Git-aware sync for the research loop: pull with re-validation and state
@@ -36,6 +37,25 @@ export interface PrepareResult { ok: boolean; checks: CheckResult[]; summary: st
 export interface PublishPreview { files: Array<{ code: string; path: string }>; ahead: number; message: string; targets: string[] }
 export interface PublishResult { status: 'nothing' | 'published' | 'conflict' | 'blocked'; commit?: string; pushed: string[]; warnings: string[]; summary: string[] }
 export type CommandRunner = (command: string) => Promise<{ code: number; output: string }>;
+
+export type AutoPullMode = 'pull' | 'notify' | 'off';
+export type AutoPullDecision = { action: 'none' } | { action: 'pull' } | { action: 'notify'; reason: string };
+
+/**
+ * What the extension does with a `status()` result when it checks the remote on
+ * its own: pull only when nothing local could be mixed in and no agent is
+ * mid-stage; otherwise just tell the researcher how far behind they are.
+ */
+export function autoPullDecision(status: Record<string, unknown>, mode: AutoPullMode): AutoPullDecision {
+  if (mode === 'off' || status.fetchError || status.phase === 'conflict') return { action: 'none' };
+  if (typeof status.behind !== 'number' || status.behind <= 0) return { action: 'none' };
+  if (mode === 'notify') return { action: 'notify', reason: 'auto-pull is set to notify' };
+  const length = (value: unknown) => Array.isArray(value) ? value.length : 0;
+  if (length(status.uncommitted)) return { action: 'notify', reason: 'you have uncommitted changes' };
+  if (length(status.unreportedStageEdits)) return { action: 'notify', reason: 'the current loop stage has unreported edits' };
+  if ((status.loop as { status?: string } | undefined)?.status === 'running') return { action: 'notify', reason: 'the research loop is running' };
+  return { action: 'pull' };
+}
 
 const WORKING_STAGES = new Set(['draft_project', 'scaffold', 'sources', 'falsify', 'verify_counterexample', 'plan', 'execute']);
 
@@ -64,7 +84,7 @@ export class ResearchSync {
     const paths = this.core.projectPaths;
     const shared = this.core.shared;
     const research = paths.researchRoot !== '.' ? [paths.researchRoot] : [
-      paths.projectMd, paths.paperIndex, paths.assets, paths.definitions, paths.ideas, paths.plans, paths.papers, paths.writingRoot,
+      paths.projectMd, paths.paperIndex, paths.assets, paths.definitions, paths.ideas, paths.plans, paths.library, paths.papers, paths.writingRoot,
       shared.checks, shared.decisions, shared.handoffs, shared.approvals, legacyApprovalsPath(paths.researchRoot),
     ];
     const manuscript = [paths.mainTex, paths.bibliography, ...paths.macroFiles, ...(paths.notations ? [paths.notations] : []), paths.sections];
@@ -250,10 +270,10 @@ export class ResearchSync {
     const bib = await this.bibWarnings();
     add('BibTeX entries unique', bib);
     if (options.latex) {
-      if (!this.config.latexCommand || !this.runCommand) add('LaTeX compiles', ['Set sync.latexCommand in .research-assistant.json (e.g. "latexmk -pdf -interaction=nonstopmode main.tex").']);
+      if (!this.config.latexCommand || !this.runCommand) add('LaTeX compiles', ['No LaTeX command to run; set sync.latexCommand in .research-assistant.json.']);
       else {
         const result = await this.runCommand(this.config.latexCommand);
-        add('LaTeX compiles', result.code === 0 ? [] : [`${this.config.latexCommand} exited ${result.code}:\n${result.output.split('\n').filter((line) => /^!|Error|error:/.test(line)).slice(0, 10).join('\n') || result.output.slice(-800)}`]);
+        add('LaTeX compiles', result.code === 0 ? [] : [`${this.config.latexCommand} exited ${result.code}${result.code === 127 ? ' (latexmk not found: install TeX Live/MacTeX, or set sync.latexCommand)' : ''}:\n${result.output.split('\n').filter((line) => /^!|Error|error:/.test(line)).slice(0, 10).join('\n') || result.output.slice(-800)}`]);
       }
     }
     const { remote, ref } = await this.target();
@@ -302,7 +322,7 @@ export class ResearchSync {
     const bibKeys = new Set([...bib.matchAll(/^@\w+\s*\{\s*([^,\s]+)\s*,/gm)].map((match) => match[1]));
     const problems: string[] = [];
     const cited = new Set<string>();
-    for (const file of await this.files.listFiles(paths.assets)) {
+    for (const file of await listNodeFiles(this.files, paths, 'asset')) {
       let data: Record<string, any>;
       try { data = parseMarkdown(await this.files.readFile(file)).data; } catch { continue; }
       if (!isCited(data.source)) continue;

@@ -102,11 +102,11 @@ export function GraphCanvas({ nodes, edges, required, selectedId, highlight, sho
             return (
               <g key={node.id} data-node={node.id} transform={`translate(${at.x},${at.y})`} opacity={dim ? 0.25 : 1} style={{ cursor: 'pointer' }}
                 onClick={() => onSelect(node.id)} onDoubleClick={() => onOpen?.(node.id)}>
-                <title>{`${node.id} — ${node.title}\n${node.type}, ${node.status}${node.flags.length ? `\n${node.flags.map((flag) => FLAG_META[flag].label).join('\n')}` : ''}${node.sections.length ? `\nIn sections: ${node.sections.join(', ')}` : ''}`}</title>
+                <title>{`${node.id} — ${node.title}\n${node.type}, ${node.status}${node.origin === 'library' ? `, library result (${node.collection ?? ''}): known, not proved here` : ''}${node.flags.length ? `\n${node.flags.map((flag) => FLAG_META[flag].label).join('\n')}` : ''}${node.sections.length ? `\nIn sections: ${node.sections.join(', ')}` : ''}`}</title>
                 <rect width={NODE_W} height={NODE_H} rx={6} fill={COLOR.card} stroke={selected ? COLOR.active : color} strokeWidth={selected ? 2.5 : node.required ? 2 : 1.2}
-                  strokeDasharray={node.kind === 'definition' ? '4 2' : undefined} />
+                  strokeDasharray={node.origin === 'library' ? '1 3' : node.kind === 'definition' ? '4 2' : undefined} />
                 <rect width={5} height={NODE_H} rx={2} fill={statusColor(node.status)} />
-                <text x={12} y={17} fontSize={12} fontWeight={700} fill="var(--vscode-foreground)">{clip(node.id, 22)}{node.required ? ' ★' : ''}</text>
+                <text x={12} y={17} fontSize={12} fontWeight={700} fill="var(--vscode-foreground)">{clip(node.id, 22)}{node.required ? ' ★' : ''}{node.origin === 'library' ? <tspan fontWeight={400} fill={COLOR.muted}> · library</tspan> : null}</text>
                 <text x={NODE_W - 8} y={17} fontSize={12} textAnchor="end">
                   {node.flags.map((flag) => <tspan key={flag} fill={FLAG_META[flag].color}>{FLAG_META[flag].symbol}</tspan>)}
                 </text>

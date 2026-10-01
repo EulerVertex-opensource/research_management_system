@@ -4,6 +4,7 @@ import { researchDigest } from '../domain/digests';
 import { ImpactNode, ImpactSectionInput, ManuscriptImpact, SectionBinding, manuscriptImpact } from '../domain/manuscriptImpact';
 import { parseMarkdown } from './Frontmatter';
 import { LoopFiles } from './ResearchLoopModel';
+import { listNodeFiles } from '../domain/registry';
 import { currentProjectRevision, projectRevisionHistory, readApprovals } from './ApprovalStore';
 import { SectionBrief, WritingSection, parseSectionBrief, parseWritingOutline } from './ManuscriptWriting';
 
@@ -12,7 +13,7 @@ import { SectionBrief, WritingSection, parseSectionBrief, parseWritingOutline } 
  * manuscript CLI and the research loop (extension, CLI, hooks) share one reader.
  */
 
-export type ManuscriptPaths = Pick<ProjectPaths, 'researchRoot' | 'projectMd' | 'assets' | 'definitions' | 'sections' | 'writingRoot' | 'writingOutline' | 'writingSections'>;
+export type ManuscriptPaths = Pick<ProjectPaths, 'researchRoot' | 'projectMd' | 'assets' | 'definitions' | 'library' | 'sections' | 'writingRoot' | 'writingOutline' | 'writingSections'>;
 
 export const bindingsFolder = (paths: ManuscriptPaths) => path.posix.join(paths.writingRoot, 'bindings');
 export const bindingPath = (paths: ManuscriptPaths, id: string) => `${bindingsFolder(paths)}/${id}.json`;
@@ -22,8 +23,8 @@ export const sectionTexPath = (paths: ManuscriptPaths, id: string) => `${paths.s
 export async function loadImpactNodes(files: LoopFiles, paths: ManuscriptPaths): Promise<Map<string, ImpactNode>> {
   const approvals = (await readApprovals(files, paths.researchRoot)).records;
   const nodes = new Map<string, ImpactNode>();
-  for (const [kind, folder] of [['asset', paths.assets], ['definition', paths.definitions]] as const) {
-    for (const file of await files.listFiles(folder)) {
+  for (const kind of ['asset', 'definition'] as const) {
+    for (const file of await listNodeFiles(files, paths, kind)) {
       const raw = await files.readFile(file);
       let data: Record<string, any>;
       try { data = parseMarkdown(raw).data; } catch { continue; }

@@ -20,7 +20,10 @@ node .agents/skills/research-maintenance/scripts/research-maintenance.cjs <comma
 Relationship fields hold exact filename IDs without `.md`, and only forward relations are stored:
 
 - asset `depends_on` → assets; asset `uses_definitions` → definitions; definition `depends_on` → definitions;
-- example `refutes` → the asset it contradicts; idea `related_assets` → assets; plan `target_asset` and `inspired_by` → one asset and idea IDs.
+- example `refutes` → the asset it contradicts; idea `related_assets` → assets; plan `target_asset` and `inspired_by` → one asset and idea IDs;
+- a promoted asset or definition's `derived_from` → the library result it was copied from.
+
+Library nodes (`library/<collection>/assets|definitions/`, IDs starting `lib_`) are validated and ordered together with project nodes, so a project result may depend on a library one. A library node may depend only on library nodes; `validate` reports a library ID without the prefix, a project ID with it, and a library node that depends on a project node.
 
 "Used in", an asset's plans and ideas, and its refutations are computed from these by the dashboard and `research-loop show`; never store them in a node, and never add link lists to node bodies.
 
