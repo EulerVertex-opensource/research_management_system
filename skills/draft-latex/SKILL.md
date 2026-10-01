@@ -18,9 +18,9 @@ node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --preview
 
 1. Read `.research-assistant.json`, `writing/outline.md`, and the section brief (see `plan-manuscript` for their format).
 2. Run `prepare <id> --preview`. It lists the exact context: the brief, its approved assets with their transitive asset and definition dependencies, preamble and macro files, and verified BibTeX keys. Stop if it reports an unknown or unapproved node or a paper source without a BibTeX entry. For a locked section it lists only what changed since the lock (`Changed:`, `Added to brief:`) and names the unchanged nodes, which are already in the TeX: do not reread them (`--full` lists everything).
-3. Read only those files, the main TeX file, the notation file when present, and the current section TeX. Follow existing theorem and proof environments, macros, labels, citation style, and notation.
+3. Read only those files, [references/style.md](references/style.md), the main TeX file, the notation file when present, and the current section TeX. Follow existing theorem and proof environments, macros, labels, citation style, and notation.
 4. If the section TeX is missing, run `prepare <id> --apply` to create its skeleton, then replace the skeleton with a complete first draft. For an existing section with researcher prose, revise only the requested passage or give a patch; never regenerate the file.
-5. Translate Markdown prose and math into idiomatic LaTeX, checking every statement and proof step against its node. Wrap each passage that presents a node in a block (the skeleton starts one per brief source):
+5. Translate Markdown prose and math into idiomatic LaTeX for an expert reader (see Writing for the paper), checking every statement and proof step against its node. Do not present a node the brief lists under `## Excluded`. Wrap each passage that presents a node in a block (the skeleton starts one per brief source):
 
    ```tex
    % research-assistant:block id=main-theorem-proof sources=main_theorem@proof,compactness_lemma@statement policy=assisted
@@ -30,7 +30,16 @@ node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --preview
 
    `sources` names each node and the components the passage presents (`statement`, `proof`, `source`; a bare ID means all), so a later change points at this block alone. Block IDs are stable lowercase words with hyphens; never rename a locked block. Keep motivation and transitions outside blocks. Only the block's own lines count; blocks do not nest. The older one-line `% [node_id]` tag is still read, as a section-level use. Cite a paper-sourced result with its `source.paper_id` as the `\cite{...}` key; reference internal results with LaTeX labels. Do not print node IDs in the PDF.
 6. Mark unresolved steps with `% TODO` and describe the gap. Do not silently supply a proof, invent a citation, or change notation.
-7. Run `check-notation`, review the Git diff, and compile when a local TeX build is available.
+7. Run `check-notation` and `revise-manuscript-prose`, review the Git diff, and compile when a local TeX build is available.
+
+## Writing for the paper
+
+The assets are working documents; the paper is not a concatenation of them. [references/style.md](references/style.md) has examples for each rule.
+
+- Audience: the reader is an expert in the field. Keep every statement exactly and every non-routine proof step. Compress routine verifications to a sentence ("a direct computation gives"), and drop exploratory remarks, restated context, and the asset's internal bookkeeping. Never weaken a statement or skip a non-routine step to save space.
+- Transitions: before each block after the first, write one or two sentences outside the blocks that say why the next result is needed or how it follows from the previous one. End the section with a sentence leading to the next section in the outline. Adjacent blocks with no prose between them read as stitched assets.
+- Labels: never print codes carried over from the assets, such as (M1), (S1), (F1), asset-local numbering, or node IDs. Name the object in words ("the monotonicity assumption", "the second step of the proof"). Labels the manuscript itself defines, such as hypotheses (H1)-(H3) in a displayed list referenced with `\ref`, are fine.
+- Wording: describe what the mathematics does directly ("the estimate requires $p > 2$") instead of figurative framing ("the decisive clause", "the argument hinges on"). Repeat the precise term rather than varying it. Keep mathematical statements and proof steps intact.
 
 ## Keep sections current
 

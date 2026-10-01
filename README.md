@@ -229,6 +229,10 @@ Explain what the reader should learn in this section.
 ## Gaps
 
 - Record any unproved step or draft result here.
+
+## Excluded
+
+- sanity_check_small_n: verified special case, not needed for the argument
 ```
 
 Use `plan-manuscript` with a researcher to decide the section order (scope `manuscript`) or to refine one brief (scope `section`). The agents begin with a compact node index and read full content only for selected results. To validate a brief and list the exact approved assets, dependency definitions, preamble files, and BibTeX keys needed for drafting, run:
@@ -239,6 +243,8 @@ node .agents/skills/draft-latex/scripts/manuscript-writing.cjs prepare main_resu
 ```
 
 `--apply` creates `sections/main_result.tex` only if it is missing. The `draft-latex` skill replaces that untouched skeleton with a first draft and thereafter edits only requested passages. It marks uses of research nodes with `% [node_id]` comments; printed references use normal LaTeX labels and verified bibliography keys. Unknown or unapproved dependencies stop preparation.
+
+Assets that were correct but only served completeness or an earlier experiment go under `## Excluded` in the brief, so drafts and updates leave them out. After drafting, `revise-manuscript-prose` reviews the section for an expert reader. It checks for transitions between blocks, compressed routine detail, no asset codes such as (M1), and direct wording, and it leaves the mathematics unchanged. The rules are in `draft-latex/references/style.md`.
 
 When every listed TeX section exists, preview and apply the main document's input order:
 
@@ -393,7 +399,7 @@ The local file line is shared as a convention, but the PDF itself is ignored by 
 
 ## AI setup
 
-The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The eleven bundled skills are: `research-loop` (the driver), `import-math-paper`, `extract-research-nodes`, `explore-research` (find and summarize nodes), `falsify-asset`, `plan-proof`, `execute-proof`, `check-notation`, `research-maintenance` (validate, links, backlinks, migrate), `plan-manuscript`, and `draft-latex`. Refresh removes installed copies of skills that earlier versions shipped and later merged. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
+The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The twelve bundled skills are: `research-loop` (the driver), `import-math-paper`, `extract-research-nodes`, `explore-research` (find and summarize nodes), `falsify-asset`, `plan-proof`, `execute-proof`, `check-notation`, `research-maintenance` (validate, links, backlinks, migrate), `plan-manuscript`, `draft-latex`, and `revise-manuscript-prose`. Refresh removes installed copies of skills that earlier versions shipped and later merged. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
 
 Generated instructions are deliberately compact and deterministic. They point agents to canonical node and paper files instead of duplicating every node body, reducing Git noise and merge conflicts.
 

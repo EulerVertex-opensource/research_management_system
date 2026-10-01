@@ -140,7 +140,7 @@ Overleaf-compatible LaTeX project plus a shared research knowledge base. Folder 
 - Never invent a node ID, paper, theorem location, citation, or proof step; verify IDs from the files.
 - IDs in \`depends_on\`, \`uses_definitions\`, \`related_assets\`, \`target_asset\` are exact filenames without \`.md\`, unique across research folders. Store forward relations only. Block \`$$\` go on their own lines.
 - After changing assets or definitions: \`research-maintenance\` (validate, links), then \`check-notation\`.
-- Only approved nodes support manuscript arguments; plan with \`plan-manuscript\` and write one section at a time with \`draft-latex\`.
+- Only approved nodes support manuscript arguments; plan with \`plan-manuscript\` and write one section at a time with \`draft-latex\`, then \`revise-manuscript-prose\`.
 - Share research through the research loop's \`sync\` commands, not raw git pull/push. Do not rename shared files; never commit source PDFs (\`${paths.localSourcePdfs}/\`) or LaTeX build output.
 
 ## Reading context
