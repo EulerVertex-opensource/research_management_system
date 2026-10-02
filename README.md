@@ -62,7 +62,7 @@ overleaf-project/
   .github/copilot-instructions.md  ← generated local Copilot guidance
   .agents/skills/                  ← bundled Codex skills local; project skills shared
   .claude/skills/                  ← bundled Claude skills local; project skills shared
-  AGENTS.md, CLAUDE.md             ← generated local agent guidance
+  AGENTS.md                        ← generated local agent guidance (Codex and Claude Code)
 ```
 
 Overleaf should compile the existing root document exactly as before. Research Assistant does not insert inputs into an adopted manuscript or replace its bibliography.
@@ -85,11 +85,11 @@ Do not normally commit:
 - LaTeX output such as `.aux`, `.log`, `.fls`, `.fdb_latexmk`, `.synctex.gz`, and `.toc` files.
 - A compiled copy of the manuscript PDF.
 - Everything under `.latex-out/`.
-- Extension-bundled skill folders under `.agents/skills/` and `.claude/skills/`, `.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`, and generated `.vscode` settings/recommendations.
+- Extension-bundled skill folders under `.agents/skills/` and `.claude/skills/`, `.github/copilot-instructions.md`, `AGENTS.md`, a local `CLAUDE.md` if you keep one, and generated `.vscode` settings/recommendations.
 
 The generated `.gitignore` names each extension-bundled skill folder separately. On refresh, it replaces the former broad `.agents/skills/` and `.claude/skills/` ignore rules, so other skill folders can be added to Git. Bundled skill names are reserved because refresh updates those folders. Ignore rules do not remove files Git already tracks. For an existing project, review tracked generated files and remove only those from the Git index with `git rm --cached` (or `git rm -r --cached` for generated directories), then commit that change. Their local copies remain. Keep `.research-assistant.json`, TeX/BibTeX, authored research context, and project skills tracked. Refresh no longer creates `research/workflows/` or ignores its files; existing workflow files remain in place and can be reviewed for removal or tracking.
 
-`AGENTS.md` and `CLAUDE.md` are ignored by default even though refresh preserves local text outside the generated markers. Put guidance that must reach every collaborator in tracked `research/project.md`, or explicitly force-track a custom instruction file after deciding that its generated section will change on refresh.
+`AGENTS.md` is the single agent guidance file: Codex reads it, and Claude Code reads it natively whenever no `CLAUDE.md` exists in the project folder or above it. Refresh therefore deletes a `CLAUDE.md` that only held the old generated copy; if you keep your own `CLAUDE.md`, refresh replaces the old copy with an `@AGENTS.md` import so Claude still loads the same guidance. This needs a Claude Code version that reads `AGENTS.md`. `AGENTS.md` and `CLAUDE.md` are ignored by default even though refresh preserves local text outside the generated markers. Put guidance that must reach every collaborator in tracked `research/project.md`, or explicitly force-track a custom instruction file after deciding that its generated section will change on refresh.
 
 For each paper, share a stable DOI, arXiv, or publisher URL and a checksum when available. This lets collaborators retrieve and verify the same authoritative PDF without storing large binaries in the Overleaf repository.
 
@@ -105,6 +105,8 @@ research-loop sync publish           # commit research + manuscript paths only, 
 ```
 
 (`research-loop` is `node .agents/skills/research-loop/scripts/research-loop.cjs`; the same actions are the **Research Assistant: … (Git)** commands.)
+
+The dashboard's **⇅ Sync** button (also **Research Assistant: Sync Research (Pull and Publish)**) does this in one click, for collaborators who do not use git. Under the button, a line shows how many changes are waiting to be shared or pulled. If there is local work, Sync runs prepare. When the checks pass, it publishes after you confirm; publish also brings in collaborators' commits first. If there is no local work, it pulls. When something needs a person (a failed check, a conflict, an unreachable remote, or an agent in the middle of a step), the dashboard shows what to fix. Nothing is force-pushed, and conflicts are never resolved automatically.
 
 - **Pull** refuses while a stage has unreported edits and while research files are uncommitted. On conflicts it stops, pauses the loop, and never picks a side. When two people changed the same statement, the researchers decide. Resolve, finish the rebase or merge, then `sync pull --continue`. If someone ran a raw `git pull` mid-stage, `report` refuses to count those files as the agent's; `sync pull --continue` re-baselines.
 - **Prepare** checks that:
@@ -281,15 +283,20 @@ Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everythin
 
 | Panel | Purpose |
 |---|---|
+| **Overview** | What needs a decision (Attention), the dependency graph (Progress), manuscript sections × results (Coverage), and what a change affects (Impact), with the research loop's status |
 | **Project** | Edit the project contract, with derived status (required results, open questions, manuscript sections) above it; initialize or refresh shared setup |
-| **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
-| **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and remark nodes |
 | **Definitions** | Browse and edit definitions and their notation, listed in dependency order |
-| **Ideas** | Browse and edit freeform research ideas |
+| **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and remark nodes |
+| **Library** | Browse known results from earlier work and papers (`lib_` IDs), and approve them in bulk |
 | **Plans** | Browse and edit proof plans, including failed and succeeded attempts |
+| **Ideas** | Browse and edit freeform research ideas |
+| **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
 | **Manuscript** | Compile the configured main TeX file and read the generated PDF inside Research Assistant |
+| **⟳ Refresh** | Re-read the configuration and every research file from disk and update all panels |
+| **⇅ Sync** | Pull collaborators' changes and share yours (see [Collaboration practice](#collaboration-practice)) |
+| **⚙ Settings** | Agent, research loop, sync, and context-budget settings |
 
-Node changes are reflected live. New or materially changed assets and definitions remain `draft`; only a researcher should promote them to `approved`. New directions start `draft`, and new proof plans start `pending`.
+Node changes are reflected live; **Refresh** catches anything the file watchers missed. New or materially changed assets and definitions remain `draft`; only a researcher should promote them to `approved`. New directions start `draft`, and new proof plans start `pending`.
 
 ## Project contract
 
@@ -405,7 +412,7 @@ The local file line is shared as a convention, but the PDF itself is ignored by 
 
 ## AI setup
 
-The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains protected generated sections in `AGENTS.md` and `CLAUDE.md`. The twelve bundled skills are: `research-loop` (the driver), `import-math-paper`, `extract-research-nodes`, `explore-research` (find and summarize nodes), `falsify-asset`, `plan-proof`, `execute-proof`, `check-notation`, `research-maintenance` (validate, links, backlinks, migrate), `plan-manuscript`, `draft-latex`, and `revise-manuscript-prose`. Refresh removes installed copies of skills that earlier versions shipped and later merged. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
+The extension installs its bundled skills to `.agents/skills/` and `.claude/skills/` and maintains a protected generated section in `AGENTS.md` (and only an `@AGENTS.md` import in a `CLAUDE.md` you keep). The twelve bundled skills are: `research-loop` (the driver), `import-math-paper`, `extract-research-nodes`, `explore-research` (find and summarize nodes), `falsify-asset`, `plan-proof`, `execute-proof`, `check-notation`, `research-maintenance` (validate, links, backlinks, migrate), `plan-manuscript`, `draft-latex`, and `revise-manuscript-prose`. Refresh removes installed copies of skills that earlier versions shipped and later merged. Only the bundled skill folders are ignored by the generated `.gitignore`; project skills with distinct names can be committed. Local LaTeX build instructions are in this README and the Manuscript panel. Generated guidance is ignored.
 
 Generated instructions are deliberately compact and deterministic. They point agents to canonical node and paper files instead of duplicating every node body, reducing Git noise and merge conflicts.
 

@@ -16,7 +16,7 @@ function load(file) {
 }
 
 const { researchDigest, statementDigest } = load('../src/services/ResearchLoopModel.ts');
-const { autoPullDecision } = load('../src/services/ResearchSync.ts');
+const { autoPullDecision, syncNowAction } = load('../src/services/ResearchSync.ts');
 const { defaultLatexCommand } = load('../src/services/ProjectPathsCore.ts');
 const cli = path.resolve(__dirname, '../out/research-loop.cjs');
 
@@ -298,6 +298,29 @@ test('auto-pull pulls only when the clone is clean and the loop is idle; otherwi
     assert.equal(bob.run(['sync', 'pull']).status, 0);
     assert.match(bob.read('main.tex'), /Edited on Overleaf/);
     assert.deepEqual(autoPullDecision(status(), 'pull'), { action: 'none' });
+  } finally { t.cleanup(); }
+});
+
+test('the dashboard Sync button shares local work, otherwise pulls, and stops where a person must act', () => {
+  const t = team();
+  try {
+    const { alice, bob } = t;
+    const status = () => { const result = bob.run(['sync', 'status', '--json']); assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout); };
+    assert.deepEqual(syncNowAction(status()), { action: 'none' });
+    alice.write('main.tex', '\\documentclass{article}\\begin{document}Edited on Overleaf.\\end{document}\n');
+    alice.commit('overleaf edit');
+    alice.git('push', '-q');
+    const behind = status();
+    assert.deepEqual(syncNowAction(behind), { action: 'pull' });
+    bob.write('research/ideas/idea_local.md', matter.stringify('\nLocal note.\n', { type: 'idea', title: 'Local', status: 'draft', origin: 'researcher' }));
+    // Local work wins: publish commits it, then integrates the upstream commit before pushing.
+    assert.deepEqual(syncNowAction(status()), { action: 'share' });
+    assert.deepEqual(syncNowAction({ ...behind, uncommitted: [], ahead: 2 }), { action: 'share' });
+    assert.deepEqual(syncNowAction({ ...behind, uncommitted: [], upstreamMissing: true }), { action: 'share' });
+    assert.equal(syncNowAction({ ...behind, phase: 'conflict', conflicted: ['main.tex'] }).action, 'blocked');
+    assert.match(syncNowAction({ ...behind, phase: 'conflict', conflicted: ['main.tex'] }).reason, /main\.tex/);
+    assert.match(syncNowAction({ ...behind, fetchError: 'auth failed' }).reason, /credentials/);
+    assert.match(syncNowAction({ ...behind, unreportedStageEdits: ['research/assets/a.md'] }).reason, /middle of a research step/);
   } finally { t.cleanup(); }
 });
 

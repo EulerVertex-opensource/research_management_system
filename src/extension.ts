@@ -48,7 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
     () => output.show(true)
   );
 
-  const loop = (name: string, action: () => Promise<void>) => vscode.commands.registerCommand(`research-assistant.loop.${name}`, async () => {
+  const loop = (name: string, action: () => Promise<unknown>) => vscode.commands.registerCommand(`research-assistant.loop.${name}`, async () => {
     try {
       await provider!.start();
       await action();
@@ -72,6 +72,7 @@ export function activate(context: vscode.ExtensionContext): void {
     loop('syncPull', () => provider!.loopHost.syncPullCommand()),
     loop('syncPrepare', () => provider!.loopHost.syncPrepareCommand()),
     loop('syncPublish', () => provider!.loopHost.syncPublishCommand()),
+    loop('syncNow', () => provider!.loopHost.syncNowCommand()),
     loop('refreshIntegration', () => provider!.refreshProject(true)),
   ];
 

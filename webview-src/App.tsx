@@ -17,6 +17,7 @@ import type { GraphPayload } from '../src/models/graph';
 import { GraphTab } from './graph/GraphTab';
 import { SettingsView } from './components/SettingsView';
 import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
+import type { SyncBadge, SyncNotice } from '../src/models/sync';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -43,6 +44,9 @@ interface State {
   settings: SettingsPayload | null;
   settingsResult: { requestId: string; errors: SettingsErrors } | null;
   uiState: UIState;
+  refreshing: boolean;
+  sync: SyncBadge | null;
+  notice: SyncNotice | null;
 }
 
 type Action =
@@ -56,6 +60,9 @@ type Action =
   | { type: 'SET_VIEW'; view: SidebarView }
   | { type: 'TOGGLE_CREATE_MODAL' }
   | { type: 'SET_ERROR'; message: string | null }
+  | { type: 'SET_REFRESHING'; refreshing: boolean }
+  | { type: 'SYNC_STATE'; state: SyncBadge }
+  | { type: 'SET_NOTICE'; notice: SyncNotice | null }
   | { type: 'MANUSCRIPT_STATUS'; status: ManuscriptStatus }
   | { type: 'GRAPH_DATA'; payload: GraphPayload }
   | { type: 'SETTINGS_DATA'; settings: SettingsPayload; requestId?: string; errors?: SettingsErrors }
@@ -94,7 +101,14 @@ function reducer(state: State, action: Action): State {
     case 'TOGGLE_CREATE_MODAL':
       return { ...state, showCreateModal: !state.showCreateModal };
     case 'SET_ERROR':
-      return { ...state, error: action.message };
+      // An error ends a refresh too, so the Refresh button never stays stuck.
+      return { ...state, error: action.message, refreshing: action.message ? false : state.refreshing };
+    case 'SET_REFRESHING':
+      return { ...state, refreshing: action.refreshing };
+    case 'SYNC_STATE':
+      return { ...state, sync: action.state };
+    case 'SET_NOTICE':
+      return { ...state, notice: action.notice };
     case 'MANUSCRIPT_STATUS':
       return { ...state, manuscriptStatus: action.status };
     case 'SETTINGS_DATA':
@@ -134,6 +148,9 @@ const initialState: State = {
   settings: null,
   settingsResult: null,
   uiState: DEFAULT_UI_STATE,
+  refreshing: false,
+  sync: null,
+  notice: null,
 };
 
 export function App() {
@@ -165,6 +182,15 @@ export function App() {
       case 'settingsData':
         dispatch({ type: 'SETTINGS_DATA', settings: msg.settings, requestId: msg.requestId, errors: msg.errors });
         break;
+      case 'refreshDone':
+        dispatch({ type: 'SET_REFRESHING', refreshing: false });
+        break;
+      case 'syncState':
+        dispatch({ type: 'SYNC_STATE', state: msg.state });
+        break;
+      case 'notice':
+        dispatch({ type: 'SET_NOTICE', notice: msg.notice });
+        break;
       case 'error':
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
@@ -194,6 +220,18 @@ export function App() {
     if (view === 'settings') {
       send({ type: 'getSettings' });
     }
+  };
+
+  const handleRefresh = () => {
+    dispatch({ type: 'SET_REFRESHING', refreshing: true });
+    send({ type: 'refreshDashboard' });
+    if (state.selectedNodeId) send({ type: 'getNodeContent', id: state.selectedNodeId });
+  };
+
+  const handleSync = () => {
+    dispatch({ type: 'SET_NOTICE', notice: null });
+    if (state.sync) dispatch({ type: 'SYNC_STATE', state: { ...state.sync, busy: true } });
+    send({ type: 'syncNow' });
   };
 
   const handleSelectNode = (node: ResearchNode) => {
@@ -324,7 +362,14 @@ export function App() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      <Sidebar active={state.activeView} onChange={handleSetView} />
+      <Sidebar
+        active={state.activeView}
+        onChange={handleSetView}
+        refreshing={state.refreshing}
+        onRefresh={handleRefresh}
+        sync={state.sync}
+        onSync={handleSync}
+      />
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
         {/* Left list column (assets / ideas / papers) */}
@@ -398,6 +443,19 @@ export function App() {
             <div style={{ padding: '7px 14px', background: 'var(--vscode-inputValidation-errorBackground)', color: 'var(--vscode-inputValidation-errorForeground)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
               <span>{state.error}</span>
               <button onClick={() => dispatch({ type: 'SET_ERROR', message: null })} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>✕</button>
+            </div>
+          )}
+          {state.notice && (
+            <div style={{ padding: '7px 14px', background: state.notice.level === 'warning' ? 'var(--vscode-inputValidation-warningBackground)' : 'var(--vscode-inputValidation-infoBackground)', borderBottom: '1px solid var(--vscode-panel-border)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexShrink: 0, maxHeight: 200, overflowY: 'auto' }}>
+              <div>
+                <div><strong>Sync:</strong> {state.notice.message}</div>
+                {state.notice.details?.length ? (
+                  <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                    {state.notice.details.map((line, index) => <li key={index}>{line}</li>)}
+                  </ul>
+                ) : null}
+              </div>
+              <button onClick={() => dispatch({ type: 'SET_NOTICE', notice: null })} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>✕</button>
             </div>
           )}
 

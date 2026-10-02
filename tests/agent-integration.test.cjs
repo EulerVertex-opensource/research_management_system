@@ -13,6 +13,7 @@ function load(file) {
 
 const { buildHooksFile, buildProjectMcpJson, upsertCodexMcpTable } = load('../src/services/AgentIntegrationCore.ts');
 const { AGENT_PROVIDERS, PROVIDER_IDS, loopScriptPath, chatHint, invocation } = load('../src/services/AgentProviders.ts');
+const { GENERATED_START, GENERATED_END, claudeMdForAgentsMd, upsertGeneratedSection } = load('../src/domain/agentInstructions.ts');
 
 test('registry covers both agents and derives paths and hints from one table', () => {
   assert.deepEqual(PROVIDER_IDS, ['claude', 'codex']);
@@ -65,4 +66,22 @@ test('Codex MCP table is owned as a whole and everything else is untouched', () 
   assert.doesNotMatch(moved, /old\.cjs|A = "1"/);
   assert.match(moved, /default_tools_approval_mode = "approve"\n\n\[mcp_servers\.after\]\ncommand = "y"\n$/);
   assert.equal(upsertCodexMcpTable('', '/a.cjs').split('\n')[0], '[mcp_servers.research-assistant]');
+});
+
+test('CLAUDE.md gives way to AGENTS.md: the old generated copy is dropped, own text keeps an @AGENTS.md import', () => {
+  const generated = upsertGeneratedSection('', '# Mathematical Research Workspace\n\n- invariant');
+  assert.equal(claudeMdForAgentsMd(generated), null);
+  assert.equal(claudeMdForAgentsMd('  \n'), null);
+
+  const own = `# My notes\n\nPrefer short proofs.\n\n${generated}`;
+  const migrated = claudeMdForAgentsMd(own);
+  assert.equal(migrated, `# My notes\n\nPrefer short proofs.\n\n${GENERATED_START}\n@AGENTS.md\n${GENERATED_END}\n`);
+  assert.equal(claudeMdForAgentsMd(migrated), migrated, 'idempotent');
+  assert.equal(claudeMdForAgentsMd(`${GENERATED_START}\n@AGENTS.md\n${GENERATED_END}\n`), null);
+
+  const unmarked = '# My notes\n';
+  assert.equal(claudeMdForAgentsMd(unmarked), `# My notes\n\n${GENERATED_START}\n@AGENTS.md\n${GENERATED_END}\n`);
+  const importsItself = '@AGENTS.md\n\n## Claude Code\nUse plan mode.\n';
+  assert.equal(claudeMdForAgentsMd(importsItself), importsItself);
+  assert.equal(claudeMdForAgentsMd(`${importsItself}\n${generated}`), importsItself);
 });

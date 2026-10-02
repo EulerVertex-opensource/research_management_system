@@ -81,6 +81,10 @@
         "title": "Research Assistant: Publish Research to Collaborators (Git)"
       },
       {
+        "command": "research-assistant.loop.syncNow",
+        "title": "Research Assistant: Sync Research (Pull and Publish)"
+      },
+      {
         "command": "research-assistant.loop.openChat",
         "title": "Research Assistant: Open Agent Chat"
       },

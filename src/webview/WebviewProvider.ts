@@ -42,12 +42,15 @@ export class WebviewProvider {
   private manuscriptPhase: ManuscriptBuildPhase = 'idle';
   private manuscriptMessage: string | undefined;
   private readonly output: vscode.OutputChannel;
-  /** The Graph tab asked for data at least once; only then are updates pushed. */
+  /** The Overview tab asked for data at least once; only then are updates pushed. */
   private graphWanted = false;
   private graphTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly settingsService: SettingsService;
   /** The Settings view asked for data at least once; only then are changes pushed. */
   private settingsWanted = false;
+  private syncStateTimer: ReturnType<typeof setTimeout> | undefined;
+  private syncStateRunning = false;
+  private syncStatePending = false;
 
   constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri, output: vscode.OutputChannel) {
     this.context = context;
@@ -61,6 +64,8 @@ export class WebviewProvider {
     this.settingsService = new SettingsService(this.configService, this.loopHost);
     this.loopHost.onDidChangeState(() => this.scheduleGraph());
     this.loopHost.onDidChangeSettings(() => void this.sendSettings());
+    // Not onDidChangeState: computing the badge goes through the loop core, which fires it again.
+    this.loopHost.onDidSync(() => this.scheduleSyncState(0));
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('researchAssistant')) void this.sendSettings(); }));
   }
 
@@ -203,6 +208,7 @@ export class WebviewProvider {
     });
     this.send({ type: 'papersData', papers });
     await this.sendManuscriptStatus();
+    this.scheduleSyncState(0);
     if (initialized) {
       await this.sendProjectMd();
       void this.offerSchemaMigration(paths).catch((error: unknown) => this.output.appendLine(`[migrate] ${String(error)}`));
@@ -298,6 +304,7 @@ export class WebviewProvider {
         const nodes = await this.refreshIndex();
         this.send({ type: 'nodesUpdated', nodes });
         this.scheduleGraph();
+        this.scheduleSyncState();
         generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
 
         const filename = uri.path.split('/').pop();
@@ -316,23 +323,16 @@ export class WebviewProvider {
         const nodes = await this.refreshIndex();
         this.send({ type: 'nodesUpdated', nodes });
         this.scheduleGraph();
+        this.scheduleSyncState();
         generateAgentInstructions(nodes, this.fileService, paths).catch(() => {});
       } catch { /* non-fatal */ }
     };
 
-    const [assetWatcher, definitionWatcher, ideaWatcher, planWatcher] = nodeWatchers;
-    assetWatcher.onDidChange((uri) => { void onNodeFileChange(uri); });
-    assetWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); });
-    assetWatcher.onDidDelete(() => { void onNodeFileDelete(); });
-    definitionWatcher.onDidChange((uri) => { void onNodeFileChange(uri); });
-    definitionWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); });
-    definitionWatcher.onDidDelete(() => { void onNodeFileDelete(); });
-    ideaWatcher.onDidChange((uri) => { void onNodeFileChange(uri); });
-    ideaWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); });
-    ideaWatcher.onDidDelete(() => { void onNodeFileDelete(); });
-    planWatcher.onDidChange((uri) => { void onNodeFileChange(uri); });
-    planWatcher.onDidCreate((uri) => { void onNodeFileChange(uri); });
-    planWatcher.onDidDelete(() => { void onNodeFileDelete(); });
+    for (const watcher of nodeWatchers) {
+      watcher.onDidChange((uri) => { void onNodeFileChange(uri); });
+      watcher.onDidCreate((uri) => { void onNodeFileChange(uri); });
+      watcher.onDidDelete(() => { void onNodeFileDelete(); });
+    }
 
     // Watch the configured project description.
     const projectWatcher = vscode.workspace.createFileSystemWatcher(
@@ -341,12 +341,13 @@ export class WebviewProvider {
     projectWatcher.onDidChange(async () => {
       try { await this.sendProjectMd(); } catch { /* non-fatal */ }
       this.scheduleGraph();
+      this.scheduleSyncState();
     });
 
-    // Manuscript plans, locks, section TeX, and shared approvals feed the Graph tab.
+    // Manuscript plans, locks, section TeX, and shared approvals feed the Overview tab.
     const graphWatchers = [`${paths.writingRoot}/**`, `${paths.sections}/*.tex`, `${paths.researchRoot === '.' ? '' : `${paths.researchRoot}/`}approvals/**`].map((pattern) => {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, pattern));
-      const refresh = () => this.scheduleGraph();
+      const refresh = () => { this.scheduleGraph(); this.scheduleSyncState(); };
       watcher.onDidChange(refresh); watcher.onDidCreate(refresh); watcher.onDidDelete(refresh);
       return watcher;
     });
@@ -357,6 +358,7 @@ export class WebviewProvider {
         const papers = await this.paperIndex!.getPapers();
         this.send({ type: 'papersData', papers });
       } catch { /* non-fatal */ }
+      this.scheduleSyncState();
     };
 
     const papersWatcher = vscode.workspace.createFileSystemWatcher(
@@ -418,7 +420,7 @@ export class WebviewProvider {
     this.send({ type: 'manuscriptStatus', status });
   }
 
-  /** Coalesce bursts of file events (an agent writing several files) into one Graph refresh. */
+  /** Coalesce bursts of file events (an agent writing several files) into one Overview refresh. */
   private scheduleGraph(): void {
     if (!this.graphWanted || !this.panel) return;
     if (this.graphTimer) clearTimeout(this.graphTimer);
@@ -441,6 +443,49 @@ export class WebviewProvider {
     } catch (error: unknown) {
       this.output.appendLine(`[settings] ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /** Coalesce file bursts into one Sync-button update. */
+  private scheduleSyncState(delayMs = 1000): void {
+    if (!this.panel) return;
+    if (this.syncStateTimer) clearTimeout(this.syncStateTimer);
+    this.syncStateTimer = setTimeout(() => { this.syncStateTimer = undefined; void this.sendSyncState(); }, delayMs);
+  }
+
+  /** Never computes two badges at once, and reruns after a request that arrived mid-run, so the latest state is sent last. */
+  private async sendSyncState(): Promise<void> {
+    if (!this.panel) return;
+    if (this.syncStateRunning) { this.syncStatePending = true; return; }
+    this.syncStateRunning = true;
+    try {
+      do {
+        this.syncStatePending = false;
+        this.send({ type: 'syncState', state: await this.loopHost.syncBadge() });
+      } while (this.syncStatePending);
+    } finally {
+      this.syncStateRunning = false;
+    }
+  }
+
+  /** Re-read config and research files from disk and re-send every panel: the manual fallback for edits the watchers missed. */
+  private async refreshDashboard(): Promise<void> {
+    try {
+      await this.loadProject();
+      if (this.graphWanted) await this.sendGraph();
+      await this.sendSettings();
+      await this.sendSyncState();
+      this.output.appendLine('[webview] Dashboard refreshed from disk');
+    } finally {
+      this.send({ type: 'refreshDone' });
+    }
+  }
+
+  private async syncNow(): Promise<void> {
+    const pending = this.loopHost.syncNowCommand();
+    this.scheduleSyncState(0);
+    const notice = await pending;
+    if (notice) this.send({ type: 'notice', notice });
+    await this.sendSyncState();
   }
 
   private send(message: ExtensionMessage): void {
@@ -469,6 +514,7 @@ export class WebviewProvider {
     const nodes = await this.refreshIndex();
     this.send({ type: 'nodesUpdated', nodes });
     this.scheduleGraph();
+    this.scheduleSyncState();
     generateAgentInstructions(nodes, this.fileService, this.paths).catch(() => { /* non-fatal */ });
   }
 
@@ -488,6 +534,16 @@ export class WebviewProvider {
 
         case 'refreshProject': {
           await this.refreshProject(true);
+          break;
+        }
+
+        case 'refreshDashboard': {
+          await this.refreshDashboard();
+          break;
+        }
+
+        case 'syncNow': {
+          await this.syncNow();
           break;
         }
 

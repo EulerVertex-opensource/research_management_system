@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ProjectPaths, ResearchNode } from '../models/types';
 import { FileService } from './FileService';
+import { claudeMdForAgentsMd, upsertGeneratedSection } from '../domain/agentInstructions';
 import { ASSET_TYPE_LIST, IDEA_KIND_LIST, IDEA_STATUS_LIST, NODE_STATUS_LIST, NODE_TYPE_LIST, PLAN_STATUS_LIST, SOURCE_KIND_LIST } from '../domain/nodeKinds';
 
 const MAINTENANCE = 'node .agents/skills/research-maintenance/scripts/research-maintenance.cjs';
@@ -9,8 +10,6 @@ const alternatives = (values: readonly string[]) => values.join(' | ');
 const INSTRUCTIONS_PATH = '.github/copilot-instructions.md';
 const CODEX_AGENTS_PATH = 'AGENTS.md';
 const CLAUDE_INSTRUCTIONS_PATH = 'CLAUDE.md';
-const GENERATED_START = '<!-- research-assistant:generated:start -->';
-const GENERATED_END = '<!-- research-assistant:generated:end -->';
 
 function formatOptional(paths: string[], fallback: string): string {
   return paths.length ? paths.map((item) => `\`${item}\``).join(', ') : fallback;
@@ -121,8 +120,8 @@ Each \`## <slug>\` section in \`${paths.paperIndex}\` may record a local ignored
 }
 
 /**
- * Always-loaded guidance for Claude Code (CLAUDE.md) and Codex (AGENTS.md):
- * only the invariants every task needs. Paths live in the config file, skills
+ * Always-loaded guidance in AGENTS.md, read by both Codex and Claude Code (one
+ * file, so the two cannot drift): only the invariants every task needs. Paths live in the config file, skills
  * are discovered by the agents themselves, and stage rules live in the skills,
  * so none of that is repeated here (it would cost context in every turn and in
  * every subagent).
@@ -150,16 +149,6 @@ Overleaf-compatible LaTeX project plus a shared research knowledge base. Folder 
 `;
 }
 
-function upsertGeneratedSection(existing: string, generated: string): string {
-  const section = `${GENERATED_START}\n${generated.trim()}\n${GENERATED_END}`;
-  const start = existing.indexOf(GENERATED_START);
-  const end = existing.indexOf(GENERATED_END);
-  if (start !== -1 && end > start) {
-    return existing.slice(0, start) + section + existing.slice(end + GENERATED_END.length);
-  }
-  return existing.trim() ? `${existing.trimEnd()}\n\n${section}\n` : `${section}\n`;
-}
-
 /** Generate small, deterministic guidance; research node files remain canonical. */
 export async function generateAgentInstructions(
   _nodes: ResearchNode[],
@@ -170,13 +159,19 @@ export async function generateAgentInstructions(
     await vscode.workspace.fs.createDirectory(fileService.resolve('.github'));
   } catch { /* already exists */ }
 
-  const agentsContent = agentGuidance(paths);
-
   const existingAgents = await fileService.readFile(CODEX_AGENTS_PATH).catch(() => '');
-  const existingClaude = await fileService.readFile(CLAUDE_INSTRUCTIONS_PATH).catch(() => '');
   await Promise.all([
     fileService.writeFile(INSTRUCTIONS_PATH, copilotGuidance(paths)),
-    fileService.writeFile(CODEX_AGENTS_PATH, upsertGeneratedSection(existingAgents, agentsContent)),
-    fileService.writeFile(CLAUDE_INSTRUCTIONS_PATH, upsertGeneratedSection(existingClaude, agentsContent)),
+    fileService.writeFile(CODEX_AGENTS_PATH, upsertGeneratedSection(existingAgents, agentGuidance(paths))),
+    retireClaudeMd(fileService),
   ]);
+}
+
+/** A CLAUDE.md would stop Claude Code from reading AGENTS.md: drop our old copy, or import AGENTS.md into the researcher's own file. */
+async function retireClaudeMd(fileService: FileService): Promise<void> {
+  const existing = await fileService.readFile(CLAUDE_INSTRUCTIONS_PATH).catch(() => undefined);
+  if (existing === undefined) return;
+  const next = claudeMdForAgentsMd(existing);
+  if (next === null) await fileService.deleteFile(CLAUDE_INSTRUCTIONS_PATH);
+  else if (next !== existing) await fileService.writeFile(CLAUDE_INSTRUCTIONS_PATH, next);
 }

@@ -14,7 +14,8 @@ import { LoopSettings } from '../models/settings';
 import { normalizeLoopSettings } from '../domain/loopSettings';
 import { readLoopSettings, writeLoopSettings } from './LoopSettingsStore';
 import { LoopGit } from './LoopGit';
-import { AutoPullMode, PullResult, ResearchSync, autoPullDecision } from './ResearchSync';
+import { AutoPullMode, PrepareResult, PublishResult, PullResult, ResearchSync, autoPullDecision, syncNowAction } from './ResearchSync';
+import { SyncBadge, SyncNotice } from '../models/sync';
 import { NodeGitRunner, runShell } from '../cli/nodeGit';
 import { loadSyncConfig } from '../cli/nodeFiles';
 import { toIdeaKind } from '../domain/nodeKinds';
@@ -76,6 +77,10 @@ export class LoopHost implements vscode.Disposable {
   private readonly settingsChanged = new vscode.EventEmitter<void>();
   /** Fires when the local loop settings file changes, so an open Settings view can refresh. */
   readonly onDidChangeSettings = this.settingsChanged.event;
+  private readonly synced = new vscode.EventEmitter<void>();
+  /** Fires after a pull, publish, or dashboard sync finished (or failed), so the Sync button can refresh. */
+  readonly onDidSync = this.synced.event;
+  private syncNowRunning = false;
   private autoSyncTimer: ReturnType<typeof setInterval> | undefined;
   private autoSyncRunning = false;
   private lastAutoSync = 0;
@@ -117,6 +122,7 @@ export class LoopHost implements vscode.Disposable {
     this.watcher?.dispose();
     this.settingsWatcher?.dispose();
     this.settingsChanged.dispose();
+    this.synced.dispose();
     this.statusBar.dispose();
     this.stateChanged.dispose();
     this.subscriptions.forEach((item) => item.dispose());
@@ -599,8 +605,12 @@ export class LoopHost implements vscode.Disposable {
     this.output.show(true);
   }
 
-  async syncPullCommand(): Promise<void> {
-    this.showPullResult(await this.withSync((sync) => sync.pull()), false);
+  async syncPullCommand(): Promise<PullResult> {
+    try {
+      const result = await this.withSync((sync) => sync.pull());
+      this.showPullResult(result, false);
+      return result;
+    } finally { this.synced.fire(); }
   }
 
   private showPullResult(result: PullResult, automatic: boolean): void {
@@ -629,12 +639,12 @@ export class LoopHost implements vscode.Disposable {
    */
   private async autoSync(force: boolean): Promise<void> {
     const mode = syncSetting<AutoPullMode>('autoPull', 'pull');
-    if (mode === 'off' || !this.core || this.autoSyncRunning) return;
+    if (mode === 'off' || !this.core || this.autoSyncRunning || this.syncNowRunning) return;
     if (!force && Date.now() - this.lastAutoSync < AUTO_SYNC_MIN_GAP_MS) return;
     this.autoSyncRunning = true;
     this.lastAutoSync = Date.now();
     try {
-      if ((await this.git.run(['rev-parse', '--is-inside-work-tree'])).stdout.trim() !== 'true') return;
+      if (!(await this.isGitRepository())) return;
       const outcome = await this.withSync(async (sync) => {
         const status = await sync.status();
         const decision = autoPullDecision(status, mode);
@@ -650,7 +660,7 @@ export class LoopHost implements vscode.Disposable {
         return;
       }
       this.reportedFetchError = undefined;
-      if (outcome.pulled) { this.announcedUpstream = undefined; this.showPullResult(outcome.pulled, true); return; }
+      if (outcome.pulled) { this.announcedUpstream = undefined; this.showPullResult(outcome.pulled, true); this.synced.fire(); return; }
       if (decision.action !== 'notify') return;
       const upstream = (await this.git.run(['rev-parse', ref])).stdout.trim();
       if (upstream && upstream === this.announcedUpstream) return;
@@ -671,9 +681,13 @@ export class LoopHost implements vscode.Disposable {
     }
   }
 
+  private reportPrepare(result: PrepareResult): void {
+    this.report(`prepare: ${result.ok ? 'ready' : 'not ready'}`, [...result.checks.map((check) => `${check.ok ? (check.warning ? 'WARN' : 'PASS') : 'FAIL'} ${check.name}${check.details.length ? `: ${check.details.join(' | ')}` : ''}`), ...result.summary]);
+  }
+
   async syncPrepareCommand(): Promise<void> {
     const result = await this.withSync((sync) => sync.prepare());
-    this.report(`prepare: ${result.ok ? 'ready' : 'not ready'}`, [...result.checks.map((check) => `${check.ok ? (check.warning ? 'WARN' : 'PASS') : 'FAIL'} ${check.name}${check.details.length ? `: ${check.details.join(' | ')}` : ''}`), ...result.summary]);
+    this.reportPrepare(result);
     this.output.show(true);
     if (result.ok) {
       const choice = await vscode.window.showInformationMessage('Research is ready to share.', 'Publish…');
@@ -681,16 +695,108 @@ export class LoopHost implements vscode.Disposable {
     } else void vscode.window.showWarningMessage('Research is not ready to share; see the FAIL items in Output.');
   }
 
-  async syncPublishCommand(): Promise<void> {
-    const result = await this.withSync((sync) => sync.publish(async (preview) => this.confirmPublish([
-      `To: ${preview.targets.join(' and ')}`,
-      preview.files.length ? `Commit ${preview.files.length} file(s):\n${preview.files.slice(0, 25).map((entry) => `${entry.code.trim() || '?'} ${entry.path}`).join('\n')}` : '',
-      preview.ahead ? `Plus ${preview.ahead} local commit(s).` : '',
-      `Message:\n${preview.message}`,
-    ].filter(Boolean).join('\n\n'))));
-    this.report(`publish: ${result.status}`, [...result.summary, ...result.warnings.map((line) => `WARNING ${line}`)]);
-    if (result.status === 'published') void vscode.window.showInformationMessage(result.summary[result.summary.length - 1] ?? 'Published.');
-    else if (result.status !== 'blocked' || result.warnings.length) { this.output.show(true); void vscode.window.showWarningMessage(`Research publish: ${result.summary[result.summary.length - 1] ?? result.status}`); }
+  async syncPublishCommand(): Promise<PublishResult> {
+    try {
+      const result = await this.withSync((sync) => sync.publish(async (preview) => this.confirmPublish([
+        `To: ${preview.targets.join(' and ')}`,
+        preview.files.length ? `Commit ${preview.files.length} file(s):\n${preview.files.slice(0, 25).map((entry) => `${entry.code.trim() || '?'} ${entry.path}`).join('\n')}` : '',
+        preview.ahead ? `Plus ${preview.ahead} local commit(s).` : '',
+        `Message:\n${preview.message}`,
+      ].filter(Boolean).join('\n\n'))));
+      this.report(`publish: ${result.status}`, [...result.summary, ...result.warnings.map((line) => `WARNING ${line}`)]);
+      if (result.status === 'published') void vscode.window.showInformationMessage(result.summary[result.summary.length - 1] ?? 'Published.');
+      else if (result.status !== 'blocked' || result.warnings.length) { this.output.show(true); void vscode.window.showWarningMessage(`Research publish: ${result.summary[result.summary.length - 1] ?? result.status}`); }
+      return result;
+    } finally { this.synced.fire(); }
+  }
+
+  // ---------- one-click sync (dashboard) ----------
+
+  private async isGitRepository(): Promise<boolean> {
+    return (await this.git.run(['rev-parse', '--is-inside-work-tree'])).stdout.trim() === 'true';
+  }
+
+  /**
+   * The dashboard's Sync button: share local work if there is any (prepare's
+   * checks, then publish behind the researcher's confirmation, which also
+   * integrates collaborators' commits), otherwise pull. Returns a notice only
+   * when the researcher has to act; successes are announced by toasts.
+   */
+  async syncNowCommand(): Promise<SyncNotice | undefined> {
+    if (this.syncNowRunning) return undefined;
+    if (!this.core) throw new Error('Initialize the Research Assistant project first.');
+    this.syncNowRunning = true;
+    this.synced.fire();
+    const warn = (message: string, details?: string[]): SyncNotice => {
+      this.output.appendLine(`[sync] ${message}`);
+      for (const line of details ?? []) this.output.appendLine(`  ${line}`);
+      void vscode.window.showWarningMessage(`Research sync: ${message}`, 'Show details').then((choice) => { if (choice) this.output.show(true); });
+      return { level: 'warning', message, details };
+    };
+    try {
+      if (!(await this.isGitRepository())) return warn('This project folder is not a git repository, so there is nothing to sync. Clone the shared repository (or ask a collaborator to set it up) and open that folder.');
+      const status = await this.withSync((sync) => sync.status());
+      const decision = syncNowAction(status);
+      const ref = `${status.remote}/${status.branch}`;
+      this.output.appendLine(`[sync] sync now: ${decision.action}`);
+      switch (decision.action) {
+        case 'blocked':
+          return warn(decision.reason, typeof status.fetchError === 'string' ? [status.fetchError] : undefined);
+        case 'none':
+          void vscode.window.showInformationMessage(`Research is up to date with ${ref}.`);
+          return undefined;
+        case 'pull': {
+          const result = await this.syncPullCommand();
+          if (result.status === 'conflict') return { level: 'warning', message: `Sync stopped on conflicts in ${result.conflicted?.join(', ')}. Nothing was overwritten; the researchers decide which version is right.`, details: result.summary };
+          if (result.problems.length) return { level: 'warning', message: 'Pulled, but some research files need fixing (the loop is paused):', details: result.problems };
+          return undefined;
+        }
+        case 'share': {
+          const prepared = await this.withSync((sync) => sync.prepare());
+          this.reportPrepare(prepared);
+          if (!prepared.ok) {
+            const failed = prepared.checks.filter((check) => !check.ok);
+            return warn('Not ready to share yet. Fix these first (you can ask the agent to fix them), then sync again:', failed.map((check) => `${check.name}${check.details.length ? `: ${check.details.join(' ')}` : ''}`));
+          }
+          const result = await this.syncPublishCommand();
+          if (result.status === 'conflict' || (result.status === 'blocked' && result.warnings.length)) return { level: 'warning', message: result.summary[result.summary.length - 1] ?? `Publish ${result.status}.`, details: [...result.summary.slice(0, -1), ...result.warnings] };
+          if (result.warnings.length) return { level: 'warning', message: `Published to ${result.pushed.join(' and ')}, with warnings:`, details: result.warnings };
+          return undefined;
+        }
+      }
+    } catch (error: unknown) {
+      return warn(error instanceof Error ? error.message.split('\n')[0] : String(error), error instanceof Error ? error.message.split('\n').slice(1).filter(Boolean) : undefined);
+    } finally {
+      this.syncNowRunning = false;
+      this.synced.fire();
+    }
+  }
+
+  /** Local-only sync state for the dashboard's Sync button; never fetches, never throws. */
+  async syncBadge(): Promise<SyncBadge> {
+    const badge = await this.readSyncBadge();
+    return { ...badge, busy: this.syncNowRunning };
+  }
+
+  private async readSyncBadge(): Promise<SyncBadge> {
+    const base: SyncBadge = { available: false, busy: false, changed: 0, ahead: 0, behind: 0, conflict: false };
+    if (!this.core) return { ...base, reason: 'The research project is not set up yet.' };
+    try {
+      if (!(await this.isGitRepository())) return { ...base, reason: 'This project folder is not a git repository.' };
+      const status = await this.withSync((sync) => sync.status({ fetch: false }));
+      const remote = String(status.remote);
+      const branch = String(status.branch);
+      if ((await this.git.run(['remote', 'get-url', remote])).code !== 0) return { ...base, remote, branch, reason: `No git remote named "${remote}"; set the sync remote in Settings.` };
+      const count = (value: unknown) => typeof value === 'number' ? value : 0;
+      return {
+        ...base, available: true, remote, branch,
+        changed: Array.isArray(status.uncommitted) ? status.uncommitted.length : 0,
+        ahead: count(status.ahead), behind: count(status.behind),
+        conflict: status.phase === 'conflict',
+      };
+    } catch (error: unknown) {
+      return { ...base, reason: error instanceof Error ? error.message.split('\n')[0] : String(error) };
+    }
   }
 
   async captureIdeaCommand(): Promise<void> {

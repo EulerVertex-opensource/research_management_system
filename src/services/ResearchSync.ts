@@ -57,6 +57,24 @@ export function autoPullDecision(status: Record<string, unknown>, mode: AutoPull
   return { action: 'pull' };
 }
 
+export type SyncNowAction = { action: 'none' } | { action: 'pull' } | { action: 'share' } | { action: 'blocked'; reason: string };
+
+/**
+ * What the dashboard's Sync button does with a `status()` result: share local
+ * work (publish commits, integrates upstream, re-validates, then pushes), else
+ * pull collaborators' commits, else nothing. Blocked when only a person can
+ * unblock it.
+ */
+export function syncNowAction(status: Record<string, unknown>): SyncNowAction {
+  const length = (value: unknown) => Array.isArray(value) ? value.length : 0;
+  if (status.phase === 'conflict') return { action: 'blocked', reason: `A previous sync stopped on conflicts${length(status.conflicted) ? ` in ${(status.conflicted as string[]).join(', ')}` : ''}; the researchers resolve them first.` };
+  if (typeof status.fetchError === 'string') return { action: 'blocked', reason: `Could not reach ${String(status.remote ?? 'the remote')}; check your internet connection and git credentials.` };
+  if (length(status.unreportedStageEdits)) return { action: 'blocked', reason: 'The agent is in the middle of a research step; wait until it reports the step, then sync.' };
+  if (length(status.uncommitted) || (typeof status.ahead === 'number' && status.ahead > 0) || status.upstreamMissing) return { action: 'share' };
+  if (typeof status.behind === 'number' && status.behind > 0) return { action: 'pull' };
+  return { action: 'none' };
+}
+
 const WORKING_STAGES = new Set(['draft_project', 'scaffold', 'sources', 'falsify', 'verify_counterexample', 'plan', 'execute']);
 
 export class ResearchSync {
