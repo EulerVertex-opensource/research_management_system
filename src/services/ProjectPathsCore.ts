@@ -55,10 +55,12 @@ export function normalizeConfig(raw: Partial<ResearchAssistantConfig>): Research
   const research = raw.research ?? researchDefaults;
   const ideaPath = normalizeRelative(research.ideas, researchDefaults.ideas);
 
+  const contextBudgets = normalizeContextBudgets(raw.contextBudgets);
   return {
     version: 1,
     layout,
     sync: normalizeSyncConfig(raw.sync),
+    ...(contextBudgets ? { contextBudgets } : {}),
     latex: {
       projectRoot: normalizeRelative(latex.projectRoot, latexDefaults.projectRoot),
       main: normalizeRelative(latex.main, latexDefaults.main),
@@ -84,6 +86,15 @@ export function normalizeConfig(raw: Partial<ResearchAssistantConfig>): Research
       ...(research.library ? { library: normalizeRelative(research.library, joinProjectPath(normalizeRelative(research.root, researchDefaults.root), 'library')) } : {}),
     },
   };
+}
+
+/** Keep positive whole token budgets keyed by stage name; undefined when none are set. */
+export function normalizeContextBudgets(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .filter(([stage, value]) => /^[a-z_]+$/.test(stage) && typeof value === 'number' && Number.isFinite(value) && value > 0)
+    .map(([stage, value]) => [stage, Math.round(value as number)] as const);
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 const optionalText = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined;

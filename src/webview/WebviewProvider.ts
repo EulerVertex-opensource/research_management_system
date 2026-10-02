@@ -13,6 +13,7 @@ import { ManuscriptBuildService } from '../services/ManuscriptBuildService';
 import { requirePaperPdfPath } from '../services/PaperPdfPath';
 import { AgentIntegrationService } from '../services/AgentIntegrationService';
 import { LoopHost } from '../services/LoopHost';
+import { SettingsService } from '../services/SettingsService';
 import { parseWritingOutline } from '../services/ManuscriptWriting';
 import { summarizeProject } from '../domain/project';
 import { OverlayFiles, migrateProject, migrationReasons } from '../services/SchemaMigration';
@@ -44,6 +45,9 @@ export class WebviewProvider {
   /** The Graph tab asked for data at least once; only then are updates pushed. */
   private graphWanted = false;
   private graphTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly settingsService: SettingsService;
+  /** The Settings view asked for data at least once; only then are changes pushed. */
+  private settingsWanted = false;
 
   constructor(context: vscode.ExtensionContext, workspaceRoot: vscode.Uri, output: vscode.OutputChannel) {
     this.context = context;
@@ -52,9 +56,12 @@ export class WebviewProvider {
     this.configService = new ProjectConfigService(this.fileService);
     this.skillInstaller = new SkillInstallerService(context.extensionUri, this.fileService);
     this.agentIntegration = new AgentIntegrationService(this.fileService, context.extensionUri.fsPath, output);
-    this.loopHost = new LoopHost(this.fileService, output);
+    this.loopHost = new LoopHost(this.fileService, output, context.workspaceState);
     this.manuscriptBuildService = new ManuscriptBuildService(this.fileService, workspaceRoot);
+    this.settingsService = new SettingsService(this.configService, this.loopHost);
     this.loopHost.onDidChangeState(() => this.scheduleGraph());
+    this.loopHost.onDidChangeSettings(() => void this.sendSettings());
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('researchAssistant')) void this.sendSettings(); }));
   }
 
   start(): Promise<void> {
@@ -427,6 +434,15 @@ export class WebviewProvider {
     }
   }
 
+  private async sendSettings(requestId?: string, errors?: Record<string, string>): Promise<void> {
+    if (!this.settingsWanted || !this.panel) return;
+    try {
+      this.send({ type: 'settingsData', settings: await this.settingsService.payload(), requestId, errors });
+    } catch (error: unknown) {
+      this.output.appendLine(`[settings] ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private send(message: ExtensionMessage): void {
     this.panel?.webview.postMessage(message);
   }
@@ -472,6 +488,20 @@ export class WebviewProvider {
 
         case 'refreshProject': {
           await this.refreshProject(true);
+          break;
+        }
+
+        case 'getSettings': {
+          this.settingsWanted = true;
+          await this.sendSettings();
+          break;
+        }
+
+        case 'updateSettings': {
+          this.settingsWanted = true;
+          let errors: Record<string, string>;
+          try { errors = await this.settingsService.update(msg.patch); } catch (error: unknown) { errors = { '': error instanceof Error ? error.message : String(error) }; }
+          await this.sendSettings(msg.requestId, errors);
           break;
         }
 

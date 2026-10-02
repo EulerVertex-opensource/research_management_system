@@ -91,6 +91,8 @@ export interface ResearchAssistantConfig {
   version: 1;
   layout: ProjectLayout;
   sync?: SyncConfig;
+  /** Per-stage token budgets for the loop's context packs, overriding the defaults. */
+  contextBudgets?: Record<string, number>;
   latex: {
     projectRoot: string;
     main: string;

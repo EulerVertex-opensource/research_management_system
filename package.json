@@ -97,14 +97,16 @@
           "default": 240,
           "minimum": 10,
           "maximum": 600,
-          "description": "How long a research-loop question popup waits for you before the agent continues in auto mode."
+          "description": "How long a research-loop question popup waits for you before the agent continues in auto mode.",
+          "deprecationMessage": "Moved to the dashboard's Settings view (.research-assistant-loop/settings.json); this value only seeds that file once."
         },
         "researchAssistant.loop.iterationCap": {
           "type": "integer",
           "default": 10,
           "minimum": 1,
           "maximum": 100,
-          "description": "Automatic continuations the Stop hook allows per chat session before pausing the loop."
+          "description": "Automatic continuations the Stop hook allows per chat session before pausing the loop.",
+          "deprecationMessage": "Moved to the dashboard's Settings view (.research-assistant-loop/settings.json); this value only seeds that file once."
         },
         "researchAssistant.loop.provider": {
           "type": "string",
@@ -115,6 +117,11 @@
           ],
           "default": "auto",
           "description": "Which agent chat the status bar and commands open."
+        },
+        "researchAssistant.loop.useDefaultAgentOnStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the research loop with the default agent instead of asking which agent chat drives it."
         },
         "researchAssistant.sync.autoPull": {
           "type": "string",

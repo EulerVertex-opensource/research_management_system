@@ -39,8 +39,8 @@ The stage instruction from `next` states that stage's file rules, and `report` e
 - `ask_researcher({question, kind, asset_id?, options?})` opens a VS Code popup. Kinds: `goals`, `discussion`, `blocked`, `counterexample_review`. Every call returns within about 45 seconds. If `status` is `pending`, call `await_answer({id})` with the returned id until `status` is `final`. A final result is `{answered: true, text}` or `{answered: false, reason, auto_action}`.
 - On `{answered: false}` continue in auto mode: `goals` proceeds only if `project.md` already has a Main Problem, otherwise `report question`; `discussion` takes the default you stated in the question (the loop records it as an idea with `idea_kind: question`); `blocked` and `counterexample_review` park the asset (`park <asset> --reason ...`) and continue with `next`.
 - If the MCP tool is unavailable: on Claude Code use the built-in AskUserQuestion; on Codex run `report question --question "..."`, ask in chat, and when the researcher replies record it with `question answer --text "..."`.
-- `request_approval({kind, target, summary})` never approves by itself and follows the same `pending` / `await_answer` protocol; you may instead leave it pending and continue with other work. Kinds: `project`, `asset`, `definition`, `citation`, `counterexample`. Keep working on other actionable assets; `next` reports `waiting` when nothing remains. Late answers appear at the top of your next prompt.
-- Ask when goals are unclear, a statement is ambiguous, a source cannot be verified, three approaches failed, a counterexample was verified, or an idea needs the researcher's judgment. Do not ask to confirm routine work.
+- `request_approval({kind, target, summary})` never approves by itself and follows the same `pending` / `await_answer` protocol (when the researcher turned on auto mode, it may return `{answered: true, auto: true}` at once); you may instead leave it pending and continue with other work. Kinds: `project`, `asset`, `definition`, `citation`, `counterexample`. Keep working on other actionable assets; `next` reports `waiting` when nothing remains. Late answers appear at the top of your next prompt.
+- Ask when goals are unclear, a statement is ambiguous, a source cannot be verified, the failed-plan limit is reached (the loop asks with a `blocked` question itself), a counterexample was verified, or an idea needs the researcher's judgment. Do not ask to confirm routine work.
 
 ## Ideas
 
@@ -63,7 +63,7 @@ Research files are shared through git; the loop's run state is not. Use only the
 
 ## Hard rules
 
-- Never write `status: approved`, never edit approval records. Approval happens only through the researcher's click, dashboard, or editor.
+- Never write `status: approved`, never edit approval records. Approval happens only through the researcher's click, dashboard, or editor, or through auto mode the researcher turned on; `report` and `next` say what auto mode approved. Never read or change `.research-assistant-loop/settings.json`.
 - Never invent a paper, theorem, location, proof step, or researcher answer.
 - A failed plan is not a falsification. Only a verified counterexample confirmed by the researcher refutes a statement, and only the researcher deprecates an asset.
 - Do not change a statement while proving it; a revised statement gets a new asset ID.

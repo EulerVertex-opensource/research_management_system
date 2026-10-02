@@ -15,6 +15,8 @@ import { resolvePaperPdfLink, resolveResearchNodeLink } from './researchLinks';
 import { ASSET_TYPES, ASSET_TYPE_LIST } from '../src/domain/nodeKinds';
 import type { GraphPayload } from '../src/models/graph';
 import { GraphTab } from './graph/GraphTab';
+import { SettingsView } from './components/SettingsView';
+import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -38,6 +40,8 @@ interface State {
   error: string | null;
   manuscriptStatus: ManuscriptStatus | null;
   graph: GraphPayload | null;
+  settings: SettingsPayload | null;
+  settingsResult: { requestId: string; errors: SettingsErrors } | null;
   uiState: UIState;
 }
 
@@ -54,6 +58,7 @@ type Action =
   | { type: 'SET_ERROR'; message: string | null }
   | { type: 'MANUSCRIPT_STATUS'; status: ManuscriptStatus }
   | { type: 'GRAPH_DATA'; payload: GraphPayload }
+  | { type: 'SETTINGS_DATA'; settings: SettingsPayload; requestId?: string; errors?: SettingsErrors }
   | { type: 'SET_LAYOUT'; layoutMode: LayoutMode }
   | { type: 'SET_SPLIT_RATIO'; splitRatio: number }
   | { type: 'SET_NODE_LIST_WIDTH'; width: number }
@@ -92,6 +97,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, error: action.message };
     case 'MANUSCRIPT_STATUS':
       return { ...state, manuscriptStatus: action.status };
+    case 'SETTINGS_DATA':
+      return { ...state, settings: action.settings, settingsResult: action.requestId ? { requestId: action.requestId, errors: action.errors ?? {} } : state.settingsResult };
     case 'GRAPH_DATA':
       return { ...state, graph: action.payload };
     case 'SET_LAYOUT':
@@ -124,6 +131,8 @@ const initialState: State = {
   error: null,
   manuscriptStatus: null,
   graph: null,
+  settings: null,
+  settingsResult: null,
   uiState: DEFAULT_UI_STATE,
 };
 
@@ -153,6 +162,9 @@ export function App() {
       case 'graphData':
         dispatch({ type: 'GRAPH_DATA', payload: msg.payload });
         break;
+      case 'settingsData':
+        dispatch({ type: 'SETTINGS_DATA', settings: msg.settings, requestId: msg.requestId, errors: msg.errors });
+        break;
       case 'error':
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
@@ -178,6 +190,9 @@ export function App() {
     }
     if (view === 'graph') {
       send({ type: 'getGraph' });
+    }
+    if (view === 'settings') {
+      send({ type: 'getSettings' });
     }
   };
 
@@ -450,6 +465,14 @@ export function App() {
             <GraphTab
               payload={state.graph}
               onAction={(request) => send({ type: 'graphAction', request })}
+              onNavigate={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
+              onOpenSettings={() => handleSetView('settings')}
+            />
+          ) : state.activeView === 'settings' ? (
+            <SettingsView
+              settings={state.settings}
+              result={state.settingsResult}
+              onSave={(requestId, patch) => send({ type: 'updateSettings', requestId, patch })}
               onNavigate={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
             />
           ) : state.activeView === 'manuscript' ? (

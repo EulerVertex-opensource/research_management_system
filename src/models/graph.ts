@@ -109,6 +109,8 @@ export interface GraphPayload {
   projectRevision?: number;
   projectApproved: boolean;
   loop?: { status: string; stage: string; assetId?: string };
+  /** Auto mode is on: some approvals are granted without the researcher. */
+  autoMode?: boolean;
   manuscriptState?: string;
   nodes: GraphNodeView[];
   edges: GraphEdgeView[];

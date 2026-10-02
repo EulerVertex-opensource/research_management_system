@@ -7,11 +7,14 @@ import { renderImpact } from '../domain/manuscriptImpact';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
-  AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
+  AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
   QuestionKind, SNAPSHOT_PATH, STATE_PATH, StageReport, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
-import { IdeaKind, MAX_FAILED_PLANS, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
+import { readLoopSettings } from './LoopSettingsStore';
+import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
 import { hasSection, sectionContent } from '../domain/sections';
@@ -30,13 +33,14 @@ import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLi
 export interface CoreOptions {
   now?: () => string;
   id?: () => string;
+  /** Overrides the loop settings' iteration cap for runs this core starts (CLI `--iteration-cap`). */
   iterationCap?: number;
   /** Git for base-commit tracking and provenance; without it the loop works as before. */
   git?: LoopGit;
-  /** Who performs researcher actions on this machine; defaults to git user.email. */
+  /** Who performs researcher actions on this machine; defaults to sync.identity, then git user.email. */
   identity?: string;
   extensionVersion?: string;
-  /** Per-stage token budgets for context packs, overriding DEFAULT_CONTEXT_BUDGETS. */
+  /** Per-stage token budgets for context packs; defaults to `contextBudgets` in .research-assistant.json. */
   contextBudgets?: Partial<Record<LoopStage, number>>;
 }
 export interface NextResult { stage: LoopStage; instruction: string; brief: Record<string, unknown>; blocked?: string }
@@ -49,6 +53,8 @@ type Selection =
   | { stage: 'waiting'; reason: string };
 
 const LOCK_TTL_MS = 10 * 60 * 1000;
+/** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
+const MAX_AUTO_PASSES = 16;
 const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
 
 /**
@@ -59,20 +65,23 @@ export class ResearchLoopCore {
   private state: LoopState | undefined;
   private readonly now: () => string;
   private readonly id: () => string;
-  private readonly iterationCap: number;
+  private readonly iterationCap: number | undefined;
   private readonly git: LoopGit | undefined;
-  private identity: string | undefined;
+  private readonly identity: string | undefined;
+  private gitIdentity: string | undefined;
   private readonly extensionVersion: string | undefined;
-  private readonly contextBudgets: Partial<Record<LoopStage, number>>;
+  private readonly contextBudgets: Partial<Record<LoopStage, number>> | undefined;
+  /** Last loop settings read, for the synchronous status text. */
+  private lastSettings: LoopSettings | undefined;
 
   constructor(private readonly files: LoopFiles, private paths: ProjectPaths, options: CoreOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
     this.id = options.id ?? (() => crypto.randomUUID());
-    this.iterationCap = options.iterationCap ?? 10;
+    this.iterationCap = options.iterationCap;
     this.git = options.git;
     this.identity = options.identity;
     this.extensionVersion = options.extensionVersion;
-    this.contextBudgets = { ...DEFAULT_CONTEXT_BUDGETS, ...options.contextBudgets };
+    this.contextBudgets = options.contextBudgets;
   }
 
   setPaths(paths: ProjectPaths): void { this.paths = paths; }
@@ -80,11 +89,22 @@ export class ResearchLoopCore {
   get projectPaths(): ProjectPaths { return this.paths; }
   get shared() { return sharedFolders(this.paths.researchRoot); }
 
+  /** The researcher's loop policy, read on every use so changes apply without restarting. */
+  async loopSettings(): Promise<LoopSettings> {
+    this.lastSettings = (await readLoopSettings(this.files)).settings;
+    return this.lastSettings;
+  }
+
+  /** Raw .research-assistant.json; an unreadable file reads as empty. */
+  private async projectConfig(): Promise<{ sync?: Record<string, unknown>; contextBudgets?: unknown }> {
+    try { return JSON.parse(await this.files.readFile(this.paths.config)) as { sync?: Record<string, unknown>; contextBudgets?: unknown }; } catch { return {}; }
+  }
+
   /** Who did it, when, and on which commit; stamped on approvals and shared records. */
   async provenance(): Promise<Provenance> {
-    if (!this.identity) this.identity = (await this.git?.userEmail()) ?? 'unknown';
+    const identity = this.identity ?? normalizeSyncConfig((await this.projectConfig()).sync).identity ?? (this.gitIdentity ??= (await this.git?.userEmail()) ?? 'unknown');
     const head = await this.git?.head();
-    const result: Provenance = { performed_by: this.identity, created_at: this.now() };
+    const result: Provenance = { performed_by: identity, created_at: this.now() };
     if (head) result.base_commit = head;
     if (this.extensionVersion) result.extension_version = this.extensionVersion;
     return result;
@@ -167,7 +187,7 @@ export class ResearchLoopCore {
       if (options.goal?.trim()) return this.extend(options.goal, { provider, sessionId: options.sessionId });
       throw new Error('A research loop is already running. Use resume, or stop it first.');
     }
-    const state = newState(provider, this.id(), this.now(), this.iterationCap);
+    const state = newState(provider, this.id(), this.now(), this.iterationCap ?? (await this.loopSettings()).iterationCap);
     if (options.goal?.trim()) state.researcherInput = { kind: 'goals', text: options.goal.trim(), at: this.now() };
     this.state = state;
     if (options.sessionId) state.lock = { sessionId: options.sessionId, provider, acquiredAt: this.now(), heartbeatAt: this.now() };
@@ -247,6 +267,14 @@ export class ResearchLoopCore {
     state.lock = undefined;
     await this.save();
     await this.event('stopped');
+  }
+
+  /** Apply a changed iteration cap to the running loop too, not only to the next start. */
+  async setIterationCap(cap: number): Promise<void> {
+    if (!this.state || this.state.autopilot.iterationCap === cap) return;
+    this.state.autopilot.iterationCap = cap;
+    await this.save();
+    await this.event('iteration_cap', { cap });
   }
 
   /** Refresh the session lock; returns false when another live session owns the loop. */
@@ -329,7 +357,10 @@ export class ResearchLoopCore {
     return Boolean(raw) && isApproved((await this.approvals()).records, 'project', 'project', raw);
   }
 
-  /** Researcher approval. Only the extension (a human click, dashboard, or editor) may call this. */
+  /**
+   * Researcher approval. Only the extension (a human click, dashboard, or editor)
+   * may call this, or auto mode the researcher turned on (source `auto`).
+   */
   async approve(kind: 'project' | 'asset' | 'definition', target: string, source: string): Promise<void> {
     if (kind === 'project') {
       const raw = await this.files.readFile(this.paths.projectMd);
@@ -349,6 +380,7 @@ export class ResearchLoopCore {
       if (kind === 'asset') await this.clearPark(target, `approved (${source})`);
       await this.save();
     }
+    if (kind !== 'project' && source !== 'auto') await this.clearHold(kind, target);
     await this.event('approved', { kind, target, source });
   }
 
@@ -363,6 +395,7 @@ export class ResearchLoopCore {
     if (isApproved((await this.approvals()).records, kind, target, raw)) return false;
     await this.record(kind, target, raw, source);
     await this.refreshSnapshot([file]);
+    await this.clearHold(kind, target);
     if (this.state) {
       this.state.approvalQueue = this.state.approvalQueue.filter((item) => !(item.target === target && ['asset', 'citation', 'definition', 'counterexample'].includes(item.kind)));
       await this.clearPark(target, `approved (${source})`);
@@ -453,6 +486,7 @@ export class ResearchLoopCore {
       options.details?.push({ id, reason });
       if (options.dryRun) return;
       await this.files.writeFile(node.file, node.raw);
+      await this.addHold(node.kind, id, reason.split(':')[0]);
       await this.event('approval_invalidated', { id, reason });
     };
     const candidates = changedId ? [changedId] : [...nodes.keys()];
@@ -571,11 +605,10 @@ export class ResearchLoopCore {
     await this.event('approval_resolved', { requestId, kind: request.kind, target: request.target, decision, hasText: Boolean(text.trim()) });
     if (decision === 'later') return request;
     if (decision === 'approved') {
-      if (request.kind === 'project') await this.approve('project', 'project', source);
-      else if (request.kind === 'definition') await this.approve('definition', request.target, source);
-      else if (request.kind === 'counterexample') await this.confirmCounterexample(request.target, source);
-      else await this.approve('asset', request.target, source);
+      await this.approveRequest(request, source);
       if (request.kind === 'project' && this.state?.stage === 'review_project') await this.setStage('select');
+      // A researcher's approval can unblock auto approvals that waited on it (a dependency, say).
+      await this.autoApproveQueued();
       return request;
     }
     state.approvalQueue = state.approvalQueue.filter((item) => item.id !== requestId);
@@ -592,6 +625,162 @@ export class ResearchLoopCore {
       await this.setStage('select');
     }
     return request;
+  }
+
+  private async approveRequest(request: ApprovalRequest, source: string): Promise<void> {
+    if (request.kind === 'project') await this.approve('project', 'project', source);
+    else if (request.kind === 'definition') await this.approve('definition', request.target, source);
+    else if (request.kind === 'counterexample') await this.confirmCounterexample(request.target, source);
+    else await this.approve('asset', request.target, source);
+  }
+
+  /**
+   * Queue an approval for the researcher, or grant it when auto mode covers it.
+   * Used by the MCP request_approval tool; an approval that is already current is not queued again.
+   */
+  async requestApproval(kind: ApprovalKind, target: string, reason: string): Promise<{ status: 'queued' | 'auto_approved' | 'already_approved'; request?: ApprovalRequest }> {
+    if (await this.isCurrentlyApproved(kind, target)) return { status: 'already_approved' };
+    const request = await this.enqueueApproval(kind, target, reason);
+    await this.autoApproveQueued();
+    return { status: this.require().approvalQueue.some((item) => item.id === request.id) ? 'queued' : 'auto_approved', request };
+  }
+
+  private async isCurrentlyApproved(kind: ApprovalKind, target: string): Promise<boolean> {
+    if (kind === 'project') return this.isProjectApproved();
+    const recordKind = kind === 'definition' ? 'definition' : 'asset';
+    const raw = await this.files.readFile(await this.nodeFile(recordKind, target)).catch(() => '');
+    if (!raw) return false;
+    try { if (parseMarkdown(raw).data.status !== 'approved') return false; } catch { return false; }
+    return isApproved((await this.approvals()).records, recordKind, target, raw);
+  }
+
+  /**
+   * Grant every queued request that auto mode covers, repeating while one
+   * approval unblocks another (a dependency before its dependant). Returns
+   * `kind:target` for each request granted.
+   */
+  async autoApproveQueued(): Promise<string[]> {
+    const state = this.state;
+    if (!state?.approvalQueue.length) return [];
+    const policy = (await this.loopSettings()).autoApprove;
+    if (!policy.enabled) return [];
+    const granted: string[] = [];
+    for (let progress = true; progress;) {
+      progress = false;
+      for (const request of [...state.approvalQueue]) {
+        if (!state.approvalQueue.some((item) => item.id === request.id)) continue;
+        const rule = await this.autoRule(request, policy);
+        if (!rule) continue;
+        await this.approveRequest(request, 'auto');
+        await this.event('auto_approved', { kind: request.kind, target: request.target, rule });
+        granted.push(`${request.kind}:${request.target}`);
+        progress = true;
+      }
+    }
+    return granted;
+  }
+
+  /**
+   * Which auto-mode rule grants this request, judged from the target file
+   * itself (never from the kind the agent asked for); undefined leaves it to the researcher.
+   */
+  private async autoRule(request: ApprovalRequest, policy: AutoApprovePolicy): Promise<AutoApproveRule | undefined> {
+    if (request.kind === 'project') {
+      if (!policy.project) return undefined;
+      const raw = await this.files.readFile(this.paths.projectMd).catch(() => '');
+      return raw && researchDigest(raw, 'project') === request.digest && requiredAssetIds(raw).length && projectSection(raw, 'Main Problem') ? 'project' : undefined;
+    }
+    const kind: ResultKind = request.kind === 'definition' ? 'definition' : 'asset';
+    const file = await findNodeFile(this.files, this.paths, kind, request.target);
+    if (!file) return undefined;
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw || researchDigest(raw, kind) !== request.digest) return undefined;
+    let parsed: matter.GrayMatterFile<string>;
+    try { parsed = parseMarkdown(raw); } catch { return undefined; }
+    const data = parsed.data;
+    if (data.status !== 'draft') return undefined;
+    const hold = (await this.holds())[`${kind}:${request.target}`];
+    if (hold) {
+      const note = ` (auto mode: needs your review — ${hold.reason.replace(/_/g, ' ')})`;
+      const queued = this.state?.approvalQueue.find((item) => item.id === request.id);
+      if (queued && !queued.reason.endsWith(note)) { queued.reason += note; await this.save(); }
+      return undefined;
+    }
+    if (kind === 'definition') return policy.definitions ? 'definitions' : undefined;
+    if (data.type === 'example' && typeof data.refutes === 'string') {
+      if (request.kind !== 'counterexample' || !policy.counterexamples) return undefined;
+      const verdict = sectionContent(parsed.content, 'Verdict');
+      return /confirm/i.test(verdict) && !/reject/i.test(verdict) ? 'counterexamples' : undefined;
+    }
+    if (request.kind === 'counterexample') return undefined;
+    if (locateNodeFile(file, this.paths)?.origin === 'library') return policy.citations ? 'citations' : undefined;
+    if (isCited(data.source)) {
+      const source = data.source as { paper_id?: unknown; location?: unknown };
+      const indexed = typeof source.paper_id === 'string' && (await this.paperIds()).has(source.paper_id);
+      return policy.citations && indexed && typeof source.location === 'string' && source.location.trim() ? 'citations' : undefined;
+    }
+    // A citation request for a result that cites nothing is not a citation.
+    if (request.kind === 'citation') return undefined;
+    if (!PROVABLE_TYPES.has(data.type)) return policy.supporting ? 'supporting' : undefined;
+    return policy.proofs && (await this.proofIsVouched(request.target, raw, parsed)) ? 'proofs' : undefined;
+  }
+
+  /**
+   * A proof qualifies for auto approval only when a succeeded plan produced
+   * exactly this proof of exactly this statement, over dependencies whose
+   * statements have not changed since, and every dependency is approved.
+   */
+  private async proofIsVouched(assetId: string, raw: string, parsed: matter.GrayMatterFile<string>): Promise<boolean> {
+    if (!proofText(parsed.content) || this.state?.progress[assetId]?.changesRequested) return false;
+    const dependencies = await this.dependencyDigests(parsed.data);
+    if (!dependencies) return false;
+    const proof = proofDigest(raw);
+    const statement = statementDigest(raw);
+    const vouched = (await this.plans()).some((plan) => plan.data.type === 'plan' && plan.data.target_asset === assetId && plan.data.status === 'succeeded'
+      && plan.data.proof_digest === proof && plan.data.statement_digest === statement && sameDigests(plan.data.dependency_digests, dependencies));
+    if (!vouched) return false;
+    const records = (await this.approvals()).records;
+    for (const dep of Array.isArray(parsed.data.depends_on) ? parsed.data.depends_on as string[] : []) {
+      const depRaw = await this.files.readFile(await this.nodeFile('asset', dep)).catch(() => '');
+      if (!depRaw || !isApproved(records, 'asset', dep, depRaw)) return false;
+    }
+    return true;
+  }
+
+  /** Statement digests of an asset's dependencies and definitions; undefined when one is missing. */
+  private async dependencyDigests(data: Record<string, any>): Promise<Record<string, string> | undefined> {
+    const digests: Record<string, string> = {};
+    const refs: Array<[ResultKind, unknown]> = [
+      ...(Array.isArray(data.depends_on) ? data.depends_on : []).map((id: unknown) => ['asset', id] as [ResultKind, unknown]),
+      ...(Array.isArray(data.uses_definitions) ? data.uses_definitions : []).map((id: unknown) => ['definition', id] as [ResultKind, unknown]),
+    ];
+    for (const [kind, id] of refs) {
+      const file = await findNodeFile(this.files, this.paths, kind, String(id));
+      const raw = file ? await this.files.readFile(file).catch(() => '') : '';
+      if (!raw) return undefined;
+      digests[String(id)] = statementDigest(raw);
+    }
+    return digests;
+  }
+
+  // ---------- auto-mode holds ----------
+
+  private async holds(): Promise<Record<string, { reason: string; at: string }>> {
+    try { return JSON.parse(await this.files.readFile(AUTO_HOLDS_PATH)) as Record<string, { reason: string; at: string }>; } catch { return {}; }
+  }
+
+  /** Keep auto mode off a result whose approval was revoked by a change; only the researcher lifts it. */
+  private async addHold(kind: 'asset' | 'definition', target: string, reason: string): Promise<void> {
+    const holds = await this.holds();
+    holds[`${kind}:${target}`] = { reason, at: this.now() };
+    await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
+  }
+
+  private async clearHold(kind: 'asset' | 'definition', target: string): Promise<void> {
+    const holds = await this.holds();
+    if (!holds[`${kind}:${target}`]) return;
+    delete holds[`${kind}:${target}`];
+    await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
   }
 
   async park(assetId: string, reason: string, note?: string): Promise<void> {
@@ -835,7 +1024,18 @@ export class ResearchLoopCore {
     return (await this.plans()).find((plan) => plan.data.type === 'plan' && plan.data.target_asset === assetId && plan.data.status === 'pending')?.id;
   }
 
+  /** Select the next stage; auto approvals granted on the way are followed by a fresh selection over the updated files. */
   private async computeSelection(): Promise<Selection> {
+    let selection = await this.selectOnce();
+    for (let pass = 0; pass < MAX_AUTO_PASSES; pass++) {
+      if (!(await this.autoApproveQueued()).length) return selection;
+      selection = await this.selectOnce();
+    }
+    await this.event('auto_pass_limit', { stage: selection.stage });
+    return selection;
+  }
+
+  private async selectOnce(): Promise<Selection> {
     const state = this.require();
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     const approvals = (await this.approvals()).records;
@@ -877,6 +1077,7 @@ export class ResearchLoopCore {
         // Approved without a matching record: the researcher must re-approve.
         const parsed = parseMarkdown(asset.raw); parsed.data.status = 'draft';
         await this.files.writeFile(asset.file, stringifyMarkdown(parsed.content, parsed.data));
+        await this.addHold('asset', id, 'approved_without_record');
         await this.event('approval_invalidated', { id, reason: 'no_record' });
         asset.data.status = 'draft';
       }
@@ -1007,11 +1208,16 @@ export class ResearchLoopCore {
       missing: state.scaffoldBrief?.missing, incomplete: state.scaffoldBrief?.incomplete, researcherInput: state.researcherInput?.text,
       changesRequested: assetId ? state.progress[assetId]?.changesRequested : undefined,
       direction: assetId ? latestDirection(await this.decisions(), assetId)?.text : undefined,
-    }, sources, budget ?? this.contextBudgets[state.stage] ?? 8000);
+    }, sources, budget ?? (await this.contextBudget(state.stage)));
     const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
     await this.files.writeFile(CONTEXT_PACK_PATH, rendered.text);
     await this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id) }, null, 2) + '\n');
     return { ...rendered, manifest };
+  }
+
+  private async contextBudget(stage: LoopStage): Promise<number> {
+    const budgets: Partial<Record<string, number>> = { ...DEFAULT_CONTEXT_BUDGETS, ...(this.contextBudgets ?? normalizeContextBudgets((await this.projectConfig()).contextBudgets)) };
+    return budgets[stage] ?? 8000;
   }
 
   /** One node (or paper transcription) on request, optionally only some sections; recorded so packs can be tuned. */
@@ -1322,6 +1528,7 @@ export class ResearchLoopCore {
         if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
         state.researcherInput = undefined;
+        if ((await this.autoApproveQueued()).includes('project:project')) return finish('project.md drafted and approved automatically (auto mode). Continue with next.', 'select');
         return finish('project.md drafted; request the researcher\'s approval with request_approval(kind: "project").', 'review_project');
       }
       case 'scaffold': {
@@ -1360,6 +1567,7 @@ export class ResearchLoopCore {
           if (!sectionContent(example.content, 'Verdict')) throw new Error(`${exampleId} needs a ## Verdict.`);
           await this.enqueueApproval('counterexample', exampleId, `Independently verified counterexample to ${assetId}; confirm or reject.`);
           state.parked[assetId] = { reason: 'counterexample_pending', at: this.now() };
+          if ((await this.autoApproveQueued()).includes(`counterexample:${exampleId}`)) return finish(`Counterexample ${exampleId} confirmed automatically (auto mode); ${assetId} is deprecated. Continue with next.`, 'select', { assetId: undefined, counterexampleId: undefined });
           return finish(`Counterexample ${exampleId} verified; the researcher must confirm it. Call request_approval(kind: "counterexample", target: "${exampleId}").`, 'select', { assetId: undefined, counterexampleId: undefined });
         }
         if (report.outcome !== 'rejected') throw new Error('verify_counterexample outcome must be confirmed, rejected, or question.');
@@ -1394,23 +1602,30 @@ export class ResearchLoopCore {
           if (!proofText(asset.content)) throw new Error(`${assetId} needs the proof under ## Proof.`);
           if (asset.data.status !== 'draft') throw new Error(`${assetId} must stay draft until the researcher approves it.`);
           // Tie the succeeded plan to the proof it produced; a later proof edit shows the plan as outdated.
-          plan.data.proof_digest = proofDigest(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
+          const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+          plan.data.proof_digest = proofDigest(assetRaw);
+          // What the proof stands on, so auto mode can tell when a statement it relied on changed.
+          plan.data.statement_digest = statementDigest(assetRaw);
+          plan.data.dependency_digests = await this.dependencyDigests(asset.data) ?? {};
+          await this.clearHold('asset', assetId);
           await this.writeOwned(`${this.paths.plans}/${planId}.md`, stringifyMarkdown(plan.content, plan.data));
           await this.enqueueApproval('asset', assetId, `Proof from ${planId}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
           for (const definition of report.assumedDefinitions ?? []) if (await this.files.exists(`${this.paths.definitions}/${definition}.md`)) await this.enqueueApproval('definition', definition, `Used by the proof of ${assetId}.`);
           delete state.current.statementDigest;
+          if ((await this.autoApproveQueued()).includes(`asset:${assetId}`)) return finish(`Proof recorded for ${assetId} and approved automatically (auto mode). Continue with next.`, 'select', { assetId: undefined, planId: undefined });
           return finish(`Proof recorded for ${assetId}. Call request_approval(kind: "asset", target: "${assetId}") and continue with next.`, 'select', { assetId: undefined, planId: undefined });
         }
         if (report.outcome !== 'failed') throw new Error('execute outcome must be proved, failed, or question.');
         if (plan.data.type !== 'plan' || plan.data.status !== 'failed' || !sectionContent(plan.content, 'Failure')) throw new Error(`${planId} must have status failed and a ## Failure section.`);
         const failures = await this.failuresSinceDirection(assetId);
+        const limit = (await this.loopSettings()).maxFailedPlans;
         delete state.current.statementDigest;
-        if (failures >= MAX_FAILED_PLANS) {
+        if (failures >= limit) {
           await this.setStage('plan', { planId: undefined });
           await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId });
-          return { stage: 'plan', message: `Three approaches failed for ${assetId}. Ask the researcher with ask_researcher(kind: "blocked"); on timeout park the asset.` };
+          return { stage: 'plan', message: `${failures} approaches failed for ${assetId} (limit ${limit}). Ask the researcher with ask_researcher(kind: "blocked"); on timeout park the asset.` };
         }
-        return finish(`Plan ${planId} failed (${failures}/${MAX_FAILED_PLANS}). Next: a different plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
+        return finish(`Plan ${planId} failed (${failures}/${limit}). Next: a different plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
       }
       default:
         throw new Error(`Stage ${stage} takes no report. Run: ${LOOP_COMMAND} next`);
@@ -1436,6 +1651,7 @@ export class ResearchLoopCore {
             await this.files.writeFile(file, stringifyMarkdown(parsed.content, parsed.data));
             approvals.records = approvals.records.filter((record) => !(record.kind === kind && record.target === id));
             fixed.push(id);
+            await this.addHold(kind, id, 'approved_without_record');
             await this.event('approval_invalidated', { id, reason: 'validate' });
           }
         }
@@ -1620,6 +1836,8 @@ export class ResearchLoopCore {
     const unread = state.answers.filter((answer) => !answer.consumed);
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
+    const auto = this.lastSettings?.autoApprove;
+    if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${(['proofs', 'supporting', 'citations', 'definitions', 'counterexamples', 'project'] as const).filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
     if (state.stage === 'ready') lines.push(`If the researcher's message asks for a new result or goal, run: ${LOOP_COMMAND} extend --goal "<their goal>"`);
     lines.push(state.status === 'running' && !state.pendingQuestion ? `Continue with: ${LOOP_COMMAND} next` : 'Approval is a researcher action; never set status: approved.');
     return lines.join('\n');
@@ -1632,4 +1850,10 @@ export class ResearchLoopCore {
     for (const answer of this.state.answers) if (!answer.consumed) { answer.consumed = true; changed = true; }
     if (changed) await this.save();
   }
+}
+
+function sameDigests(stamped: unknown, current: Record<string, string>): boolean {
+  if (!stamped || typeof stamped !== 'object' || Array.isArray(stamped)) return false;
+  const entries = Object.entries(stamped as Record<string, unknown>);
+  return entries.length === Object.keys(current).length && entries.every(([id, digest]) => current[id] === digest);
 }

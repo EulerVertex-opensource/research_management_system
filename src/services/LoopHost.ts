@@ -9,7 +9,10 @@ import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
 import { ResearchLoopCore } from './ResearchLoopCore';
 import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
-import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { LoopSettings } from '../models/settings';
+import { normalizeLoopSettings } from '../domain/loopSettings';
+import { readLoopSettings, writeLoopSettings } from './LoopSettingsStore';
 import { LoopGit } from './LoopGit';
 import { AutoPullMode, PullResult, ResearchSync, autoPullDecision } from './ResearchSync';
 import { NodeGitRunner, runShell } from '../cli/nodeGit';
@@ -41,6 +44,10 @@ function syncSetting<T>(key: string, fallback: T): T {
   return vscode.workspace.getConfiguration('researchAssistant').get<T>(`sync.${key}`, fallback);
 }
 
+/** workspaceState key: sha256 of the loop settings this extension last wrote. */
+const SETTINGS_HASH_KEY = 'researchAssistant.loopSettingsHash';
+const sha256 = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
+
 /** Refocusing the window re-checks the remote at most this often. */
 const AUTO_SYNC_MIN_GAP_MS = 60_000;
 
@@ -56,6 +63,7 @@ export class LoopHost implements vscode.Disposable {
   private token = crypto.randomBytes(24).toString('hex');
   private readonly statusBar: vscode.StatusBarItem;
   private watcher: vscode.FileSystemWatcher | undefined;
+  private settingsWatcher: vscode.FileSystemWatcher | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
   private busy: Promise<unknown> = Promise.resolve();
   private readonly interactions = new Map<string, Promise<ToolResult>>();
@@ -65,6 +73,9 @@ export class LoopHost implements vscode.Disposable {
   private readonly stateChanged = new vscode.EventEmitter<void>();
   /** Fires when the loop state or an approval changes, so the dashboard can refresh its Graph tab. */
   readonly onDidChangeState = this.stateChanged.event;
+  private readonly settingsChanged = new vscode.EventEmitter<void>();
+  /** Fires when the local loop settings file changes, so an open Settings view can refresh. */
+  readonly onDidChangeSettings = this.settingsChanged.event;
   private autoSyncTimer: ReturnType<typeof setInterval> | undefined;
   private autoSyncRunning = false;
   private lastAutoSync = 0;
@@ -72,7 +83,7 @@ export class LoopHost implements vscode.Disposable {
   private announcedUpstream: string | undefined;
   private reportedFetchError: string | undefined;
 
-  constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel) {
+  constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel, private readonly memento?: vscode.Memento) {
     this.git = new LoopGit(new NodeGitRunner(files.rootUri.fsPath));
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
     this.statusBar.command = 'research-assistant.loop.openChat';
@@ -86,11 +97,16 @@ export class LoopHost implements vscode.Disposable {
     const first = !this.core;
     this.paths = paths;
     if (this.core) this.core.setPaths(paths);
-    else this.core = new ResearchLoopCore(this.files, paths, { iterationCap: setting('iterationCap', 10), git: this.git, extensionVersion: extensionVersion() });
+    else this.core = new ResearchLoopCore(this.files, paths, { git: this.git, extensionVersion: extensionVersion() });
     this.watcher?.dispose();
     this.watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, STATE_PATH));
     const refresh = () => { void this.refreshStatusBar(); this.stateChanged.fire(); };
     this.watcher.onDidChange(refresh); this.watcher.onDidCreate(refresh); this.watcher.onDidDelete(refresh);
+    this.settingsWatcher?.dispose();
+    this.settingsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, LOOP_SETTINGS_PATH));
+    const settingsRefresh = () => { void this.guardLoopSettings().then(() => { this.settingsChanged.fire(); this.stateChanged.fire(); }); };
+    this.settingsWatcher.onDidChange(settingsRefresh); this.settingsWatcher.onDidCreate(settingsRefresh); this.settingsWatcher.onDidDelete(settingsRefresh);
+    if (first) void this.migrateLoopSettings().then(() => this.guardLoopSettings());
     void this.startBridge();
     void this.refreshStatusBar();
     if (first) { this.scheduleAutoSync(); void this.autoSync(true); }
@@ -99,12 +115,77 @@ export class LoopHost implements vscode.Disposable {
   dispose(): void {
     if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
     this.watcher?.dispose();
+    this.settingsWatcher?.dispose();
+    this.settingsChanged.dispose();
     this.statusBar.dispose();
     this.stateChanged.dispose();
     this.subscriptions.forEach((item) => item.dispose());
     this.server?.close();
     void vscode.workspace.fs.delete(this.files.resolve(BRIDGE_PATH)).then(undefined, () => undefined);
     void this.updateRegistry(undefined);
+  }
+
+  // ---------- loop settings ----------
+
+  async loopSettings(): Promise<{ settings: LoopSettings; problems: string[] }> {
+    return readLoopSettings(this.files);
+  }
+
+  /** Write the researcher's loop settings and apply what changed to the running loop. */
+  async saveLoopSettings(next: LoopSettings): Promise<void> {
+    const previous = (await readLoopSettings(this.files)).settings;
+    const text = await writeLoopSettings(this.files, next);
+    await this.memento?.update(SETTINGS_HASH_KEY, sha256(text));
+    if (!this.core) return;
+    const changed = Object.fromEntries(Object.entries(next).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(previous[key as keyof LoopSettings])));
+    if (!Object.keys(changed).length) return;
+    const granted = await this.withCore(async (core) => {
+      if (!core.current) return [] as string[];
+      await core.event('settings_changed', { changed });
+      if (next.iterationCap !== previous.iterationCap) await core.setIterationCap(next.iterationCap);
+      return next.autoApprove.enabled ? core.autoApproveQueued() : [];
+    });
+    if (granted.length) void vscode.window.showInformationMessage(`Research Assistant: auto mode approved ${granted.length} waiting item(s) (${granted.map((item) => item.split(':')[1]).join(', ')}). Continue the loop in the agent chat.`);
+  }
+
+  /** Requests waiting for the researcher, and the latest approvals auto mode granted; for the Settings view. */
+  async approvalSummary(): Promise<{ queued: number; recentAuto: Array<{ at: string; kind: string; target: string }> }> {
+    if (!this.core) return { queued: 0, recentAuto: [] };
+    let state: LoopState | undefined;
+    try { state = await this.core.load(); } catch { state = undefined; }
+    const recentAuto = (await this.core.recentEvents(1000)).filter((event) => event.type === 'auto_approved').slice(-10).reverse()
+      .map((event) => ({ at: String(event.at ?? ''), kind: String(event.kind ?? ''), target: String(event.target ?? '') }));
+    return { queued: state?.approvalQueue.length ?? 0, recentAuto };
+  }
+
+  async gitIdentity(): Promise<string | undefined> { return this.git.userEmail(); }
+
+  /** Seed the settings file once from the VS Code settings it replaces. */
+  private async migrateLoopSettings(): Promise<void> {
+    if ((await readLoopSettings(this.files)).exists) return;
+    const config = vscode.workspace.getConfiguration('researchAssistant');
+    const legacy = (key: string) => { const value = config.inspect<number>(`loop.${key}`); return value?.workspaceValue ?? value?.globalValue; };
+    const settings = normalizeLoopSettings({ iterationCap: legacy('iterationCap'), questionTimeoutSeconds: legacy('questionTimeoutSeconds') }).settings;
+    const text = await writeLoopSettings(this.files, settings);
+    await this.memento?.update(SETTINGS_HASH_KEY, sha256(text));
+    this.output.appendLine('[loop] Created .research-assistant-loop/settings.json from the VS Code settings.');
+  }
+
+  /**
+   * Auto mode is turned on only from the dashboard. If the file was changed by
+   * something else (an agent bypassing the hook, say) and now enables auto mode, turn it off.
+   */
+  private async guardLoopSettings(): Promise<void> {
+    if (!this.memento) return;
+    const text = await this.files.readFile(LOOP_SETTINGS_PATH).catch(() => undefined);
+    if (text === undefined || sha256(text) === this.memento.get<string>(SETTINGS_HASH_KEY)) return;
+    const { settings } = await readLoopSettings(this.files);
+    if (!settings.autoApprove.enabled) return;
+    const repaired = { ...settings, autoApprove: { ...settings.autoApprove, enabled: false } };
+    const written = await writeLoopSettings(this.files, repaired);
+    await this.memento.update(SETTINGS_HASH_KEY, sha256(written));
+    this.output.appendLine('[loop] Auto mode was enabled outside the dashboard; turned it off.');
+    void vscode.window.showWarningMessage('Research Assistant: auto mode was switched on outside the dashboard, so it was turned off. Turn it on in the dashboard\'s Settings if you want it.');
   }
 
   /** Keep `~/.research-assistant/bridges.json` current so a globally registered MCP server (Codex) can find this project. */
@@ -193,7 +274,7 @@ export class LoopHost implements vscode.Disposable {
   }
 
   private async tool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
-    const total = setting('questionTimeoutSeconds', 240);
+    const total = (await readLoopSettings(this.files)).settings.questionTimeoutSeconds;
     const slice = sliceSeconds(args.wait_seconds);
     if (name === 'ask_researcher') {
       const question = await this.withCore((core) => core.askQuestion((args.kind as QuestionKind) ?? 'discussion', String(args.question ?? ''), { assetId: typeof args.asset_id === 'string' ? args.asset_id : undefined, options: Array.isArray(args.options) ? args.options.map(String) : undefined, timeoutSec: total }));
@@ -202,7 +283,9 @@ export class LoopHost implements vscode.Disposable {
     }
     if (name === 'request_approval') {
       const kind = args.kind as ApprovalKind; const target = String(args.target ?? ''); const summary = String(args.summary ?? '');
-      const request = await this.withCore((core) => core.enqueueApproval(kind, target, summary));
+      const outcome = await this.withCore((core) => core.requestApproval(kind, target, summary));
+      if (outcome.status !== 'queued' || !outcome.request) return { status: 'final', answered: true, decision: 'approved', auto: outcome.status === 'auto_approved', note: outcome.status === 'auto_approved' ? 'Approved automatically (auto mode, set by the researcher).' : 'Already approved; nothing to do.' };
+      const request = outcome.request;
       this.interactions.set(request.id, this.requestApproval(request.id, kind, target, summary, total));
       return this.awaitInteraction(request.id, slice);
     }
@@ -332,7 +415,9 @@ export class LoopHost implements vscode.Disposable {
     const paths = this.paths;
     let state: LoopState | undefined;
     try { state = await this.core?.load(); } catch { state = undefined; }
-    return collectGraphPayload(this.files, paths, nodes, state);
+    const payload = await collectGraphPayload(this.files, paths, nodes, state);
+    payload.autoMode = (await readLoopSettings(this.files)).settings.autoApprove.enabled;
+    return payload;
   }
 
   /** Researcher actions from the Graph tab. Agent work is never started here: it is copied for the chat. */
@@ -442,7 +527,8 @@ export class LoopHost implements vscode.Disposable {
   }
 
   async startCommand(): Promise<void> {
-    const picked = await vscode.window.showQuickPick(PROVIDER_IDS.map((id) => ({ label: AGENT_PROVIDERS[id].label, description: `type ${invocation(id)} in the ${AGENT_PROVIDERS[id].label} chat`, provider: id })),
+    const preferred = setting('useDefaultAgentOnStart', false) ? this.preferredProvider() : undefined;
+    const picked = preferred ? { provider: preferred } : await vscode.window.showQuickPick(PROVIDER_IDS.map((id) => ({ label: AGENT_PROVIDERS[id].label, description: `type ${invocation(id)} in the ${AGENT_PROVIDERS[id].label} chat`, provider: id })),
       { title: 'Research Assistant · Start research loop', placeHolder: 'Which agent chat will drive the loop?' });
     if (!picked) return;
     const goal = await vscode.window.showInputBox({ title: 'Research goal', prompt: 'Describe the research goal, the main claim, and constraints (optional; the agent can ask).', ignoreFocusOut: true });

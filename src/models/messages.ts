@@ -1,4 +1,5 @@
 import type { GraphAction, GraphPayload } from './graph';
+import type { SettingsErrors, SettingsPatch, SettingsPayload } from './settings';
 import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
@@ -10,6 +11,8 @@ export type ExtensionMessage =
   | { type: 'papersData'; papers: PaperEntry[] }
   | { type: 'manuscriptStatus'; status: ManuscriptStatus }
   | { type: 'graphData'; payload: GraphPayload }
+  /** Current settings; after an update, `requestId` echoes it and `errors` lists invalid fields (nothing was written then). */
+  | { type: 'settingsData'; settings: SettingsPayload; requestId?: string; errors?: SettingsErrors }
   | { type: 'error'; message: string };
 
 // Messages sent from the webview to the extension
@@ -39,4 +42,6 @@ export type WebviewMessage =
   | { type: 'installLatexWorkshop' }
   | { type: 'getGraph' }
   | { type: 'graphAction'; request: GraphAction }
+  | { type: 'getSettings' }
+  | { type: 'updateSettings'; requestId: string; patch: SettingsPatch }
   | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string; sourceUrl: string };

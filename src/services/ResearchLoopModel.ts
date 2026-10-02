@@ -37,6 +37,10 @@ export const SYNC_PATH = `${STATE_DIR}/sync.json`;
  * because an older engine misreads newer files (e.g. split approvals).
  */
 export const DRIVER_PATH = `${STATE_DIR}/driver.json`;
+/** Local loop policy (auto mode, limits) the researcher sets in the dashboard; the agent may not write it. */
+export const LOOP_SETTINGS_PATH = `${STATE_DIR}/settings.json`;
+/** Results auto mode must leave to the researcher, e.g. after a dependency changed under an approval. */
+export const AUTO_HOLDS_PATH = `${STATE_DIR}/auto-holds.json`;
 /** User-level registry of running extension bridges, so a globally registered MCP server can find the project. */
 export const BRIDGE_REGISTRY = ['.research-assistant', 'bridges.json'];
 export interface BridgeEntry { root: string; port: number; token: string; pid: number; startedAt: string }

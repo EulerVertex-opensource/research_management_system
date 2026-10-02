@@ -16,7 +16,7 @@ Before planning a step around a missing lemma, run `research-loop library search
   - `## Verification`: how the steps combine into the exact statement;
   - `## Assumed definitions`: draft definitions and unproved dependencies relied on;
   - with failed plans present, `## Difference from failed plans`: one bullet per failed plan ID naming the new information or route.
-- If the loop reports three failures since the last researcher direction, do not write a fourth plan; report `question`.
+- If the loop reports the failed-plan limit is reached since the last researcher direction, do not write another plan; report `question`.
 - Unclear statement or missing definition: report `question --question "..."`.
 
 Never change the statement; a revised statement gets a new asset ID. Never set `status: approved`.

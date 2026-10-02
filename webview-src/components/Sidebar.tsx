@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type SidebarView = 'project' | 'graph' | 'papers' | 'assets' | 'definitions' | 'library' | 'ideas' | 'plans' | 'manuscript';
+export type SidebarView = 'project' | 'graph' | 'papers' | 'assets' | 'definitions' | 'library' | 'ideas' | 'plans' | 'manuscript' | 'settings';
 
 const ITEMS: { id: SidebarView; label: string }[] = [
   { id: 'project', label: 'Project' },
@@ -17,6 +17,20 @@ const ITEMS: { id: SidebarView; label: string }[] = [
 interface Props {
   active: SidebarView;
   onChange: (view: SidebarView) => void;
+}
+
+function itemStyle(selected: boolean): React.CSSProperties {
+  return {
+    display: 'block',
+    padding: '7px 14px',
+    border: 'none',
+    background: selected ? 'var(--vscode-list-activeSelectionBackground)' : 'transparent',
+    color: selected ? 'var(--vscode-list-activeSelectionForeground)' : 'var(--vscode-foreground)',
+    cursor: 'pointer',
+    textAlign: 'left',
+    fontSize: 13,
+    width: '100%',
+  };
 }
 
 export function Sidebar({ active, onChange }: Props) {
@@ -36,24 +50,13 @@ export function Sidebar({ active, onChange }: Props) {
         Research
       </div>
       {ITEMS.map((item) => (
-        <button
-          key={item.id}
-          onClick={() => onChange(item.id)}
-          style={{
-            display: 'block',
-            padding: '7px 14px',
-            border: 'none',
-            background: active === item.id ? 'var(--vscode-list-activeSelectionBackground)' : 'transparent',
-            color: active === item.id ? 'var(--vscode-list-activeSelectionForeground)' : 'var(--vscode-foreground)',
-            cursor: 'pointer',
-            textAlign: 'left',
-            fontSize: 13,
-            width: '100%',
-          }}
-        >
+        <button key={item.id} onClick={() => onChange(item.id)} style={itemStyle(active === item.id)}>
           {item.label}
         </button>
       ))}
+      <div style={{ marginTop: 'auto', borderTop: '1px solid var(--vscode-panel-border)', paddingTop: 4 }}>
+        <button onClick={() => onChange('settings')} style={itemStyle(active === 'settings')}>⚙ Settings</button>
+      </div>
     </nav>
   );
 }

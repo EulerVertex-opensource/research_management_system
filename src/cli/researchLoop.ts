@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
-import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, LoopStage, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { HookInput, contextOutput, denyOutput, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { hasContextPack } from '../services/ResearchContext';
 import { migrateApprovals } from '../services/ApprovalStore';
@@ -86,20 +86,10 @@ function staleDriver(root: string): string | undefined {
 
 async function openCore(root: string, iterationCap?: number, git?: LoopGit): Promise<ResearchLoopCore> {
   const paths = await loadProjectPaths(root);
-  const sync = await loadSyncConfig(root).catch(() => undefined);
-  const contextBudgets = await loadContextBudgets(root);
-  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, identity: sync?.identity, extensionVersion: EXTENSION_VERSION, contextBudgets });
+  // Identity, context budgets, and the loop policy are read from the project files on use.
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, extensionVersion: EXTENSION_VERSION });
   await core.load();
   return core;
-}
-
-/** Optional `contextBudgets: { <stage>: tokens }` in .research-assistant.json. */
-async function loadContextBudgets(root: string): Promise<Partial<Record<LoopStage, number>> | undefined> {
-  try {
-    const raw = JSON.parse(fs.readFileSync(path.join(root, '.research-assistant.json'), 'utf8')) as { contextBudgets?: Record<string, unknown> };
-    const budgets = Object.entries(raw.contextBudgets ?? {}).filter(([, value]) => typeof value === 'number' && value > 0);
-    return budgets.length ? Object.fromEntries(budgets) as Partial<Record<LoopStage, number>> : undefined;
-  } catch { return undefined; }
 }
 
 function describePreview(preview: PublishPreview): string {

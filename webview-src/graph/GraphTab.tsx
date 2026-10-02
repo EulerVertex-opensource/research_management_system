@@ -13,6 +13,7 @@ interface Props {
   payload: GraphPayload | null;
   onAction: (action: GraphAction) => void;
   onNavigate: (id: string) => void;
+  onOpenSettings: () => void;
 }
 
 const SUBVIEWS: { id: GraphSubview; label: string; hint: string }[] = [
@@ -23,7 +24,7 @@ const SUBVIEWS: { id: GraphSubview; label: string; hint: string }[] = [
 ];
 
 /** The Graph tab: one derived graph, four views. Graph explains, the queue acts, the matrix shows coverage. */
-export function GraphTab({ payload, onAction, onNavigate }: Props) {
+export function GraphTab({ payload, onAction, onNavigate, onOpenSettings }: Props) {
   const [subview, setSubview] = useState<GraphSubview>('attention');
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [options, setOptions] = useState<ViewOptions>(DEFAULT_OPTIONS);
@@ -50,6 +51,10 @@ export function GraphTab({ payload, onAction, onNavigate }: Props) {
           ))}
         </div>
         <span style={{ fontSize: 12 }}><span style={{ color: COLOR.muted }}>Research:</span> {research}{payload.projectApproved ? '' : ' · project.md not approved'}</span>
+        {payload.autoMode && (
+          <button onClick={onOpenSettings} title="Auto mode is on: some results are approved without asking you. Open Settings."
+            style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.6, padding: '1px 6px', borderRadius: 3, cursor: 'pointer', border: `1px solid ${COLOR.waiting}`, color: COLOR.waiting, background: 'transparent' }}>AUTO</button>
+        )}
         <span style={{ fontSize: 12 }}>
           <span style={{ color: COLOR.muted }}>Manuscript:</span>{' '}
           <span style={{ color: SECTION_STATE_COLOR[payload.manuscriptState ?? ''] ?? COLOR.muted }}>{payload.manuscriptState ?? 'no outline'}</span>
