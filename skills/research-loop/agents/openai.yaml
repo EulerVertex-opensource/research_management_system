@@ -1,0 +1,8 @@
+# Codex metadata for the research-loop skill. Claude Code ignores this file and
+# reads `disable-model-invocation` from SKILL.md; both mean "run only when the
+# researcher types the skill name" ($research-loop in Codex).
+interface:
+  display_name: "Research loop"
+  short_description: "Drive the human-in-the-loop mathematical research loop"
+policy:
+  allow_implicit_invocation: false

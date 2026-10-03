@@ -1,16 +1,15 @@
 # Paper import output format
 
-Prefer this layout when the workspace does not already define another paper layout:
+Read `.research-assistant.json` first. For the default shared Overleaf layout, use:
 
 ```text
-papers/<slug>/
+research/papers/<slug>/
   metadata.yaml
-  source.pdf
   paper.md
   figures/
 ```
 
-Use `raw_papers/<slug>.pdf` as the authoritative PDF location when maintaining compatibility with the current Research Assistant layout. The Markdown and metadata may still live under `papers/<slug>/`.
+Keep the authoritative PDF at `research-local/raw_papers/<slug>.pdf` by default. This directory is deliberately ignored by Git and may be changed in project configuration. Do not copy the PDF into the shared paper directory.
 
 ## metadata.yaml
 
@@ -19,7 +18,8 @@ Record at least:
 ```yaml
 slug: example_2024
 title: Example title
-source_pdf: ../../raw_papers/example_2024.pdf
+source_url: https://arxiv.org/abs/0000.00000
+source_pdf_local: research-local/raw_papers/example_2024.pdf
 markdown: paper.md
 extraction:
   method: embedded-text

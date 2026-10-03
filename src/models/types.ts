@@ -1,44 +1,47 @@
-export type NodeType =
-  | 'theorem'
-  | 'lemma'
-  | 'proposition'
-  | 'definition'
-  | 'example'
-  | 'construction'
-  | 'remark'
-  | 'idea';
+import type { IdeaKind, NodeType, ResearchStatus } from '../domain/nodeKinds';
+import type { NodeSource } from '../domain/schema';
 
-export type NodeStatus = 'draft' | 'approved' | 'deprecated' | 'archived';
+export type { IdeaKind, NodeStatus, NodeType, PlanStatus, IdeaStatus, ResearchStatus } from '../domain/nodeKinds';
+export type { NodeSource } from '../domain/schema';
 
-export interface NodeSource {
-  kind: 'paper' | 'self_proved' | 'textbook' | 'note';
-  paper_id?: string;
-  location?: string;
-}
-
+/** Frontmatter as the dashboard edits it: forward relations only; reverse ones are derived. */
 export interface NodeFrontmatter {
   type: NodeType;
   title: string;
-  status: NodeStatus;
+  status?: ResearchStatus;
   tags: string[];
   source?: NodeSource;
   depends_on: string[];
-  used_in: string[];
+  uses_definitions: string[];
   related_assets: string[];
+  target_asset?: string;
+  inspired_by?: string[];
+  refutes?: string;
+  idea_kind?: IdeaKind;
 }
 
-export interface ResearchNode {
+export interface ResearchNode extends NodeFrontmatter {
   id: string;
   filePath: string;
-  type: NodeType;
-  title: string;
-  status: NodeStatus;
-  tags: string[];
-  source?: NodeSource;
-  depends_on: string[];
-  used_in: string[];
-  related_assets: string[];
   body: string;
+  /** 1-based position in dependency order among active assets or definitions; derived, never stored. */
+  order?: number;
+  /** A succeeded plan whose target's proof changed since the plan produced it; derived, never stored. */
+  outdated?: boolean;
+  /** Set on library nodes (known results under the library folder); derived from the path. */
+  origin?: 'library';
+  collection?: string;
+}
+
+/** What the dashboard derives for project.md instead of storing it there: progress, open questions, writing. */
+export interface ProjectSummary {
+  /** project.md predates schema 2; `research-maintenance migrate` upgrades it. */
+  legacy: boolean;
+  required: Array<{ id: string; role?: string; title?: string; status?: string }>;
+  assets: { approved: number; draft: number };
+  openQuestions: Array<{ id: string; title: string }>;
+  /** Section titles in manuscript order, or empty when there is no outline yet. */
+  writingSections: string[];
 }
 
 export type LayoutMode = 'editor' | 'preview' | 'split';
@@ -63,10 +66,112 @@ export interface PaperEntry {
   bibEntry: string;  // full @type{slug,...} bib entry text
 }
 
-export interface AIService {
-  ask(
-    prompt: string,
-    context: ResearchNode[],
-    onChunk: (chunk: string) => void
-  ): Promise<void>;
+export type ProjectLayout = 'overleaf-shared' | 'legacy';
+
+/** Git collaboration settings for `research-loop sync`. */
+export interface SyncConfig {
+  /** Main collaboration remote (GitHub or Overleaf). */
+  remote: string;
+  /** Branch on `remote`; defaults to the current branch. */
+  branch?: string;
+  /** Optional Overleaf remote that receives a fast-forward push after publishing to `remote`. */
+  overleafRemote?: string;
+  overleafBranch: string;
+  strategy: 'rebase' | 'merge';
+  /** Extra paths committed on publish, besides the research folders and the manuscript. */
+  include: string[];
+  /** Command that compiles the manuscript for `sync prepare --latex`, e.g. "latexmk -pdf -interaction=nonstopmode main.tex". */
+  latexCommand?: string;
+  signCommits: boolean;
+  /** Overrides git user.email as the collaborator identity in records. */
+  identity?: string;
+}
+
+export interface ResearchAssistantConfig {
+  version: 1;
+  layout: ProjectLayout;
+  sync?: SyncConfig;
+  /** Per-stage token budgets for the loop's context packs, overriding the defaults. */
+  contextBudgets?: Record<string, number>;
+  latex: {
+    projectRoot: string;
+    main: string;
+    bibliography: string;
+    macros: string[];
+    notations: string | null;
+    sections: string;
+  };
+  research: {
+    root: string;
+    project: string;
+    paperIndex: string;
+    assets: string;
+    definitions: string;
+    ideas: string;
+    plans: string;
+    papers: string;
+    localSourcePdfs: string;
+    /** Known results imported from earlier work or papers; defaults to `<root>/library`. */
+    library?: string;
+  };
+}
+
+/** All paths are workspace-relative and normalized to POSIX separators. */
+export interface ProjectPaths {
+  config: string;
+  mainTex: string;
+  bibliography: string;
+  macroFiles: string[];
+  notations: string | null;
+  sections: string;
+  researchRoot: string;
+  projectMd: string;
+  paperIndex: string;
+  assets: string;
+  definitions: string;
+  ideas: string;
+  plans: string;
+  /** Library of known results: `<library>/<collection>/assets|definitions/lib_*.md`. */
+  library: string;
+  writingRoot: string;
+  writingOutline: string;
+  writingSections: string;
+  papers: string;
+  localSourcePdfs: string;
+}
+
+export interface ProjectPathSummary {
+  layout: ProjectLayout;
+  mainTex: string;
+  bibliography: string;
+  macroFiles: string[];
+  notations: string | null;
+  sections: string;
+  projectMd: string;
+  paperIndex: string;
+  assets: string;
+  definitions: string;
+  ideas: string;
+  plans: string;
+  papers: string;
+  localSourcePdfs: string;
+}
+
+export type ManuscriptBuildPhase =
+  | 'idle'
+  | 'compiling'
+  | 'succeeded'
+  | 'failed'
+  | 'unavailable';
+
+export interface ManuscriptStatus {
+  phase: ManuscriptBuildPhase;
+  mainTex: string;
+  outputPdf: string;
+  pdfUri?: string;
+  pdfVersion?: number;
+  latexWorkshopInstalled: boolean;
+  autoBuild: boolean;
+  configurationConflicts: string[];
+  message?: string;
 }

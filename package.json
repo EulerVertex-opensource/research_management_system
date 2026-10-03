@@ -1,40 +1,177 @@
 {
   "name": "research-management-system",
   "displayName": "Research Assistant",
-  "description": "AI-assisted mathematical research management for VSCode",
-  "version": "0.0.1",
+  "description": "Shared AI-assisted mathematical research context for Overleaf Git projects in VS Code",
+  "version": "0.0.3",
   "publisher": "tianhao",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TianhaoW/research_management_system.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "research-assistant.openDashboard",
         "title": "Research Assistant: Open Dashboard"
+      },
+      {
+        "command": "research-assistant.refreshAgentSetup",
+        "title": "Research Assistant: Refresh Project Setup"
+      },
+      {
+        "command": "research-assistant.showOutput",
+        "title": "Research Assistant: Show Output"
+      },
+      {
+        "command": "research-assistant.loop.start",
+        "title": "Research Assistant: Start Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.extend",
+        "title": "Research Assistant: Extend Research Project (Add a Goal)"
+      },
+      {
+        "command": "research-assistant.loop.pause",
+        "title": "Research Assistant: Pause Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.resume",
+        "title": "Research Assistant: Resume Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.stop",
+        "title": "Research Assistant: Stop Research Loop"
+      },
+      {
+        "command": "research-assistant.loop.answerQuestion",
+        "title": "Research Assistant: Answer Pending Loop Question"
+      },
+      {
+        "command": "research-assistant.loop.approve",
+        "title": "Research Assistant: Review Pending Approvals"
+      },
+      {
+        "command": "research-assistant.loop.captureIdea",
+        "title": "Research Assistant: Capture Research Idea"
+      },
+      {
+        "command": "research-assistant.loop.syncStatus",
+        "title": "Research Assistant: Git Sync Status"
+      },
+      {
+        "command": "research-assistant.loop.syncPull",
+        "title": "Research Assistant: Pull Collaborators' Research (Git)"
+      },
+      {
+        "command": "research-assistant.loop.syncPrepare",
+        "title": "Research Assistant: Check Research Before Sharing (Git)"
+      },
+      {
+        "command": "research-assistant.loop.syncPublish",
+        "title": "Research Assistant: Publish Research to Collaborators (Git)"
+      },
+      {
+        "command": "research-assistant.loop.syncNow",
+        "title": "Research Assistant: Sync Research (Pull and Publish)"
+      },
+      {
+        "command": "research-assistant.loop.openChat",
+        "title": "Research Assistant: Open Agent Chat"
+      },
+      {
+        "command": "research-assistant.loop.refreshIntegration",
+        "title": "Research Assistant: Refresh Agent Hooks and MCP Setup"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Research Assistant",
+      "properties": {
+        "researchAssistant.loop.questionTimeoutSeconds": {
+          "type": "number",
+          "default": 240,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "How long a research-loop question popup waits for you before the agent continues in auto mode.",
+          "deprecationMessage": "Moved to the dashboard's Settings view (.research-assistant-loop/settings.json); this value only seeds that file once."
+        },
+        "researchAssistant.loop.iterationCap": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Automatic continuations the Stop hook allows per chat session before pausing the loop.",
+          "deprecationMessage": "Moved to the dashboard's Settings view (.research-assistant-loop/settings.json); this value only seeds that file once."
+        },
+        "researchAssistant.loop.provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "claude",
+            "codex"
+          ],
+          "default": "auto",
+          "description": "Which agent chat the status bar and commands open."
+        },
+        "researchAssistant.loop.useDefaultAgentOnStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the research loop with the default agent instead of asking which agent chat drives it."
+        },
+        "researchAssistant.sync.autoPull": {
+          "type": "string",
+          "enum": [
+            "pull",
+            "notify",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Pull automatically when the working tree is clean and the research loop is not running; otherwise notify.",
+            "Only notify when the sync remote has new commits.",
+            "Never check the remote automatically."
+          ],
+          "default": "pull",
+          "description": "Check the sync remote (e.g. Overleaf) for new commits on startup, when the window regains focus, and on an interval."
+        },
+        "researchAssistant.sync.autoPullIntervalMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "Minutes between automatic remote checks; 0 checks only on startup and when the window regains focus."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "node esbuild.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "test:asset-order": "npm run build && node --test tests/*.test.cjs",
     "watch": "node esbuild.js --watch",
     "vscode:prepublish": "node esbuild.js"
   },
   "dependencies": {
     "gray-matter": "^4.0.3",
+    "jsonc-parser": "^3.3.1",
     "katex": "^0.17.0",
     "marked": "^18.0.4",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

@@ -1,24 +1,33 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
+import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
+import { AGENT_PROVIDERS, PROVIDER_IDS } from './AgentProviders';
+import { migrateApprovals } from './ApprovalStore';
+import { sharedFolders } from './ResearchLoopModel';
+import { PROJECT_TEMPLATE } from '../domain/project';
+import { generatedAgentIgnores } from './AgentIntegrationCore';
+import { ASSET_TYPE_LIST } from '../domain/nodeKinds';
 
-const RESEARCH_FOLDERS = [
-  'assets',
-  'ideas',
-  'raw_papers',
-  'manuscript/sections',
-  '.research/workflows',
-  '.agents/skills/import-math-paper/references',
-];
+const GITIGNORE_START = '# research-assistant:local:start';
+const WRITING_OUTLINE_TEMPLATE = `# Manuscript outline
 
-const INITIAL_FILES: Record<string, string> = {
-  'project.md': `# Project\n\n## Main Problem\n\n## Background\n\n## Current Goals\n\n## Known Results\n\n## Open Questions\n\n## Writing Status\n`,
-  'papers.md': `# Papers\n`,
-  'manuscript/macro.tex': `% Centralized macros and theorem environments\n`,
-  'manuscript/notations.tex': `% Centralized notation reference\n`,
-  'manuscript/reference.bib': `% BibTeX references\n`,
-  'manuscript/main.tex':
-    `\\documentclass{amsart}\n\\input{macro}\n\\input{notations}\n\n\\begin{document}\n\n\\end{document}\n`,
-};
+List sections in presentation order using stable IDs. Each entry points to a brief in sections/<id>.md. Keep proof plans in the configured research plans folder.
+
+## Sections
+
+`;
+const GITIGNORE_END = '# research-assistant:local:end';
+const GITATTRIBUTES_START = '# research-assistant:merge:start';
+const GITATTRIBUTES_END = '# research-assistant:merge:end';
+const LATEX_WORKSHOP_ID = 'james-yu.latex-workshop';
+
+export const LATEX_OUTPUT_DIRECTORY = '.latex-out';
+export const LATEX_WORKSHOP_SETTINGS = {
+  'latex-workshop.latex.outDir': `%WORKSPACE_FOLDER%/${LATEX_OUTPUT_DIRECTORY}`,
+  'latex-workshop.latex.auxDir': '%OUTDIR%',
+  'latex-workshop.latex.autoBuild.run': 'never',
+} as const;
 
 export class FileService {
   constructor(private readonly workspaceRoot: vscode.Uri) {}
@@ -35,12 +44,31 @@ export class FileService {
 
   async writeFile(relativePath: string, content: string): Promise<void> {
     const uri = this.resolve(relativePath);
+    await this.ensureParentDirectory(relativePath);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
   }
 
   async writeBinary(relativePath: string, data: Uint8Array): Promise<void> {
     const uri = this.resolve(relativePath);
+    await this.ensureParentDirectory(relativePath);
     await vscode.workspace.fs.writeFile(uri, data);
+  }
+
+  async exists(relativePath: string): Promise<boolean> {
+    try {
+      await vscode.workspace.fs.stat(this.resolve(relativePath));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async deleteFile(relativePath: string): Promise<void> {
+    try {
+      await vscode.workspace.fs.delete(this.resolve(relativePath));
+    } catch {
+      // already gone
+    }
   }
 
   async renameFile(oldRelativePath: string, newRelativePath: string): Promise<void> {
@@ -56,6 +84,15 @@ export class FileService {
       return entries
         .filter(([name, type]) => type === vscode.FileType.File && name.endsWith(extension))
         .map(([name]) => path.posix.join(relativeDir, name));
+    } catch {
+      return [];
+    }
+  }
+
+  async listDirs(relativeDir: string): Promise<string[]> {
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(this.resolve(relativeDir));
+      return entries.filter(([name, type]) => type === vscode.FileType.Directory && !name.startsWith('.')).map(([name]) => path.posix.join(relativeDir, name)).sort();
     } catch {
       return [];
     }
@@ -81,8 +118,28 @@ export class FileService {
     return results;
   }
 
-  async ensureProjectStructure(): Promise<void> {
-    for (const folder of RESEARCH_FOLDERS) {
+  async ensureProjectStructure(
+    config: ResearchAssistantConfig,
+    paths: ProjectPaths,
+    createLatexDefaults: boolean,
+    bundledSkillNames: string[]
+  ): Promise<void> {
+    const researchFolders = [
+      paths.researchRoot,
+      paths.assets,
+      paths.definitions,
+      paths.ideas,
+      paths.plans,
+      paths.library,
+      paths.writingSections,
+      paths.papers,
+      paths.localSourcePdfs,
+      LATEX_OUTPUT_DIRECTORY,
+      ...PROVIDER_IDS.map((id) => AGENT_PROVIDERS[id].skillsDir),
+      '.github',
+    ];
+
+    for (const folder of researchFolders) {
       const uri = this.resolve(folder);
       try {
         await vscode.workspace.fs.createDirectory(uri);
@@ -91,14 +148,176 @@ export class FileService {
       }
     }
 
-    for (const [relativePath, content] of Object.entries(INITIAL_FILES)) {
-      const uri = this.resolve(relativePath);
-      try {
-        await vscode.workspace.fs.stat(uri);
-      } catch {
-        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-      }
+    await this.writeIfMissing(paths.projectMd, PROJECT_TEMPLATE);
+    await this.writeIfMissing(paths.paperIndex, '# Papers\n');
+    await this.writeIfMissing(paths.writingOutline, WRITING_OUTLINE_TEMPLATE);
+
+    if (config.layout === 'overleaf-shared') {
+      await this.writeIfMissing(`${paths.researchRoot}/README.md`, this.researchReadme(paths));
     }
+
+    await this.upsertGitignore(paths, bundledSkillNames);
+    await this.upsertGitattributes(paths);
+    // One file per approval, so collaborators approving different results do not conflict.
+    await migrateApprovals(this, paths.researchRoot);
+    await this.ensureLatexWorkspaceConfiguration();
+
+    if (createLatexDefaults) {
+      await vscode.workspace.fs.createDirectory(this.resolve(paths.sections));
+      for (const macroPath of paths.macroFiles) {
+        await this.writeIfMissing(macroPath, '% Centralized macros and theorem environments\n');
+      }
+      if (paths.notations) {
+        await this.writeIfMissing(paths.notations, '% Centralized notation reference\n');
+      }
+      await this.writeIfMissing(paths.bibliography, '% BibTeX references\n');
+
+      const preambleInputs = [
+        ...paths.macroFiles,
+        ...(paths.notations ? [paths.notations] : []),
+      ].map((inputPath) => `\\input{${inputPath.replace(/\.tex$/i, '')}}`).join('\n');
+      await this.writeIfMissing(
+        paths.mainTex,
+        `\\documentclass{amsart}\n${preambleInputs}${preambleInputs ? '\n' : ''}\n\\begin{document}\n\n% research-assistant:sections:start\n% research-assistant:sections:end\n\n\\end{document}\n`
+      );
+    }
+  }
+
+  private async writeIfMissing(relativePath: string, content: string): Promise<void> {
+    if (!(await this.exists(relativePath))) await this.writeFile(relativePath, content);
+  }
+
+  private async ensureParentDirectory(relativePath: string): Promise<void> {
+    const parent = path.posix.dirname(relativePath);
+    if (parent !== '.') await vscode.workspace.fs.createDirectory(this.resolve(parent));
+  }
+
+  private researchReadme(paths: ProjectPaths): string {
+    const shared = sharedFolders(paths.researchRoot);
+    return `# Shared research context
+
+This directory is the version-controlled source of truth for Research Assistant.
+
+- \`${paths.projectMd}\` is the research contract: the problem, scope, intended contribution, and the \`required_results\` that decide when the work is complete.
+- \`${paths.assets}/\` contains ${ASSET_TYPE_LIST.join(', ')} nodes.
+- \`${paths.definitions}/\` contains mathematical definitions and their notation.
+- \`${paths.ideas}/\` contains freeform research ideas.
+- \`${paths.plans}/\` contains proof plans, one per attempt; failed and succeeded plans are kept as the record of what was tried.
+- \`${paths.library}/<collection>/assets|definitions/\` holds known results imported from earlier work or papers, grouped by source (one folder per collection). Their IDs start with \`lib_\`; project results reference them in \`depends_on\`/\`uses_definitions\`. A researcher approves each one once; the loop never re-proves them. Library files can be edited at any time (git keeps the history); editing an approved one returns it to draft for re-approval.
+- \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
+- \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
+- \`${shared.checks}/\` records falsification checks: what was tried against which statement, and what was not covered.
+- \`${shared.decisions}/\` records researcher decisions (new directions, change requests, parked results); \`${shared.handoffs}/\` says where work stopped and what comes next.
+- \`${shared.approvals}/\` holds one approval record per approved result; approvals are made only by a researcher in VS Code.
+
+Share work with \`research-loop sync prepare\` and the "Publish Research to Collaborators" command; bring in collaborators' work with \`research-loop sync pull\`. Keep research discussion in these files rather than Overleaf comments, which Git synchronization can drop.
+
+Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, which is ignored by Git. Record stable URLs, DOI/arXiv identifiers, checksums, and page-level provenance in shared paper metadata so collaborators can retrieve the same source.
+`;
+  }
+
+  /** Rewrite the managed .gitignore block; writes only when it changed (e.g. a newer extension bundles a new skill). */
+  async upsertGitignore(paths: ProjectPaths, bundledSkillNames: string[]): Promise<void> {
+    const current = await this.readFile('.gitignore').catch(() => '');
+    const localPdfs = paths.localSourcePdfs.replace(/\/$/, '');
+    const managed = [
+      GITIGNORE_START,
+      '# Local-only research files, source PDFs, and LaTeX output',
+      '/research-local/',
+      ...(localPdfs.startsWith('research-local/') ? [] : [`/${localPdfs}/`]),
+      `/${LATEX_OUTPUT_DIRECTORY}/`,
+      '*.aux',
+      '*.fdb_latexmk',
+      '*.fls',
+      '*.log',
+      '*.out',
+      '*.run.xml',
+      '*.synctex.gz',
+      '*.toc',
+      '__pycache__/',
+      '*.pyc',
+      '# Recreated by the same Research Assistant extension version',
+      '# Preinstalled skills, worker subagents, hooks, and MCP files are local; your own skills and agents can be tracked',
+      ...generatedAgentIgnores(bundledSkillNames),
+      '/.github/copilot-instructions.md',
+      '/AGENTS.md',
+      '/CLAUDE.md',
+      '/.vscode/settings.json',
+      '/.vscode/extensions.json',
+      '/.research-assistant-loop/',
+      ...(paths.researchRoot !== '.' ? [`/${paths.researchRoot}/README.md`] : []),
+      GITIGNORE_END,
+    ].join('\n');
+    const start = current.indexOf(GITIGNORE_START);
+    const end = current.indexOf(GITIGNORE_END);
+    const updated = start !== -1 && end > start
+      ? current.slice(0, start) + managed + current.slice(end + GITIGNORE_END.length)
+      : current.trim()
+        ? `${current.trimEnd()}\n\n${managed}\n`
+        : `${managed}\n`;
+    if (updated !== current) await this.writeFile('.gitignore', updated);
+  }
+
+  /** Append-only indexes merge by keeping both sides' new entries instead of conflicting. */
+  private async upsertGitattributes(paths: ProjectPaths): Promise<void> {
+    const current = await this.readFile('.gitattributes').catch(() => '');
+    const managed = [
+      GITATTRIBUTES_START,
+      '# Research Assistant appends to these; union merge keeps both collaborators\' new entries',
+      `/${paths.paperIndex} merge=union`,
+      `/${paths.bibliography} merge=union`,
+      GITATTRIBUTES_END,
+    ].join('\n');
+    const start = current.indexOf(GITATTRIBUTES_START);
+    const end = current.indexOf(GITATTRIBUTES_END);
+    const updated = start !== -1 && end > start
+      ? current.slice(0, start) + managed + current.slice(end + GITATTRIBUTES_END.length)
+      : current.trim() ? `${current.trimEnd()}\n\n${managed}\n` : `${managed}\n`;
+    if (updated !== current) await this.writeFile('.gitattributes', updated);
+  }
+
+  private async ensureLatexWorkspaceConfiguration(): Promise<void> {
+    const existingSettings = await this.readFile('.vscode/settings.json').catch(() => '');
+    let settings = existingSettings || '{}\n';
+    const parsedSettings = this.parseJsoncObject(settings, '.vscode/settings.json');
+    for (const [key, value] of Object.entries(LATEX_WORKSHOP_SETTINGS)) {
+      if (parsedSettings && Object.prototype.hasOwnProperty.call(parsedSettings, key)) continue;
+      settings = applyEdits(settings, modify(settings, [key], value, {
+        formattingOptions: { insertSpaces: true, tabSize: 2 },
+      }));
+    }
+    settings = settings.endsWith('\n') ? settings : `${settings}\n`;
+    if (settings !== existingSettings) await this.writeFile('.vscode/settings.json', settings);
+
+    const existingExtensions = await this.readFile('.vscode/extensions.json').catch(() => '');
+    let extensions = existingExtensions || '{}\n';
+    const parsedExtensions = this.parseJsoncObject(extensions, '.vscode/extensions.json');
+    const existing = Array.isArray(parsedExtensions?.recommendations)
+      ? parsedExtensions.recommendations.filter((item): item is string => typeof item === 'string')
+      : [];
+    if (!existing.includes(LATEX_WORKSHOP_ID)) {
+      extensions = applyEdits(extensions, modify(
+        extensions,
+        ['recommendations'],
+        [...existing, LATEX_WORKSHOP_ID],
+        { formattingOptions: { insertSpaces: true, tabSize: 2 } }
+      ));
+    }
+    extensions = extensions.endsWith('\n') ? extensions : `${extensions}\n`;
+    if (extensions !== existingExtensions) await this.writeFile('.vscode/extensions.json', extensions);
+  }
+
+  private parseJsoncObject(content: string, relativePath: string): Record<string, unknown> {
+    const errors: ParseError[] = [];
+    const parsed = parse(content, errors, {
+      allowTrailingComma: true,
+      allowEmptyContent: true,
+      disallowComments: false,
+    });
+    if (errors.length || (parsed !== undefined && (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)))) {
+      throw new Error(`Research Assistant cannot merge ${relativePath} because it is not valid JSON with comments.`);
+    }
+    return (parsed ?? {}) as Record<string, unknown>;
   }
 
   get rootUri(): vscode.Uri {

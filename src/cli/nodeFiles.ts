@@ -1,0 +1,73 @@
+import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
+import * as path from 'path';
+import { ProjectPaths, ResearchAssistantConfig, SyncConfig } from '../models/types';
+import { LoopFiles } from '../services/ResearchLoopModel';
+import { PROJECT_CONFIG_PATH, defaultLatexCommand, normalizeConfig, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
+
+/** Node `fs` implementation of the small file interface used by the research loop. */
+export class NodeLoopFiles implements LoopFiles {
+  constructor(readonly root: string) {}
+
+  private resolve(relativePath: string): string {
+    const full = path.resolve(this.root, relativePath);
+    if (full !== this.root && !full.startsWith(this.root + path.sep)) throw new Error(`Path leaves the project: ${relativePath}`);
+    return full;
+  }
+
+  async readFile(relativePath: string): Promise<string> { return fs.readFile(this.resolve(relativePath), 'utf8'); }
+
+  async writeFile(relativePath: string, content: string): Promise<void> {
+    const full = this.resolve(relativePath);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.writeFile(full, content, 'utf8');
+  }
+
+  async deleteFile(relativePath: string): Promise<void> {
+    await fs.rm(this.resolve(relativePath), { force: true });
+  }
+
+  async exists(relativePath: string): Promise<boolean> {
+    try { await fs.access(this.resolve(relativePath)); return true; } catch { return false; }
+  }
+
+  async listFiles(relativeDir: string, extension = '.md'): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(this.resolve(relativeDir), { withFileTypes: true });
+      return entries.filter((entry) => entry.isFile() && entry.name.endsWith(extension)).map((entry) => path.posix.join(relativeDir, entry.name)).sort();
+    } catch { return []; }
+  }
+
+  async listDirs(relativeDir: string): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(this.resolve(relativeDir), { withFileTypes: true });
+      return entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => path.posix.join(relativeDir, entry.name)).sort();
+    } catch { return []; }
+  }
+}
+
+/** Walk up from `start` to the nearest folder containing `.research-assistant.json`. */
+export function findProjectRoot(start: string): string | undefined {
+  let current = path.resolve(start);
+  for (;;) {
+    if (fsSync.existsSync(path.join(current, PROJECT_CONFIG_PATH))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+export async function loadProjectConfig(root: string): Promise<ResearchAssistantConfig> {
+  return normalizeConfig(JSON.parse(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8')) as Partial<ResearchAssistantConfig>);
+}
+
+export async function loadProjectPaths(root: string): Promise<ProjectPaths> {
+  return pathsFromConfigText(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8'));
+}
+
+export async function loadSyncConfig(root: string): Promise<SyncConfig> {
+  const raw = JSON.parse(await fs.readFile(path.join(root, PROJECT_CONFIG_PATH), 'utf8')) as Partial<ResearchAssistantConfig> & { sync?: Partial<SyncConfig> };
+  const sync = normalizeSyncConfig(raw.sync);
+  // Derived, not saved, so it follows later changes to latex.main.
+  return { ...sync, latexCommand: sync.latexCommand ?? defaultLatexCommand(normalizeConfig(raw).latex) };
+}
