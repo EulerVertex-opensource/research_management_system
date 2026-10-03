@@ -376,7 +376,8 @@ export class ResearchLoopCore {
       await this.record(kind, target, approved, source);
     }
     if (this.state) {
-      this.state.approvalQueue = this.state.approvalQueue.filter((item) => !(item.target === target && (item.kind === kind || (kind === 'asset' && (item.kind === 'citation' || item.kind === 'counterexample')))));
+      this.state.approvalQueue = this.state.approvalQueue.filter((item) => kind === 'project' ? item.kind !== 'project'
+        : !(item.target === target && (item.kind === kind || (kind === 'asset' && (item.kind === 'citation' || item.kind === 'counterexample')))));
       if (kind === 'asset') await this.clearPark(target, `approved (${source})`);
       await this.save();
     }
@@ -583,6 +584,8 @@ export class ResearchLoopCore {
   }
 
   async enqueueApproval(kind: ApprovalKind, target: string, reason: string): Promise<ApprovalRequest> {
+    // The project has one approval record, keyed `project`; agents may name it by its path.
+    if (kind === 'project') target = 'project';
     const state = this.require();
     const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(await this.nodeFile(kind === 'definition' ? 'definition' : 'asset', target)).catch(() => '');
     const digest = raw ? researchDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : 'asset') : '';
@@ -1804,7 +1807,7 @@ export class ResearchLoopCore {
       const raw = await this.files.readFile(file).catch(() => '');
       if (!raw) continue;
       const kind = item.kind === 'project' ? 'project' : item.kind === 'definition' ? 'definition' : 'asset';
-      if (isApproved(records, kind, item.target, raw)) continue;
+      if (isApproved(records, kind, kind === 'project' ? 'project' : item.target, raw)) continue;
       if (item.kind !== 'project') { try { if (['deprecated', 'archived'].includes(parseMarkdown(raw).data.status)) continue; } catch { continue; } }
       keep.push(item);
     }

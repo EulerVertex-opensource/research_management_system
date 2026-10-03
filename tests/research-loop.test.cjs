@@ -120,6 +120,24 @@ test('happy path: goals, approval gates, proof record, ready, and invalidation o
   assert.equal((await f.core.next()).stage, 'waiting');
 });
 
+test('a project approval requested by path is the same request and clears when approved', async () => {
+  const f = fixture();
+  await f.core.start('claude', { goal: 'Prove the main theorem.' });
+  f.map.set(paths.projectMd, project);
+  await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  const outcome = await f.core.requestApproval('project', 'research/project.md', 'Drafted');
+  assert.equal(outcome.status, 'queued');
+  const queued = f.core.current.approvalQueue.filter((item) => item.kind === 'project');
+  assert.deepEqual(queued.map((item) => item.target), ['project']);
+  await f.core.resolveApproval(outcome.request.id, 'approved', '', 'dashboard');
+  assert.equal(f.core.current.approvalQueue.some((item) => item.kind === 'project'), false);
+  assert.equal(await f.core.isProjectApproved(), true);
+  // A request queued under a path by an older version still clears.
+  f.core.current.approvalQueue.push({ id: 'legacy', kind: 'project', target: 'project.md', digest: '', reason: 'old', requestedAt: 'now' });
+  await f.core.approve('project', 'project', 'test');
+  assert.equal(f.core.current.approvalQueue.some((item) => item.kind === 'project'), false);
+});
+
 test('approving does not leak into later parses of the same draft text', async () => {
   const draft = asset('\n## Proof\n\nShared text.\n');
   const f = fixture({ 'research/assets/main_theorem.md': draft, 'research/assets/copy.md': draft });

@@ -219,10 +219,12 @@ Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, 
   /** Rewrite the managed .gitignore block; writes only when it changed (e.g. a newer extension bundles a new skill). */
   async upsertGitignore(paths: ProjectPaths, bundledSkillNames: string[]): Promise<void> {
     const current = await this.readFile('.gitignore').catch(() => '');
+    const localPdfs = paths.localSourcePdfs.replace(/\/$/, '');
     const managed = [
       GITIGNORE_START,
-      '# Local source PDFs and LaTeX output',
-      `/${paths.localSourcePdfs.replace(/\/$/, '')}/`,
+      '# Local-only research files, source PDFs, and LaTeX output',
+      '/research-local/',
+      ...(localPdfs.startsWith('research-local/') ? [] : [`/${localPdfs}/`]),
       `/${LATEX_OUTPUT_DIRECTORY}/`,
       '*.aux',
       '*.fdb_latexmk',
