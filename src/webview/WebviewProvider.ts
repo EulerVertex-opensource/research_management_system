@@ -144,7 +144,7 @@ export class WebviewProvider {
       this.integrationEnsured = true;
       this.output.appendLine('[refresh] Ensured Claude Code and Codex hooks and MCP configuration');
 
-      this.configureServices(paths);
+      this.configureServices(paths, true);
       const [nodes, papers] = await Promise.all([
         this.refreshIndex(),
         this.paperIndex!.getPapers(),
@@ -180,7 +180,8 @@ export class WebviewProvider {
     const initialized = await this.configService.hasSavedConfig();
     const config = await this.configService.loadOrDiscover();
     const paths = this.configService.resolvePaths(config);
-    this.configureServices(paths);
+    // The loop host writes `.research-assistant-loop/`, opens the bridge, and auto-pulls; only in a set-up project.
+    this.configureServices(paths, initialized);
     if (initialized) {
       const reinstalled = await this.skillInstaller.ensureCurrentDrivers().catch((error: unknown) => { this.output.appendLine(`[skills] Could not check the loop driver: ${String(error)}`); return false; });
       if (reinstalled) this.output.appendLine('[skills] Project skills and loop driver were older than this extension; reinstalled them.');
@@ -246,11 +247,11 @@ export class WebviewProvider {
     await this.sendProjectMd();
   }
 
-  private configureServices(paths: ProjectPaths): void {
+  private configureServices(paths: ProjectPaths, startLoop: boolean): void {
     this.paths = paths;
     this.nodeIndex = new NodeIndexService(this.fileService, paths);
     this.paperIndex = new PaperIndexService(this.fileService, paths);
-    this.loopHost.configure(paths);
+    if (startLoop) this.loopHost.configure(paths);
   }
 
   /** Refresh the node index and surface duplicate IDs or dependency errors once per change. */
