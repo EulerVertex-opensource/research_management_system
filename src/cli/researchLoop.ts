@@ -9,7 +9,9 @@ import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths, loadSyncConfig } from './nodeFiles';
-import { openGit, runShell } from './nodeGit';
+import { NodeGitRunner, openGit, runShell } from './nodeGit';
+import { applyInterlinks } from '../services/ResearchInterlinks';
+import { locateNodeFile } from '../domain/registry';
 import { toIdeaKind } from '../domain/nodeKinds';
 
 declare const __EXTENSION_VERSION__: string | undefined;
@@ -176,6 +178,25 @@ async function runSync(sub: string | undefined, args: Args, root: string, core: 
   }
 }
 
+/**
+ * Link prose mentions in the asset and definition files the agent changed: the
+ * current stage's files while the loop runs (so no file outside the stage is
+ * touched), otherwise the uncommitted ones.
+ */
+async function linkChangedNodes(root: string, core: ResearchLoopCore, running: boolean): Promise<string[]> {
+  const paths = await loadProjectPaths(root);
+  let changed: string[];
+  if (running) {
+    const { added, modified } = await core.changedFiles();
+    changed = [...added, ...modified];
+  } else {
+    const status = await new NodeGitRunner(root).run(['status', '--porcelain', '--untracked-files=all', '--', paths.assets, paths.definitions, paths.library]);
+    if (status.code !== 0) return [];
+    changed = status.stdout.split('\n').filter(Boolean).map((line) => line.slice(3).split(' -> ').pop()!.replace(/^"|"$/g, ''));
+  }
+  return applyInterlinks(new NodeLoopFiles(root), paths, changed.filter((file) => file.endsWith('.md') && locateNodeFile(file, paths)));
+}
+
 async function runHook(event: string, args: Args): Promise<void> {
   let input: HookInput = {};
   try { input = JSON.parse((await readStdin()) || '{}'); } catch { input = {}; }
@@ -221,11 +242,13 @@ async function runHook(event: string, args: Args): Promise<void> {
     }
     case 'PreToolUse': {
       const paths = await loadProjectPaths(root);
-      const decision = preToolUseDecision(paths, input, root);
+      const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
       if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
       return;
     }
     case 'Stop': {
+      // Best effort: a malformed node is skipped here and reported by validate.
+      try { await linkChangedNodes(root, core, state?.status === 'running'); } catch { /* keep the Stop decision independent of linking */ }
       if (!state || state.status !== 'running') return;
       if (session && !core.heartbeat(session)) return;
       await core.validateWorkspace({ fix: true });

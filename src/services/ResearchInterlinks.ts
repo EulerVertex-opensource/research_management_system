@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import { parseMarkdown } from './Frontmatter';
 import { stripOrdinal } from './AssetOrder';
-import { locateNodeFile } from '../domain/registry';
+import { NodeLayout, NodeLister, listNodeFiles, locateNodeFile } from '../domain/registry';
 
 export interface InterlinkInput { filePath: string; raw: string }
 export interface InterlinkChange { filePath: string; raw: string; links: number }
@@ -138,4 +138,34 @@ export function planResearchInterlinks(inputs: InterlinkInput[], assetFolder: st
     }
   }
   return { changes, issues };
+}
+
+function linkable(raw: string): boolean {
+  if (!/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.test(raw)) return false;
+  try { return typeof parseMarkdown(raw).data.title === 'string'; } catch { return false; }
+}
+
+/**
+ * Apply verified prose links to the given asset and definition files; every
+ * other node is read only to resolve link targets. Malformed nodes are skipped
+ * (validate reports them). Links never change an approval digest. Returns the
+ * files written.
+ */
+export async function applyInterlinks(
+  files: NodeLister & { readFile(file: string): Promise<string>; writeFile(file: string, content: string): Promise<void> },
+  layout: NodeLayout,
+  only: Iterable<string>,
+): Promise<string[]> {
+  const wanted = new Set(only);
+  if (!wanted.size) return [];
+  const inputs: InterlinkInput[] = [];
+  for (const kind of ['asset', 'definition'] as const) {
+    for (const filePath of await listNodeFiles(files, layout, kind)) {
+      const raw = await files.readFile(filePath).catch(() => undefined);
+      if (raw !== undefined && linkable(raw)) inputs.push({ filePath, raw });
+    }
+  }
+  const changes = planResearchInterlinks(inputs, layout.assets, layout.definitions, layout.library).changes.filter((change) => wanted.has(change.filePath));
+  for (const change of changes) await files.writeFile(change.filePath, change.raw);
+  return changes.map((change) => change.filePath);
 }

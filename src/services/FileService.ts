@@ -210,6 +210,8 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${shared.decisions}/\` records researcher decisions (new directions, change requests, parked results); \`${shared.handoffs}/\` says where work stopped and what comes next.
 - \`${shared.approvals}/\` holds one approval record per approved result; approvals are made only by a researcher in VS Code.
 
+Nothing else belongs here: nodes sit directly in their folders (group them with tags), with no subfolders, new folders, or index, README, or overview notes. Files elsewhere are never read by the dashboard or the loop; \`research-maintenance validate\` and \`sync prepare\` report them.
+
 Share work with \`research-loop sync prepare\` and the "Publish Research to Collaborators" command; bring in collaborators' work with \`research-loop sync pull\`. Keep research discussion in these files rather than Overleaf comments, which Git synchronization can drop.
 
 Original source PDFs are intentionally stored in \`${paths.localSourcePdfs}/\`, which is ignored by Git. Record stable URLs, DOI/arXiv identifiers, checksums, and page-level provenance in shared paper metadata so collaborators can retrieve the same source.

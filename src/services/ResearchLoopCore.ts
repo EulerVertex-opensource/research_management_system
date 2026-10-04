@@ -18,6 +18,7 @@ import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
 import { hasSection, sectionContent } from '../domain/sections';
+import { layoutReport } from '../domain/layout';
 import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
 import {
@@ -1726,6 +1727,7 @@ export class ResearchLoopCore {
         if ((folder === folders.plans || folder === folders.checks) && typeof data.target_asset === 'string' && !assets.has(data.target_asset)) problems.push(`${file}: targets unknown asset ${data.target_asset}.`);
       }
     }
+    problems.push(...(await layoutReport(this.files, this.paths)).problems);
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);
     const { cycle } = assetClosure([...assets.keys()], assets);

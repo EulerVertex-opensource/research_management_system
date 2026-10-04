@@ -66,6 +66,9 @@ export interface NodeCheckOptions {
 
 /** Problems with one node's frontmatter and required sections, each prefixed with its ID. Empty when valid. */
 export function nodeProblems(kind: NodeKind, id: string, data: Record<string, any>, content: string, options: NodeCheckOptions = {}): string[] {
+  if (data.type === undefined && data.title === undefined && data.status === undefined) {
+    return [`${id}: not a research node (no frontmatter). Node folders hold one node per file; index, README, overview, and other folder notes are not allowed.`];
+  }
   const problems: string[] = [];
   const statuses: readonly string[] = options.allowApproved ? NODE_STATUS_LIST : NODE_STATUS_LIST.filter((status) => status !== 'approved');
   if (typeof data.title !== 'string' || !data.title.trim()) problems.push(`${id}: title is required.`);

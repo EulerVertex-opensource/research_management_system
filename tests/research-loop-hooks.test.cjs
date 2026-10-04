@@ -65,7 +65,7 @@ test('PreToolUse protects split approvals, shared decision records, and raw git 
   assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/approvals/assets/main_theorem.json', content: '{}' } }), true);
   assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: '/repo/research/decisions/decision_x.md', content: 'x' } }), true);
   assert.equal(deny({ tool_name: 'Edit', tool_input: { file_path: 'research/handoffs/handoff_x.md', old_string: 'a', new_string: 'b' } }), true);
-  assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/checks/check_main_theorem_small.md', content: 'x' } }), false);
+  assert.equal(deny({ tool_name: 'Write', tool_input: { file_path: 'research/checks/check_main_theorem_small.md', content: '---\ntype: falsification_check\n---\n' } }), false);
   assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'git push origin main' } }), true);
   assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'cd repo && git pull --rebase' } }), true);
   assert.equal(deny({ tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'git -C /repo merge origin/main'] } }), true);

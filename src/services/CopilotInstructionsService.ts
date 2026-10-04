@@ -63,6 +63,7 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 - Keep manuscript writing plans separate from proof plans. Work on one section at a time; read its brief, selected approved nodes and dependencies, relevant definitions, and the configured preamble. Do not send the whole research archive to a model.
 - Preserve existing section TeX prose. Generate a missing file once; later revisions must target a passage or provide a patch.
 - Sync the marked section input block in the main document from the writing outline only after previewing it with the draft-latex skill's \`manuscript-writing.cjs sync --preview\`.
+- Write research files only in the configured folders: one node per file directly in its folder, no subfolders, new folders, or index/README/overview notes; group with tags. To organize materials, import papers with import-math-paper and extract results and definitions with extract-research-nodes; loose notes become ideas.
 - Use exact node filenames without \`.md\` in relation fields. IDs are global across research folders. Store only forward relations; "used in" and plan lists are derived.
 - Assets link definition IDs in \`uses_definitions\`. Definition \`depends_on\` lists definition IDs; asset \`depends_on\` lists asset IDs.
 - Extract only commonly used mathematical concepts as definitions. Put project-specific conditions and assumptions in draft remark assets, with verified relative Markdown links to relevant definitions and assets. Split mixed passages into a standard definition and a linked remark.
@@ -138,7 +139,9 @@ Overleaf-compatible LaTeX project plus a shared research knowledge base. Folder 
 - Never change a statement while proving it; a revised statement gets a new asset ID. A failed plan is not a falsification.
 - Never invent a node ID, paper, theorem location, citation, or proof step; verify IDs from the files.
 - IDs in \`depends_on\`, \`uses_definitions\`, \`related_assets\`, \`target_asset\` are exact filenames without \`.md\`, unique across research folders. Store forward relations only. Block \`$$\` go on their own lines.
-- After changing assets or definitions: \`research-maintenance\` (validate, links), then \`check-notation\`.
+- Research files go only where \`${paths.config}\` puts them: one node per file directly in the assets, definitions, ideas, or plans folder; papers as \`<slug>/paper.md\` and \`metadata.yaml\`; known results in \`library/<collection>/\`. No subfolders, new folders, or index, README, overview, or other folder notes; group with \`tags\`. The PreToolUse hook denies other paths and \`validate\` reports them.
+- Organizing materials means extracting them: \`import-math-paper\` for each paper PDF, then \`extract-research-nodes\` for results and definitions; loose notes and questions become ideas. Keep raw files out of the research folders (PDFs in \`${paths.localSourcePdfs}/\`).
+- After changing assets or definitions: \`research-maintenance\` (validate, links), then \`check-notation\`. Links for the files you changed are also applied when your turn ends; review \`links --preview\` for missing relations.
 - Only approved nodes support manuscript arguments; plan with \`plan-manuscript\` and write one section at a time with \`draft-latex\`, then \`revise-manuscript-prose\`.
 - Share research through the research loop's \`sync\` commands, not raw git pull/push. Do not rename shared files; never commit source PDFs (\`${paths.localSourcePdfs}/\`) or LaTeX build output.
 

@@ -9,6 +9,7 @@ import { ASSET_TYPES, NodeKind, nodeKindOf, statusesFor } from '../domain/nodeKi
 import { nodeProblems, planProblems, stripForeignFields } from '../domain/schema';
 import { nodeTemplate } from '../domain/templates';
 import { libraryFolders, libraryProblems, locateNodeFile } from '../domain/registry';
+import { layoutReport } from '../domain/layout';
 
 function slugify(title: string): string {
   return title
@@ -95,6 +96,7 @@ export class NodeIndexService {
       const target = node.target_asset ? this.nodes.get(node.target_asset) : undefined;
       if (typeof stamped === 'string' && target) node.outdated = proofDigest(raws.get(target.filePath)!) !== stamped;
     }
+    this.problems.push(...(await layoutReport(this.fileService, this.paths)).problems);
     this.problems.push(...libraryProblems([...this.nodes.values()].map((node) => ({ id: node.id, file: node.filePath, data: node })), this.paths));
     for (const kind of ['asset', 'definition'] as const) {
       // Project and library nodes are ordered together, so a project result may depend on a library one.

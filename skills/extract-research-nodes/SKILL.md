@@ -1,11 +1,22 @@
 ---
 name: extract-research-nodes
-description: Extract draft research nodes - theorem-like results, examples, standard definitions, and project-specific remarks - from an imported paper transcription, research notes, or existing assets, into the project or into the library of known results. Use when turning source text into assets or definitions, or when importing earlier theorems or a useful paper's results into the library; use import-math-paper first for a new PDF.
+description: Extract draft research nodes - theorem-like results, examples, standard definitions, and project-specific remarks - from an imported paper transcription, research notes, or existing assets, into the project or into the library of known results. Use when turning source text into assets or definitions, when the researcher asks to organize, sort, or ingest research materials, or when importing earlier theorems or a useful paper's results into the library; use import-math-paper first for a new PDF.
 ---
 
 # Extract research nodes
 
 Scope the request: `results` (theorems, lemmas, propositions, examples, constructions), `definitions`, or `all`, and the target: the **project** (results this research will prove or use) or the **library** (known results: the researcher's earlier theorems, results of a paper they know is useful). Read `.research-assistant.json` for folder paths, then the relevant transcription, notes, or asset bodies. Check the source PDF for any ambiguous statement, formula, numbering, or attribution when it is available. Search existing assets, definitions, and the library (`research-loop library search <words>` when the loop is installed) before creating a node, and reuse a matching one.
+
+## Organizing materials
+
+When the researcher hands over a batch of materials to organize, sort each item to its one destination and extract it; do not invent another structure:
+
+- A paper PDF: `import-math-paper` (transcription in `papers/<slug>/`, PDF in the local source folder), then extract its useful results and definitions below.
+- Notes, drafts, or TeX with mathematical content: results and definitions below; anything that is not yet a statement (an approach, a question, an observation) becomes an idea (`type: idea`, `status: draft`, `idea_kind`).
+- Earlier work or known results the project will use, not prove: the library (below).
+- The main problem, scope, or goals: propose the text for `project.md` to the researcher; do not overwrite it.
+
+Each node is one file directly in its configured folder. Never create subfolders, new folders, or index, README, overview, or other folder notes: the dashboard and the loop read only the configured folders, so such files are lost, and the PreToolUse hook denies them. Group with `tags` and relate with `depends_on`, `uses_definitions`, and `related_assets`. Keep raw source files out of the research folders. Finish with a list of what went where.
 
 ## Results
 
