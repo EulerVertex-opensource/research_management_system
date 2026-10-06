@@ -39,7 +39,7 @@ function folders(paths: LayoutPaths) {
   const shared = (child: string) => join(paths.researchRoot, child);
   const writing = paths.writingRoot ?? shared('writing');
   return {
-    nodes: [paths.assets, paths.definitions, paths.ideas, paths.plans, shared('checks')],
+    nodes: [paths.assets, paths.definitions, paths.ideas, paths.plans, shared('checks'), shared('candidates')],
     records: [shared('decisions'), shared('handoffs')],
     approvals: shared('approvals'),
     writing,

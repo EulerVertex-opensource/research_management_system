@@ -4,22 +4,26 @@
  */
 
 /** Kinds of approval that auto mode may grant without the researcher's click. */
-export type AutoApproveRule = 'proofs' | 'supporting' | 'citations' | 'definitions' | 'counterexamples' | 'project';
-export const AUTO_APPROVE_RULES: readonly AutoApproveRule[] = ['proofs', 'supporting', 'citations', 'definitions', 'counterexamples', 'project'];
+export type AutoApproveRule = 'proofs' | 'supporting' | 'citations' | 'definitions' | 'counterexamples' | 'specifications' | 'project';
+export const AUTO_APPROVE_RULES: readonly AutoApproveRule[] = ['proofs', 'supporting', 'citations', 'definitions', 'counterexamples', 'specifications', 'project'];
 
 export type AutoApprovePolicy = { enabled: boolean } & Record<AutoApproveRule, boolean>;
 
+/**
+ * Numeric loop settings. Each one has exactly one entry in LOOP_NUMBER_FIELDS
+ * (src/domain/loopSettings.ts), which drives defaults, clamping, validation,
+ * and the Settings view, so every one is adjustable there.
+ */
+export const LOOP_NUMBER_KEYS = [
+  'maxFailedPlans', 'iterationCap', 'questionTimeoutSeconds',
+  'refuteWidth', 'refuteRounds',
+  'constructWidth', 'constructRounds', 'constructMaxCandidates', 'specialDirectionsFromRound',
+  'candidatesPerWorker', 'boardObstructions', 'boardNearMisses', 'requestedSearchRounds',
+] as const;
+export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
+
 /** Local loop policy in `.research-assistant-loop/settings.json`; the agent may not write it. */
-export interface LoopSettings {
-  version: 1;
-  autoApprove: AutoApprovePolicy;
-  /** Failed plans since the researcher's last direction before the loop asks for help. */
-  maxFailedPlans: number;
-  /** Automatic continuations the Stop hook allows per chat session. */
-  iterationCap: number;
-  /** How long a question or approval popup waits before the agent continues. */
-  questionTimeoutSeconds: number;
-}
+export type LoopSettings = { version: 1; autoApprove: AutoApprovePolicy } & Record<LoopNumberKey, number>;
 
 export type ProviderSetting = 'auto' | 'claude' | 'codex';
 export type AutoPullMode = 'pull' | 'notify' | 'off';
@@ -48,7 +52,7 @@ export interface SettingsPayload {
 /** A partial update; `null` clears an optional field (or resets a budget to its default). */
 export interface SettingsPatch {
   agent?: { provider?: ProviderSetting; useDefaultOnStart?: boolean };
-  loop?: { autoApprove?: Partial<AutoApprovePolicy>; maxFailedPlans?: number; iterationCap?: number; questionTimeoutSeconds?: number };
+  loop?: { autoApprove?: Partial<AutoApprovePolicy> } & Partial<Record<LoopNumberKey, number>>;
   sync?: {
     autoPull?: AutoPullMode;
     autoPullIntervalMinutes?: number;

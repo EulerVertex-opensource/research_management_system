@@ -400,7 +400,7 @@ export class LoopHost implements vscode.Disposable {
   private async showApproval(kind: ApprovalKind, target: string, summary: string): Promise<{ decision: 'approved' | 'changes_requested' | 'later'; text: string } | undefined> {
     const paths = this.paths!;
     const file = kind === 'project' ? paths.projectMd : (await findNodeFile(this.files, paths, kind === 'definition' ? 'definition' : 'asset', target)) ?? `${paths.assets}/${target}.md`;
-    const approveLabel = kind === 'counterexample' ? 'Confirm counterexample' : 'Approve';
+    const approveLabel = kind === 'counterexample' ? 'Confirm counterexample' : kind === 'specification' ? 'Approve specification' : 'Approve';
     const rejectLabel = kind === 'counterexample' ? 'Reject…' : 'Request changes…';
     for (;;) {
       const choice = await vscode.window.showInformationMessage(`Research Assistant · approve ${kind} ${target}: ${summary}`, 'Open file', approveLabel, rejectLabel, 'Later');

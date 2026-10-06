@@ -206,7 +206,8 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${paths.library}/<collection>/assets|definitions/\` holds known results imported from earlier work or papers, grouped by source (one folder per collection). Their IDs start with \`lib_\`; project results reference them in \`depends_on\`/\`uses_definitions\`. A researcher approves each one once; the loop never re-proves them. Library files can be edited at any time (git keeps the history); editing an approved one returns it to draft for re-approval.
 - \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
-- \`${shared.checks}/\` records falsification checks: what was tried against which statement, and what was not covered.
+- \`${shared.checks}/\` records falsification checks (what was tried against which statement, and what was not covered) and the summary of each object-search round (obstructions, limitations).
+- \`${shared.candidates}/\` holds object-search candidates: each object a worker proposed for a counterexample or construction, with a pass/fail verdict per property, so collaborators and later rounds do not repeat them.
 - \`${shared.decisions}/\` records researcher decisions (new directions, change requests, parked results); \`${shared.handoffs}/\` says where work stopped and what comes next.
 - \`${shared.approvals}/\` holds one approval record per approved result; approvals are made only by a researcher in VS Code.
 

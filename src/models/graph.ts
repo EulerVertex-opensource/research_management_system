@@ -13,6 +13,7 @@ export type GraphFlag =
   | 'refuted' // an approved example refutes it
   | 'parked'
   | 'active' // the loop is working on it now
+  | 'searching' // an object search (counterexample or construction) is running on it
   | 'uncovered' // required, approved, and no manuscript section presents it
   | 'manuscript_stale' // a locked section presenting it is stale because of it
   | 'manuscript_invalid'; // a locked section presents it while it is missing, deprecated, or unapproved

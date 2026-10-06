@@ -32,8 +32,9 @@ export function sectionHeadings(body: string): string[] {
 }
 
 /** Everything before `## Proof`: the statement a researcher approves and a proof may not change. */
+/** Body before `## Proof`, or before `## Construction` (the object a construction search found, written after its specification). */
 export function statementPart(body: string): string {
-  return body.split(/^## Proof[ \t]*$/m)[0];
+  return body.split(/^## (?:Proof|Construction)[ \t]*$/m)[0];
 }
 
 /** Ordered checklist step, e.g. `1. [ ] Prove the bound.` */

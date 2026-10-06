@@ -8,7 +8,8 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 
 export interface Provenance { performed_by: string; created_at: string; base_commit?: string; extension_version?: string }
 
-export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked';
+/** search_request: the researcher asked for more counterexample search on an asset, `rounds` of it. */
+export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request';
 
 export interface DecisionInfo {
   id: string;
@@ -22,6 +23,10 @@ export interface DecisionInfo {
   failedPlansAtDirection?: string[];
   /** changes_requested: digest of the asset when the change was requested. */
   digest?: string;
+  /** search_request: how many rounds were asked for. */
+  rounds?: number;
+  /** direction and search_request: the last object-search round before it, so later limits count only the rounds after. */
+  searchRound?: number;
 }
 
 export interface CheckInfo { id: string; target: string; outcome: string; statementDigest?: string; createdAt?: string; performedBy?: string }
@@ -43,11 +48,13 @@ export function decisionId(kind: DecisionKind, target: string, provenance: Prove
   return `decision_${stamp(provenance.created_at)}_${kind}_${safeIdPart(target)}_${suffix}`;
 }
 
-export function decisionMarkdown(kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: { reason?: string; failedPlansAtDirection?: string[]; digest?: string } = {}): string {
-  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked' };
+export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number }
+
+export function decisionMarkdown(kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: DecisionExtra = {}): string {
+  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested' };
   return stringifyMarkdown(`\n${text.trim() || '(no text)'}\n`, clean({
     type: 'decision', title: `${titles[kind]}: ${target}`, kind, target, reason: extra.reason,
-    failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, ...provenance,
+    failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound, ...provenance,
   }));
 }
 
@@ -60,6 +67,8 @@ export function parseDecision(id: string, raw: string): DecisionInfo | undefined
     reason: typeof data.reason === 'string' ? data.reason : undefined,
     failedPlansAtDirection: Array.isArray(data.failed_plans_at_direction) ? data.failed_plans_at_direction.map(String) : undefined,
     digest: typeof data.digest === 'string' ? data.digest : undefined,
+    rounds: typeof data.rounds === 'number' && Number.isInteger(data.rounds) && data.rounds > 0 ? data.rounds : undefined,
+    searchRound: typeof data.search_round === 'number' && Number.isInteger(data.search_round) && data.search_round >= 0 ? data.search_round : undefined,
   };
 }
 
@@ -107,6 +116,12 @@ export function parseCheck(id: string, raw: string): CheckInfo | undefined {
 export function stampCheck(raw: string, statement: string, provenance: Provenance): string {
   const parsed = parseMarkdown(raw);
   return stringifyMarkdown(parsed.content, clean({ ...parsed.data, statement_digest: statement, ...provenance }));
+}
+
+/** Add loop-owned fields to an agent-written search record (candidate or round): where it sits in the search, which statement, by whom. */
+export function stampSearchRecord(raw: string, fields: Record<string, unknown>, statement: string, provenance: Provenance): string {
+  const parsed = parseMarkdown(raw);
+  return stringifyMarkdown(parsed.content, clean({ ...parsed.data, ...fields, statement_digest: statement, ...provenance }));
 }
 
 export function checkMarkdown(target: string, outcome: 'no_counterexample_found' | 'counterexample_rejected', cases: string, limitations: string, statement: string, provenance: Provenance): string {

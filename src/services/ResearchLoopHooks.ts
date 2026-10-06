@@ -75,7 +75,7 @@ export function researchReads(paths: ProjectPaths, input: HookInput, root?: stri
   const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
   if (command) for (const match of command.matchAll(/[\w./-]+/g)) raw.push(match[0]);
   const shared = sharedFolders(paths.researchRoot);
-  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks, ...(paths.library ? [paths.library] : [])];
+  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks, shared.candidates, ...(paths.library ? [paths.library] : [])];
   const result = new Set<string>();
   for (const value of raw) {
     let relative = value.replace(/\\/g, '/');

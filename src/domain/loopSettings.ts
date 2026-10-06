@@ -1,4 +1,4 @@
-import { AUTO_APPROVE_RULES, AutoApprovePolicy, LoopSettings, SettingsErrors, SettingsPatch } from '../models/settings';
+import { AUTO_APPROVE_RULES, AutoApprovePolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, SettingsErrors, SettingsPatch } from '../models/settings';
 
 /**
  * Pure defaults, normalization, and validation for the Settings view and the
@@ -6,17 +6,46 @@ import { AUTO_APPROVE_RULES, AutoApprovePolicy, LoopSettings, SettingsErrors, Se
  */
 
 export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
-  enabled: false, proofs: true, supporting: true, citations: true, definitions: true, counterexamples: false, project: false,
+  enabled: false, proofs: true, supporting: true, citations: true, definitions: true, counterexamples: false, specifications: false, project: false,
 };
 
-export const DEFAULT_LOOP_SETTINGS: LoopSettings = {
-  version: 1, autoApprove: DEFAULT_AUTO_APPROVE, maxFailedPlans: 3, iterationCap: 10, questionTimeoutSeconds: 240,
+/** Where a numeric loop setting appears in the Settings view. */
+export type LoopFieldGroup = 'general' | 'refute' | 'construct' | 'search';
+export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
+  general: '',
+  refute: 'Object search: refute (falsify)',
+  construct: 'Object search: construct',
+  search: 'Object search: workers and board',
 };
+
+export interface LoopNumberField { defaultValue: number; range: readonly [number, number]; label: string; hint: string; unit?: string; group: LoopFieldGroup }
+
+/**
+ * Every numeric loop setting, in display order. Defaults, clamping, patch
+ * validation, and the Settings view all read this table, so a setting listed
+ * here is adjustable in the panel and one missing here does not compile.
+ */
+export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
+  maxFailedPlans: { defaultValue: 3, range: [1, 10], group: 'general', label: 'Proof attempts per asset', hint: 'Failed plans before the loop asks you for a new direction.' },
+  iterationCap: { defaultValue: 10, range: [1, 100], group: 'general', label: 'Autopilot continuations', hint: 'Times the Stop hook sends the agent on per chat session; applies to the running loop too.' },
+  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'general', unit: 'seconds', label: 'Question timeout', hint: 'How long a question or approval popup waits before the agent continues without you.' },
+  refuteWidth: { defaultValue: 1, range: [1, 8], group: 'refute', label: 'Workers per round', hint: 'Parallel subagents searching for a counterexample, each in its own direction.' },
+  refuteRounds: { defaultValue: 1, range: [1, 10], group: 'refute', label: 'Rounds', hint: 'Rounds without a counterexample before the loop moves on to planning a proof.' },
+  constructWidth: { defaultValue: 3, range: [1, 8], group: 'construct', label: 'Workers per round', hint: 'Parallel subagents proposing constructions, each in its own direction.' },
+  constructRounds: { defaultValue: 4, range: [1, 20], group: 'construct', label: 'Rounds', hint: 'Rounds since your last direction before the loop asks you.' },
+  constructMaxCandidates: { defaultValue: 40, range: [1, 500], group: 'construct', label: 'Candidate limit', hint: 'Candidates since your last direction before the loop asks you.' },
+  specialDirectionsFromRound: { defaultValue: 2, range: [1, 20], group: 'construct', label: 'Repair and impossibility from round', hint: 'First round that also repairs the best near-miss and tries to prove no construction exists.' },
+  candidatesPerWorker: { defaultValue: 3, range: [1, 10], group: 'search', label: 'Candidates per worker', hint: 'Candidates one worker may write in a round.' },
+  boardObstructions: { defaultValue: 12, range: [1, 50], group: 'search', label: 'Obstructions shown', hint: 'Latest obstructions on the search board every worker reads.' },
+  boardNearMisses: { defaultValue: 3, range: [0, 10], group: 'search', label: 'Near-misses shown', hint: 'Best failed candidates on the search board, with their checks.' },
+  requestedSearchRounds: { defaultValue: 2, range: [1, 10], group: 'search', label: 'Rounds for a requested search', hint: 'Default rounds when you ask for a deeper counterexample search.' },
+};
+
+const loopNumberDefaults = Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, LOOP_NUMBER_FIELDS[key].defaultValue])) as Record<LoopNumberKey, number>;
+
+export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, ...loopNumberDefaults };
 
 export const LIMITS = {
-  maxFailedPlans: [1, 10],
-  iterationCap: [1, 100],
-  questionTimeoutSeconds: [10, 600],
   autoPullIntervalMinutes: [0, 1440],
   contextBudget: [500, 200_000],
 } as const satisfies Record<string, readonly [number, number]>;
@@ -44,9 +73,7 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
     settings: {
       version: 1,
       autoApprove,
-      maxFailedPlans: clampInt(input.maxFailedPlans, LIMITS.maxFailedPlans, DEFAULT_LOOP_SETTINGS.maxFailedPlans),
-      iterationCap: clampInt(input.iterationCap, LIMITS.iterationCap, DEFAULT_LOOP_SETTINGS.iterationCap),
-      questionTimeoutSeconds: clampInt(input.questionTimeoutSeconds, LIMITS.questionTimeoutSeconds, DEFAULT_LOOP_SETTINGS.questionTimeoutSeconds),
+      ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, clampInt(input[key], LOOP_NUMBER_FIELDS[key].range, LOOP_NUMBER_FIELDS[key].defaultValue)])) as Record<LoopNumberKey, number>,
     },
     problems,
   };
@@ -89,9 +116,7 @@ export function validateSettingsPatch(patch: SettingsPatch, budgetStages: readon
   }
   if (patch.loop) {
     for (const key of ['enabled', ...AUTO_APPROVE_RULES] as const) bool(`loop.autoApprove.${key}`, patch.loop.autoApprove?.[key]);
-    intIn('loop.maxFailedPlans', patch.loop.maxFailedPlans, LIMITS.maxFailedPlans);
-    intIn('loop.iterationCap', patch.loop.iterationCap, LIMITS.iterationCap);
-    intIn('loop.questionTimeoutSeconds', patch.loop.questionTimeoutSeconds, LIMITS.questionTimeoutSeconds);
+    for (const key of LOOP_NUMBER_KEYS) intIn(`loop.${key}`, patch.loop[key], LOOP_NUMBER_FIELDS[key].range);
   }
   if (patch.sync) {
     const sync = patch.sync;

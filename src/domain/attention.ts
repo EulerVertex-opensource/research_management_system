@@ -62,7 +62,7 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
     }
     const blocks = request.kind === 'project' ? input.required : blocksOf(target);
     const critical = request.kind === 'project' || blocks.length > 0;
-    const label = request.kind === 'citation' ? 'Check the citation of' : request.kind === 'project' ? 'Approve' : request.kind === 'definition' ? 'Approve definition' : 'Approve proof of';
+    const label = request.kind === 'citation' ? 'Check the citation of' : request.kind === 'project' ? 'Approve' : request.kind === 'definition' ? 'Approve definition' : request.kind === 'specification' ? 'Approve the specification of' : 'Approve proof of';
     items.push({
       key: `approval:${request.id}`, priority: critical ? 1 : 3, category: 'approval',
       title: request.kind === 'project' ? 'Approve project.md (goals and required results)' : `${label} ${target}${node ? ` — ${node.title}` : ''}`,
@@ -125,7 +125,9 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
       reason: `${info.reason}${node?.counts.failedPlans ? `; ${node.counts.failedPlans} failed attempt(s)` : ''}${info.note ? `: ${info.note}` : ''}`,
       target: id, blocks: blocksOf(id), sections: sectionsOf(id), since: info.at,
       buttons: [
-        { label: 'Discuss a new approach', action: { action: 'agent', prompt: `Asset ${id} is parked (${info.reason}). Read its failed plans and related ideas, then discuss a genuinely different approach with me before writing a new plan.` }, kind: 'primary' },
+        { label: 'Discuss a new approach', action: { action: 'agent', prompt: info.reason === 'search_exhausted'
+          ? `The construction search for ${id} is parked: its limits ran out. Run research-loop search status ${id}, read the board and its observation ideas, then discuss with me a new direction or a relaxed specification (a new asset ID) before the search restarts.`
+          : `Asset ${id} is parked (${info.reason}). Read its failed plans and related ideas, then discuss a genuinely different approach with me before writing a new plan.` }, kind: 'primary' },
         { label: 'Unpark', action: { action: 'unpark', assetId: id }, kind: 'secondary' },
         open(id),
       ],

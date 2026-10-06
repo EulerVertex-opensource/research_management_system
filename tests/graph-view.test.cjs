@@ -226,3 +226,12 @@ test('the graph views render', async () => {
   assert.match(progress, /data-node="helper"/);
   assert.match(progress, /1 implied edges omitted|4 shown/);
 });
+
+test('a node under an object search carries the searching flag', () => {
+  const files = memoryFiles({ 'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft' }), 'research/assets/second.md': node('theorem', { title: 'Second', status: 'draft' }) });
+  const state = { status: 'running', stage: 'search', current: { assetId: 'main', search: { mode: 'refute', round: 1, slots: [] } }, parked: {}, approvalQueue: [] };
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state, manuscript: undefined, sectionsDir: 'sections', now: 'now' });
+  const byId = new Map(payload.nodes.map((item) => [item.id, item]));
+  assert.deepEqual(byId.get('main').flags, ['active', 'searching']);
+  assert.deepEqual(byId.get('second').flags, []);
+});

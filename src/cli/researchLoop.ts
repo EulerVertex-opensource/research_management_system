@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
-import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { HookInput, contextOutput, denyOutput, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { hasContextPack } from '../services/ResearchContext';
 import { migrateApprovals } from '../services/ApprovalStore';
@@ -42,7 +42,9 @@ const USAGE = `Usage: research-loop <command> [options]
   next [--json]
   context [--json] [--budget N]   (compile the current stage's context pack; next does this too)
   show <id|paper_slug|project> [--section Heading]... [--full]   (one node or paper part on request)
-  report <complete|none|candidate|confirmed|rejected|proved|failed|question> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
+  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
+  search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
+  search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
@@ -346,7 +348,7 @@ async function main(): Promise<void> {
     }
     case 'report': {
       const outcome = sub as ReportOutcome;
-      if (!['complete', 'none', 'candidate', 'confirmed', 'rejected', 'proved', 'failed', 'question'].includes(outcome)) throw new Error('report needs an outcome: complete|none|candidate|confirmed|rejected|proved|failed|question');
+      if (!REPORT_OUTCOMES.includes(outcome)) throw new Error(`report needs an outcome: ${REPORT_OUTCOMES.join('|')}`);
       const report: StageReport = {
         outcome, summary: typeof args.flags.summary === 'string' ? args.flags.summary : '',
         planId: typeof args.flags.plan === 'string' ? args.flags.plan : undefined,
@@ -424,6 +426,20 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('library search|list|promote');
+    }
+    case 'search': {
+      if (sub === 'status') {
+        const assetId = text(third, 'asset');
+        out(json ? await core.searchProgressFor(assetId) : await core.searchBoard(assetId));
+        return;
+      }
+      if (sub === 'request') {
+        const rounds = typeof args.flags.rounds === 'string' ? Number(args.flags.rounds) : undefined;
+        out(await core.requestSearch(text(third, 'asset'), rounds));
+        await core.touch(session);
+        return;
+      }
+      throw new Error('search status|request <asset>');
     }
     case 'handoff': {
       const file = await core.writeHandoff(typeof args.flags.note === 'string' ? args.flags.note : undefined);

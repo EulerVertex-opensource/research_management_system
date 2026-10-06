@@ -53,10 +53,14 @@ function sources(extra = {}) {
   };
 }
 
-test('falsify pack holds the statement, direct dependencies, and definition closure, but no proofs', () => {
+test('search pack holds the statement, direct dependencies, definition closure, board, and slot, but no proofs', () => {
   const s = sources();
-  const manifest = planContext({ stage: 'falsify', assetId: 'main_theorem' }, s);
+  const slot = { slot: 2, direction: 'small_cases', label: 'Smallest instances.' };
+  const manifest = planContext({ stage: 'search', assetId: 'main_theorem', search: { mode: 'refute', round: 3, slot, board: '## Search board\n\nBOARD OBSTRUCTION' } }, s);
   const pack = renderContext(manifest, s, 'loop show');
+  assert.match(pack.text, /BOARD OBSTRUCTION/);
+  assert.match(pack.text, /Your slot: 2, round 3\. Direction small_cases: Smallest instances\./);
+  assert.match(pack.text, /the other slots of this round/);
   assert.match(pack.text, /Every widget is blue/);
   assert.match(pack.text, /HELPER STATEMENT/);
   assert.match(pack.text, /A widget is a blue gadget/);
@@ -69,14 +73,14 @@ test('falsify pack holds the statement, direct dependencies, and definition clos
 
 test('plan pack keeps only Goal and Failure of failed plans plus related ideas and earlier reports', () => {
   const idea = node({ type: 'idea', title: 'Use colour', status: 'draft', related_assets: ['main_theorem'] }, '\nFIRST PARAGRAPH.\n\nSECOND PARAGRAPH.\n');
-  const s = sources({ plans: { attempt_1: failedPlan('attempt_1') }, ideas: { colour: idea }, reports: [{ stage: 'falsify', outcome: 'none', summary: 'Checked small widgets', assetId: 'main_theorem' }, { stage: 'plan', outcome: 'complete', summary: 'OTHER ASSET', assetId: 'other' }] });
+  const s = sources({ plans: { attempt_1: failedPlan('attempt_1') }, ideas: { colour: idea }, reports: [{ stage: 'search', outcome: 'searched', summary: 'Checked small widgets', assetId: 'main_theorem' }, { stage: 'plan', outcome: 'complete', summary: 'OTHER ASSET', assetId: 'other' }] });
   const pack = renderContext(planContext({ stage: 'plan', assetId: 'main_theorem', changesRequested: 'Use induction' }, s), s, 'loop show');
   assert.match(pack.text, /OBSTRUCTION attempt_1/);
   assert.match(pack.text, /Route attempt_1/);
   assert.doesNotMatch(pack.text, /CHECKLIST STEP/);
   assert.match(pack.text, /FIRST PARAGRAPH/);
   assert.doesNotMatch(pack.text, /SECOND PARAGRAPH/);
-  assert.match(pack.text, /falsify → none: Checked small widgets/);
+  assert.match(pack.text, /search → searched: Checked small widgets/);
   assert.doesNotMatch(pack.text, /OTHER ASSET/);
   assert.match(pack.text, /requested changes: Use induction/);
 });

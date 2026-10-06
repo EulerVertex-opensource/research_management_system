@@ -80,6 +80,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     if ((refutedBy.get(node.id) ?? []).some((example) => example.status === 'approved')) flags.push('refuted');
     if (state?.parked[node.id]) flags.push('parked');
     if (state?.status === 'running' && state.current.assetId === node.id) flags.push('active');
+    if (state?.status === 'running' && state.current.assetId === node.id && state.current.search) flags.push('searching');
     if (uncovered.some((item) => item.id === node.id && !item.pending)) flags.push('uncovered');
     if (staleBecause.has(node.id)) flags.push('manuscript_stale');
     if (invalidBecause.has(node.id)) flags.push('manuscript_invalid');

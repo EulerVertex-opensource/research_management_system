@@ -24,7 +24,9 @@ const config = { version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.
 const project = '# Project\n\n## Main Problem\n\nProve A.\n\n## Current Goals\n\nFind a proof.\n\n## Required Results\n\n- main_theorem: the central claim\n';
 const theorem = (statement = 'For every weak solution u, u = u.', extra = {}) => matter.stringify(`\n## Statement\n\n${statement}\n`, { type: 'theorem', title: 'Main theorem', status: 'draft', source: { kind: 'self_proved' }, depends_on: [], uses_definitions: ['weak_solution'], tags: [], ...extra });
 const definition = (text = 'A weak solution is a distribution satisfying the equation.', status = 'approved') => matter.stringify(`\n${text}\n`, { type: 'definition', title: 'Weak solution', status, depends_on: [], tags: [] });
-const check = () => matter.stringify('\n## Cases checked\n\n- constant solutions\n\n## Limitations\n\nNoncompact domains not covered.\n', { type: 'falsification_check', title: 'Check main theorem', target_asset: 'main_theorem', outcome: 'no_counterexample_found' });
+const { candidate, roundRecord } = require('./search-fixtures.cjs');
+/** One refute worker's result for round 1: a failed candidate and the round record. */
+const SEARCH_FILES = { 'research/candidates/cand_main_theorem_r1_s1_constants.md': candidate(), 'research/checks/search_main_theorem_r1_constants.md': roundRecord('main_theorem', 'Constant solutions satisfy the equation trivially.') };
 const approval = (kind, target, raw) => JSON.stringify({ kind, target, digest: researchDigest(raw, kind), approvedAt: '2026-09-01T00:00:00Z', source: 'test', ...(kind === 'project' ? {} : { statement: statementDigest(raw) }) }, null, 2) + '\n';
 
 function git(dir, ...args) {
@@ -71,7 +73,7 @@ test('sync pull summarizes collaborators\' research, invalidates stale approvals
   try {
     const { alice, bob } = t;
     assert.equal(bob.run(['start', '--provider', 'claude']).status, 0);
-    assert.equal(bob.state().stage, 'falsify');
+    assert.equal(bob.state().stage, 'search');
     // Alice parks the theorem with a reason and tightens the definition the theorem depends on.
     assert.equal(alice.run(['start', '--provider', 'codex']).status, 0);
     assert.equal(alice.run(['park', 'main_theorem', '--reason', 'assumption A3 unclear']).status, 0);
@@ -105,24 +107,27 @@ test('a raw git pull during a stage is not attributed to the agent; sync pull --
   try {
     const { alice, bob } = t;
     assert.equal(bob.run(['start', '--provider', 'claude']).status, 0);
-    assert.equal(bob.state().stage, 'falsify');
+    assert.equal(bob.state().stage, 'search');
     alice.write('research/ideas/idea_alice.md', matter.stringify('\nTry a compactness argument.\n', { type: 'idea', title: 'Compactness', status: 'draft', origin: 'researcher', related_assets: ['main_theorem'] }));
     alice.commit('idea');
     alice.git('push', '-q');
     bob.git('pull', '-q', '--rebase');
-    bob.write('research/checks/check_main_theorem_constants.md', check());
-    const report = bob.run(['report', 'none', '--summary', 'No counterexample']);
+    for (const [file, content] of Object.entries(SEARCH_FILES)) bob.write(file, content);
+    const report = bob.run(['report', 'searched', '--summary', 'No counterexample']);
     assert.equal(report.status, 1);
     assert.match(report.stderr, /HEAD moved .* research\/ideas\/idea_alice\.md .*alice@example\.edu/s);
-    fs.rmSync(path.join(bob.dir, 'research/checks/check_main_theorem_constants.md'));
+    for (const file of Object.keys(SEARCH_FILES)) fs.rmSync(path.join(bob.dir, file));
     const rebased = bob.run(['sync', 'pull', '--continue']);
     assert.equal(rebased.status, 0, rebased.stderr);
-    assert.equal(bob.state().stage, 'falsify');
-    bob.write('research/checks/check_main_theorem_constants.md', check());
-    const again = bob.run(['report', 'none', '--summary', 'No counterexample']);
+    assert.equal(bob.state().stage, 'search');
+    for (const [file, content] of Object.entries(SEARCH_FILES)) bob.write(file, content);
+    const again = bob.run(['report', 'searched', '--summary', 'No counterexample']);
     assert.equal(again.status, 0, again.stderr);
     assert.equal(bob.state().stage, 'plan');
-    const stamped = matter(bob.read('research/checks/check_main_theorem_constants.md')).data;
+    assert.equal(matter(bob.read('research/candidates/cand_main_theorem_r1_s1_constants.md')).data.performed_by, 'bob@example.edu');
+    const checkFile = fs.readdirSync(path.join(bob.dir, 'research/checks')).find((file) => file.startsWith('check_main_theorem_'));
+    assert.match(bob.read(`research/checks/${checkFile}`), /Constant solutions satisfy the equation trivially/);
+    const stamped = matter(bob.read(`research/checks/${checkFile}`)).data;
     assert.equal(stamped.performed_by, 'bob@example.edu');
     assert.equal(stamped.statement_digest, statementDigest(bob.read('research/assets/main_theorem.md')));
     assert.ok(stamped.base_commit);

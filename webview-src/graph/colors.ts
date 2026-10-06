@@ -21,6 +21,7 @@ export const FLAG_META: Record<GraphFlag, { symbol: string; label: string; color
   refuted: { symbol: '✕', label: 'Refuted by an approved counterexample', color: COLOR.error },
   parked: { symbol: '⏸', label: 'Parked', color: COLOR.waiting },
   active: { symbol: '●', label: 'The loop is working on it', color: COLOR.active },
+  searching: { symbol: '⌕', label: 'An object search is running on it', color: COLOR.active },
   uncovered: { symbol: '○', label: 'Approved but not in the manuscript', color: COLOR.link },
   manuscript_stale: { symbol: '△', label: 'A locked manuscript section is stale because of it', color: COLOR.waiting },
   manuscript_invalid: { symbol: '✕', label: 'A locked manuscript section presents it but it no longer holds', color: COLOR.error },
@@ -34,7 +35,7 @@ export function statusColor(status: string): string {
 
 /** The one color a node's border takes: the most urgent flag, else its status. */
 export function nodeColor(node: GraphNodeView): string {
-  for (const flag of ['counterexample', 'refuted', 'manuscript_invalid', 'question', 'awaiting_approval', 'parked', 'active', 'manuscript_stale', 'uncovered'] as GraphFlag[]) {
+  for (const flag of ['counterexample', 'refuted', 'manuscript_invalid', 'question', 'awaiting_approval', 'parked', 'searching', 'active', 'manuscript_stale', 'uncovered'] as GraphFlag[]) {
     if (node.flags.includes(flag)) return FLAG_META[flag].color;
   }
   return statusColor(node.status);

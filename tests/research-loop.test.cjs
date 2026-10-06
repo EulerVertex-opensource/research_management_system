@@ -6,6 +6,7 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { searchNothing, writeRound } = require('./search-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -58,12 +59,14 @@ async function driveToPlan(f) {
   await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
   assert.equal(f.core.current.stage, 'sources');
   await f.core.report({ outcome: 'none', summary: 'No sources' });
-  assert.equal((await f.core.next()).stage, 'falsify');
+  assert.equal((await f.core.next()).stage, 'search');
   assert.equal(f.core.current.current.assetId, 'main_theorem');
-  await assert.rejects(f.core.report({ outcome: 'none', summary: 'No counterexample' }), /falsification check/);
-  f.map.set('research/checks/check_main_theorem_small.md', check());
-  await f.core.report({ outcome: 'none', summary: 'No counterexample' });
-  assert.match(f.map.get('research/checks/check_main_theorem_small.md'), /statement_digest: /);
+  await assert.rejects(f.core.report({ outcome: 'searched', summary: 'No counterexample' }), /exactly one round record/);
+  await searchNothing(f);
+  // With nothing found, the loop itself writes the falsification check from the search records.
+  const checkFile = [...f.map.keys()].find((file) => file.startsWith('research/checks/check_main_theorem_'));
+  assert.match(f.map.get(checkFile), /statement_digest: /);
+  assert.match(f.map.get(checkFile), /NOT fails: 0 = 0/);
   assert.equal(f.core.current.stage, 'plan');
 }
 
@@ -175,7 +178,7 @@ test('ready offers extend; an extension adds a goal and keeps approved results',
   f.map.set('research/assets/second_theorem.md', asset('', { title: 'Second theorem' }));
   await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
   await f.core.report({ outcome: 'none', summary: 'No sources' });
-  assert.equal((await f.core.next()).stage, 'falsify');
+  assert.equal((await f.core.next()).stage, 'search');
   assert.equal(f.core.current.current.assetId, 'second_theorem');
   f.map.set('research/assets/second_theorem.md', asset('\n## Proof\n\nSecond proof by reflexivity.\n', { title: 'Second theorem' }));
   await f.core.approve('asset', 'second_theorem', 'test');
@@ -295,18 +298,24 @@ test('confirmed counterexample deprecates the asset and returns to the project g
   f.map.set('research/assets/main_theorem.md', asset());
   await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
   await f.core.report({ outcome: 'none', summary: 'No sources' });
-  assert.equal((await f.core.next()).stage, 'falsify');
-  f.map.set('research/assets/counterexample_1.md', matter.stringify('\n## Assumptions\n\nAll hypotheses hold.\n\n## Calculation\n\nThe conclusion fails.\n', { type: 'example', title: 'Counterexample', status: 'draft', refutes: 'main_theorem', depends_on: [], uses_definitions: [] }));
-  await f.core.report({ outcome: 'candidate', summary: 'Found', counterexampleId: 'counterexample_1' });
+  assert.equal((await f.core.next()).stage, 'search');
+  writeRound(f, { status: 'survived' });
+  await f.core.report({ outcome: 'searched', summary: 'Found' });
   assert.equal(f.core.current.stage, 'verify_counterexample');
-  f.map.set('research/assets/counterexample_1.md', f.map.get('research/assets/counterexample_1.md') + '\n## Verdict\n\nconfirmed\n');
+  // The survivor is copied into a draft example, the form verification and the researcher confirm.
+  const exampleId = f.core.current.current.counterexampleId;
+  const exampleFile = `research/assets/${exampleId}.md`;
+  const example = matter(f.map.get(exampleFile));
+  assert.deepEqual([example.data.type, example.data.status, example.data.refutes], ['example', 'draft', 'main_theorem']);
+  assert.match(example.content, /## Assumptions\n\n### H1\n\n0 is a natural number\.[\s\S]*## Calculation\n\nThe conclusion fails for 0\./);
+  f.map.set(exampleFile, f.map.get(exampleFile) + '\n## Verdict\n\nconfirmed\n');
   await f.core.report({ outcome: 'confirmed', summary: 'Checked' });
   const request = f.core.current.approvalQueue.find((item) => item.kind === 'counterexample');
-  assert.equal(request.target, 'counterexample_1');
+  assert.equal(request.target, exampleId);
   assert.equal((await f.core.next()).stage, 'waiting');
   await f.core.resolveApproval(request.id, 'approved', '', 'test');
   assert.equal(matter(f.map.get('research/assets/main_theorem.md')).data.status, 'deprecated');
-  assert.equal(matter(f.map.get('research/assets/counterexample_1.md')).data.status, 'approved');
+  assert.equal(matter(f.map.get(exampleFile)).data.status, 'approved');
   assert.equal((await f.core.next()).stage, 'draft_project');
 });
 
@@ -521,7 +530,7 @@ test('shared records rebuild parked assets, falsification, and failure counts wh
   f.map.set('research/assets/main_theorem.md', asset('', { title: 'Main theorem', tags: ['changed'] }).replace('n = n.', 'n + 0 = n.'));
   await fresh.stop();
   await fresh.start('claude', { force: true });
-  assert.equal(fresh.current.stage, 'falsify');
+  assert.equal(fresh.current.stage, 'search');
 });
 
 test('next attaches the stage context pack and worker tier to the brief', async () => {
@@ -535,7 +544,7 @@ test('next attaches the stage context pack and worker tier to the brief', async 
   assert.match(next.instruction, /research-worker-deep/);
   const pack = f.map.get('.research-assistant-loop/context/current.md');
   assert.match(pack, /For every natural number n, n = n\./);
-  assert.match(pack, /falsify → none: No counterexample/);
+  assert.match(pack, /search → searched: No counterexample/);
   const manifest = JSON.parse(f.map.get('.research-assistant-loop/context/current.json'));
   assert.equal(manifest.stageStartedAt, f.core.current.current.stageStartedAt);
   assert.ok(manifest.files.includes('research/assets/main_theorem.md'));

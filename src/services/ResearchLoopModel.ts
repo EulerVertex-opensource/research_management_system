@@ -2,10 +2,11 @@ import * as path from 'path';
 import type matter from 'gray-matter';
 import { parseMarkdown } from './Frontmatter';
 import { NodeKind } from '../domain/nodeKinds';
-import { researchDigest } from '../domain/digests';
+import { researchDigest, statementDigest } from '../domain/digests';
 import { nodeProblems } from '../domain/schema';
 import { LIBRARY_PREFIX, isLibraryId, locateNodeFile } from '../domain/registry';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
+import { SearchMode, SearchSlot, candidateProblems, roundProblems } from '../domain/search';
 
 /**
  * Pure types and helpers for the chat-driven research loop. Shared by the
@@ -16,10 +17,14 @@ export type AgentProvider = 'claude' | 'codex';
 export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
-  | 'falsify' | 'verify_counterexample' | 'plan' | 'execute' | 'waiting' | 'ready';
+  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'waiting' | 'ready';
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
-export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample';
-export type ReportOutcome = 'complete' | 'none' | 'candidate' | 'confirmed' | 'rejected' | 'proved' | 'failed' | 'question';
+/** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
+export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification';
+export type ReportOutcome = 'complete' | 'none' | 'candidate' | 'confirmed' | 'rejected' | 'proved' | 'failed' | 'question' | 'searched' | 'summarized';
+export const REPORT_OUTCOMES: readonly ReportOutcome[] = ['complete', 'none', 'candidate', 'confirmed', 'rejected', 'proved', 'failed', 'question', 'searched', 'summarized'];
+/** Stages of one object search; the search round in `current.search` lives through all of them. */
+export const SEARCH_STAGES: ReadonlySet<LoopStage> = new Set<LoopStage>(['search', 'search_summary', 'verify_counterexample', 'verify_construction']);
 
 export const STATE_DIR = '.research-assistant-loop';
 export const STATE_PATH = `${STATE_DIR}/state.json`;
@@ -56,10 +61,10 @@ export interface LoopFiles {
 }
 
 /** Git-tracked folders that carry research meaning which used to live only in local loop state. */
-export interface SharedFolders { checks: string; decisions: string; handoffs: string; approvals: string }
+export interface SharedFolders { checks: string; decisions: string; handoffs: string; approvals: string; candidates: string }
 export function sharedFolders(researchRoot: string): SharedFolders {
   const join = (child: string) => researchRoot === '.' ? child : path.posix.join(researchRoot, child);
-  return { checks: join('checks'), decisions: join('decisions'), handoffs: join('handoffs'), approvals: join('approvals') };
+  return { checks: join('checks'), decisions: join('decisions'), handoffs: join('handoffs'), approvals: join('approvals'), candidates: join('candidates') };
 }
 
 export interface LoopQuestion {
@@ -88,7 +93,11 @@ export interface LoopState {
   status: LoopStatus;
   stage: LoopStage;
   resumeStage?: LoopStage;
-  current: { assetId?: string; planId?: string; counterexampleId?: string; stageStartedAt: string; baseCommit?: string; statementDigest?: string };
+  current: {
+    assetId?: string; planId?: string; counterexampleId?: string; stageStartedAt: string; baseCommit?: string; statementDigest?: string;
+    /** The object-search round in progress: its mode, number, and the direction each worker slot was given. */
+    search?: { mode: SearchMode; round: number; slots: SearchSlot[]; candidateId?: string; properties?: string[]; requested?: boolean };
+  };
   /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
   progress: Record<string, { falsifiedAt?: string; changesRequested?: string }>;
   scaffoldBrief?: { missing?: string[]; incomplete?: string[] };
@@ -107,7 +116,7 @@ export interface LoopState {
 }
 
 export interface ApprovalRecord {
-  kind: 'project' | 'asset' | 'definition'; target: string; digest: string; approvedAt: string; source?: string;
+  kind: 'project' | 'asset' | 'definition' | 'specification'; target: string; digest: string; approvedAt: string; source?: string;
   statement?: string; performed_by?: string; base_commit?: string; extension_version?: string;
 }
 export interface ApprovalFile { version: 1; records: ApprovalRecord[] }
@@ -122,12 +131,17 @@ export interface StageReport {
   assumedDefinitions?: string[];
 }
 
-export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; library?: string; checks?: string; decisions?: string; handoffs?: string }
+export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; library?: string; checks?: string; decisions?: string; handoffs?: string; candidates?: string }
 
 export { researchDigest, statementDigest, proofDigest } from '../domain/digests';
 
-export function isApproved(records: ApprovalRecord[], kind: 'project' | 'asset' | 'definition', target: string, raw: string): boolean {
-  return records.some((record) => record.kind === kind && record.target === target && record.digest === researchDigest(raw, kind));
+/** A specification approval covers the statement only, so writing the construction found later keeps it. */
+export function approvalDigest(raw: string, kind: ApprovalRecord['kind']): string {
+  return kind === 'specification' ? statementDigest(raw) : researchDigest(raw, kind);
+}
+
+export function isApproved(records: ApprovalRecord[], kind: ApprovalRecord['kind'], target: string, raw: string): boolean {
+  return records.some((record) => record.kind === kind && record.target === target && record.digest === approvalDigest(raw, kind));
 }
 
 export function safeRelativeFile(filePath: string): string {
@@ -165,9 +179,15 @@ export function validateResearchFile(filePath: string, raw: string, folders: Res
     if (kind === 'asset' && !problems.length && data.status === 'draft' && statementIncomplete(content)) problems.push(`${id}: asset statement is incomplete.`);
     if (problems.length) throw new Error(problems[0]);
   } else if (folders.checks && folder === folders.checks) {
-    if (data.type !== 'falsification_check' || typeof data.target_asset !== 'string' || !['no_counterexample_found', 'counterexample_rejected'].includes(data.outcome) || !sectionContent(content, 'Cases checked') || !hasSection(content, 'Limitations')) {
+    if (data.type === 'search_round') {
+      const problems = roundProblems(id, data, content);
+      if (problems.length) throw new Error(problems[0]);
+    } else if (data.type !== 'falsification_check' || typeof data.target_asset !== 'string' || !['no_counterexample_found', 'counterexample_rejected'].includes(data.outcome) || !sectionContent(content, 'Cases checked') || !hasSection(content, 'Limitations')) {
       throw new Error(`${id}: invalid falsification check (type falsification_check, target_asset, outcome no_counterexample_found|counterexample_rejected, ## Cases checked, ## Limitations).`);
     }
+  } else if (folders.candidates && folder === folders.candidates) {
+    const problems = candidateProblems(id, data, content, { committed: options.committed });
+    if (problems.length) throw new Error(problems[0]);
   } else if (options.committed && folders.decisions && folder === folders.decisions) {
     if (data.type !== 'decision' || typeof data.target !== 'string' || typeof data.kind !== 'string') throw new Error(`${id}: invalid decision record.`);
   } else if (options.committed && folders.handoffs && folder === folders.handoffs) {

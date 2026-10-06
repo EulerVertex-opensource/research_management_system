@@ -57,7 +57,7 @@ function Detail({ node, payload, onImpact, onNavigate, onAction, onFocus, focuse
           : node.status === 'draft' && <button style={buttonStyle('secondary')} onClick={() => onAction({ action: 'park', assetId: node.id })} title="The loop skips it until you unpark it">Park</button>)}
         {node.status === 'draft' && node.kind === 'asset' && (
           <button style={buttonStyle('secondary')} title="Copies an instruction and opens the agent chat"
-            onClick={() => onAction({ action: 'agent', prompt: `Work on ${node.id} next in the research loop: falsify it if it has not been checked, otherwise plan and prove it. Read only its context; do not change its statement without asking me.` })}>
+            onClick={() => onAction({ action: 'agent', prompt: `Work on ${node.id} next in the research loop: search it for a counterexample if it has not been checked, otherwise plan and prove it. Read only its context; do not change its statement without asking me.` })}>
             Work on it in chat ↗
           </button>
         )}

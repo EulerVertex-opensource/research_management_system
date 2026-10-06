@@ -1,6 +1,7 @@
 import { LoopStage } from './ResearchLoopModel';
 import { projectSection, requiredAssetIds, requiredResults } from '../domain/project';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
+import { SearchMode, SearchSlot } from '../domain/search';
 
 /**
  * Deterministic context packs for the research loop. For each stage the loop
@@ -17,7 +18,7 @@ export interface ContextNode {
 
 /** What of a node to show: everything, the statement (body before ## Proof), the title and first paragraph, or named sections. */
 export type ContextView = 'all' | 'statement' | 'summary' | string[];
-export type ContextKind = 'project' | 'asset' | 'definition' | 'plan' | 'idea' | 'check' | 'index' | 'papers';
+export type ContextKind = 'project' | 'asset' | 'definition' | 'plan' | 'idea' | 'check' | 'candidate' | 'index' | 'papers' | 'text';
 export type ContextWorker = 'light' | 'deep';
 
 export interface ContextItem {
@@ -28,6 +29,8 @@ export interface ContextItem {
   /** 0 is always kept; higher numbers are dropped first when the pack exceeds its budget. */
   priority: number;
   reason: string;
+  /** For kind `text`: content the loop compiled (the search board), rendered as is. */
+  text?: string;
 }
 
 export interface ContextManifest {
@@ -52,6 +55,8 @@ export interface ContextSources {
   plans: Map<string, ContextNode>;
   ideas: Map<string, ContextNode>;
   checks: Map<string, ContextNode>;
+  /** Object-search candidates; absent in callers that predate the search. */
+  candidates?: Map<string, ContextNode>;
   /** Earlier stage reports, oldest first; the pack keeps those for the current asset. */
   reports: Array<{ stage?: string; outcome?: string; summary?: string; assetId?: string; at?: string }>;
 }
@@ -66,18 +71,20 @@ export interface ContextFocus {
   researcherInput?: string;
   changesRequested?: string;
   direction?: string;
+  /** Object search: the round, this worker's slot (search) or the round's results (search_summary), and the board. */
+  search?: { mode: SearchMode; round: number; slot?: SearchSlot; board: string; roundDigest?: string; requested?: boolean };
 }
 
 export interface RenderedContext { text: string; tokens: number; included: ContextItem[]; omitted: ContextItem[]; files: string[] }
 
 export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
-  falsify: 12000, verify_counterexample: 10000, plan: 16000, execute: 30000,
+  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
-  scaffold: 'light', sources: 'light', falsify: 'deep', verify_counterexample: 'deep', plan: 'deep', execute: 'deep',
+  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }
@@ -171,13 +178,41 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
       excluded.push('full paper transcriptions (use show <paper_slug> for an outline, then --section)', 'proofs');
       break;
     }
-    case 'falsify':
-      if (!target) break;
-      asset(target, 'statement', 0, 'the statement to refute');
+    case 'search': {
+      if (!target || !focus.search) break;
+      const { mode, slot } = focus.search;
+      asset(target, 'statement', 0, mode === 'refute' ? 'the statement to refute' : 'the specification to construct');
+      add('text', 'search_board', undefined, 'all', 0, 'what earlier rounds found');
       for (const dep of deps(target)) asset(dep, 'statement', 1, 'direct dependency');
       definitionsOf([target], 1, 3);
-      for (const check of sources.checks.values()) if (check.data.target_asset === target) add('check', check.id, check.file, ['Limitations'], 3, 'what an earlier check did not cover');
-      excluded.push(`the proof of ${target} (refute the statement, not the argument)`, 'indirect dependencies', 'plans and ideas');
+      const idea = slot ? sources.ideas.get(slot.direction) : undefined;
+      if (idea) add('idea', idea.id, idea.file, 'all', 0, 'the test case this slot tries');
+      const nearMiss = slot?.candidateId ? sources.candidates?.get(slot.candidateId) : undefined;
+      if (nearMiss) add('candidate', nearMiss.id, nearMiss.file, 'all', 0, 'the near-miss to repair');
+      for (const check of sources.checks.values()) if (check.data.target_asset === target && check.data.type === 'falsification_check') add('check', check.id, check.file, ['Limitations'], 3, 'what an earlier check did not cover');
+      // A search the researcher asked for after proofs failed: where a proof broke can show where a counterexample lives.
+      if (focus.search.requested) for (const plan of sources.plans.values()) if (plan.data.target_asset === target && plan.data.type === 'plan' && plan.data.status === 'failed') add('plan', plan.id, plan.file, ['Failure'], 3, 'where a proof attempt broke');
+      if (slot) notes.push(`Your slot: ${slot.slot}, round ${focus.search.round}. Direction ${slot.direction}: ${slot.label}`);
+      if (focus.search.requested) notes.push('The researcher asked for this deeper search; the failed proof attempts below show where proofs broke.');
+      excluded.push(`the proof of ${target} (${mode === 'refute' ? 'refute the statement, not the argument' : 'construct from the specification'})`, 'indirect dependencies', focus.search.requested ? 'plan checklists' : 'plans', 'the other slots of this round');
+      break;
+    }
+    case 'verify_construction': {
+      if (!target) break;
+      asset(target, 'statement', 0, 'the specification to verify against');
+      const found = focus.counterexampleId ? sources.candidates?.get(focus.counterexampleId) : undefined;
+      if (found) add('candidate', found.id, found.file, ['Object'], 0, 'the object to verify');
+      definitionsOf([target], 1, 3);
+      for (const dep of deps(target)) asset(dep, 'statement', 2, 'direct dependency');
+      excluded.push(`the candidate's own checks and the search reasoning (verify independently)`, 'proofs');
+      break;
+    }
+    case 'search_summary':
+      if (!target || !focus.search) break;
+      asset(target, 'statement', 0, focus.search.mode === 'refute' ? 'the statement searched' : 'the specification searched');
+      add('text', 'search_board', undefined, 'all', 0, 'obstructions and limitations so far');
+      add('text', 'search_round', undefined, 'all', 0, `this round's candidates and why they failed`);
+      excluded.push('candidate bodies (show <candidate id> for one when a failure line is unclear)', 'proofs', 'plans');
       break;
     case 'verify_counterexample':
       if (focus.counterexampleId) asset(focus.counterexampleId, 'all', 0, 'the candidate to recheck');
@@ -186,7 +221,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
         definitionsOf([target, ...(focus.counterexampleId ? [focus.counterexampleId] : [])], 1, 3);
         for (const dep of deps(target)) asset(dep, 'statement', 2, 'direct dependency');
       }
-      excluded.push('the falsify stage reasoning (verify independently)', `the proof of ${target ?? 'the target'}`);
+      excluded.push('the search reasoning (verify independently)', `the proof of ${target ?? 'the target'}`);
       break;
     case 'plan':
     case 'execute': {
@@ -211,6 +246,12 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
     }
     default:
       break;
+  }
+  if (focus.search) {
+    for (const item of items) {
+      if (item.id === 'search_board') item.text = focus.search.board;
+      if (item.id === 'search_round') item.text = `## Round ${focus.search.round} candidates\n\n${focus.search.roundDigest ?? '- none'}`;
+    }
   }
   return { stage: focus.stage, assetId: target, planId: focus.planId, budget, worker: STAGE_WORKERS[focus.stage], items, excluded, notes };
 }
@@ -263,13 +304,14 @@ function paperIndexOutline(text: string): string {
 }
 
 function renderItem(item: ContextItem, sources: ContextSources): string {
+  if (item.kind === 'text') return item.text?.trim() ?? '';
   if (item.kind === 'index') return `### Node index (id | type | status | deps | title)\n\n${nodeIndex(sources) || '(no nodes yet)'}`;
   if (item.kind === 'papers') return `### Paper index — ${item.file}\n\n${paperIndexOutline(sources.paperIndex) || '(no indexed papers)'}`;
   if (item.kind === 'project') {
     const body = item.view === 'all' ? strip(sources.project) : (item.view as string[]).map((heading) => { const content = projectPart(sources.project, heading); return content ? `## ${heading}\n\n${content}` : ''; }).filter(Boolean).join('\n\n');
     return `### Project — ${item.file}\n\n${body || '(empty)'}`;
   }
-  const map = { asset: sources.assets, definition: sources.definitions, plan: sources.plans, idea: sources.ideas, check: sources.checks }[item.kind];
+  const map = { asset: sources.assets, definition: sources.definitions, plan: sources.plans, idea: sources.ideas, check: sources.checks, candidate: sources.candidates ?? new Map<string, ContextNode>() }[item.kind];
   const node = map.get(item.id);
   if (!node) return '';
   let body: string;

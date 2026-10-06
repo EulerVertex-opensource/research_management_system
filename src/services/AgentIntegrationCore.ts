@@ -110,7 +110,7 @@ export function workerAgentName(tier: WorkerTier): string { return `research-wor
  */
 export function buildWorkerAgent(tier: WorkerTier, existingText: string, skillsDir: string, loopCommand: string): string | undefined {
   if (existingText.trim() && !existingText.includes(WORKER_MARK)) return undefined;
-  const stages = tier === 'light' ? 'scaffold and sources' : 'falsify, verify_counterexample, plan, and execute';
+  const stages = tier === 'light' ? 'scaffold, sources, and search_summary' : 'search, verify_counterexample, verify_construction, plan, and execute';
   return `---
 name: ${workerAgentName(tier)}
 description: Runs one research-loop stage (${stages}) from its compiled context pack and returns a short summary. Used by the research-loop driver only.
@@ -121,10 +121,10 @@ ${WORKER_MARK}
 
 You run exactly one research-loop stage. The driver gives you the stage, the asset, the stage skill, and the context pack path.
 
-1. Read the context pack (\`.research-assistant-loop/context/current.md\`) and \`${skillsDir}/<stage skill>/SKILL.md\`. Nothing else up front.
+1. Read the context pack the driver gives you (\`.research-assistant-loop/context/current.md\`, or your own \`search-<slot>.md\` in a search round) and \`${skillsDir}/<stage skill>/SKILL.md\`. Nothing else up front.
 2. Need more? Run \`${loopCommand} show <id> [--section Heading]\` for that one node or section. Do not list or read research folders directly.
 3. Do the stage's work in the files, following the skill. Never set \`status: approved\`; never run \`report\`, \`next\`, or git commands. The driver does that.
-4. Reply with at most five lines: the outcome (for example \`none\`, \`candidate --counterexample <id>\`, \`complete --plan <id>\`, \`proved\`, \`failed\`, or \`question: ...\`), the files you wrote, and the key mathematical reason.
+4. Reply with at most five lines (three in a search round): the outcome (for example \`searched\`, \`summarized\`, \`complete --plan <id>\`, \`proved\`, \`failed\`, or \`question: ...\`), the files you wrote, and the key mathematical reason.
 `;
 }
 
