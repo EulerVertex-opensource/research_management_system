@@ -55,7 +55,7 @@ test('migration moves definitions, converts explicit links, and retains approved
     const original = p.read('assets', 'subgroup');
     const preview = p.run('migrate', '--preview');
     assert.equal(preview.status, 0, preview.stderr);
-    assert.match(preview.stdout, /confirm it is a commonly used definition/);
+    assert.match(preview.stdout, /confirm it defines a concept/);
     assert.equal(p.read('assets', 'subgroup'), original);
     assert.equal(p.run('migrate', '--apply').status, 0);
     assert.equal(fs.existsSync(path.join(p.root, 'research/assets/subgroup.md')), false);

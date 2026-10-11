@@ -1,6 +1,6 @@
 ---
 name: extract-research-nodes
-description: Extract draft research nodes - theorem-like results, examples, standard definitions, and project-specific remarks - from an imported paper transcription, research notes, or existing assets, into the project or into the library of known results. Use when turning source text into assets or definitions, when the researcher asks to organize, sort, or ingest research materials, or when importing earlier theorems or a useful paper's results into the library; use import-math-paper first for a new PDF.
+description: Extract draft research nodes - theorem-like results, examples, definitions (every concept a kept result uses, standard or newly introduced), and remarks - from an imported paper transcription, research notes, or existing assets, into the project or into the library of known results. Use when turning source text into assets or definitions, when the researcher asks to organize, sort, or ingest research materials, or when importing earlier theorems or a useful paper's results into the library; use import-math-paper first for a new PDF.
 ---
 
 # Extract research nodes
@@ -12,7 +12,7 @@ Scope the request: `results` (theorems, lemmas, propositions, examples, construc
 When the researcher hands over a batch of materials to organize, sort each part to its one destination and extract it; do not invent another structure:
 
 - A written manuscript: the main TeX document when it already holds the paper, or a Markdown draft of it. Its mathematics and its prose have different destinations, and organizing is not finished until both are filled, in this order:
-  1. Every result, definition, and remark becomes a draft node as below, `source.kind: original`, with the statement and proof (under `## Proof`) as written. A proof's `\ref` or `\cite` to another result becomes a `depends_on` or a cited library or paper node.
+  1. The manuscript is the researcher's finished work: extract all of it as written, `source.kind: original`. Every result becomes an asset with its statement and proof (under `## Proof`), and every definition it states, standard or newly introduced, becomes a definition node (Definitions and remarks). A proof's `\ref` or `\cite` to another result becomes a `depends_on` or a cited library or paper node, and a use of a defined term or notation becomes a `uses_definitions`, so the graph reproduces the manuscript's dependencies.
   2. Propose `project.md` text from the abstract and introduction, with the main theorems as `required_results`.
   3. The prose: `plan-manuscript` (scope adopt) splits the TeX into section files and writes briefs citing the new node IDs, then `draft-latex` wraps the passages that present them in blocks. A Markdown draft gets the outline and briefs only; `draft-latex` writes its TeX when the researcher asks.
   4. Finish below, then request approval of the extracted nodes (`request_approval`) so the researcher reviews them together.
@@ -29,7 +29,15 @@ Create one Markdown asset per useful result under the configured assets folder w
 
 ## Definitions and remarks
 
-Extract a `type: definition` node only for a concept with a commonly used mathematical meaning, in its conventional scope, titled `Definition (concept)`, with `depends_on` listing definition IDs and a body giving the defining statement and the notation it introduces. A condition, assumption, or specialized use introduced only for this project is a separate draft `type: remark` asset, even when the source calls it a definition; split a mixed passage into the standard definition and a remark. Link the remark to the definitions it uses (`uses_definitions`) and relate it to the assets it affects with relative Markdown links, adding `depends_on` only for a real mathematical dependency. If conventional usage is uncertain, report it for researcher review instead of presenting the text as standard.
+Decide by use, not by whether a concept is standard. A concept becomes a `type: definition` node when a result being kept, or a required result in `project.md`, uses it in its statement or proof, whether it is standard or introduced by the source. This includes the conditions and hypotheses a source defines ("we say $f$ satisfies (H) if ..."): the results that assume them list them in `uses_definitions`, so a later change to the condition marks those results stale. In the researcher's own manuscript every result is kept, so every definition it states becomes a node, even one used only in an example or in the prose.
+
+- Title it `Definition (concept)`, with a body giving the defining statement and the notation it introduces as the source writes them. `depends_on` lists the definitions it builds on. Every result whose statement or proof uses the term or its notation lists it in `uses_definitions`, with or without a `\ref`.
+- A labelled list of hypotheses gives one node per label (`Definition (hypothesis H1)`, ...), so each result lists exactly the hypotheses it assumes.
+- Reuse an existing definition node only when the meaning is the same. When a source uses the same word in a different sense, create a node with a qualified ID (`admissible_pair_smith2021`) and a title naming whose sense it is; never edit the existing node to fit.
+- Skip a source's definitions that no kept result uses; they stay in its transcription.
+- When unsure whether a kept result depends on a definition, extract it and flag it for researcher review: a missing node breaks the graph, while the researcher can drop an unneeded one.
+
+A `type: remark` asset is only for text that defines nothing: a standing assumption ("throughout, $\Omega$ is bounded"), a convention, or an observation. Propose a standing assumption that holds for the whole project as `project.md` text under Scope and Assumptions. Link a remark to the definitions it uses (`uses_definitions`) and relate it to the assets it affects with relative Markdown links, adding `depends_on` only for a real mathematical dependency.
 
 Add `uses_definitions` to an existing asset only when concept and definition match. A verified link alone does not reset approval; report each such link for review. Any material change to a statement or proof leaves the node `draft`.
 

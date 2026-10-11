@@ -157,7 +157,7 @@ async function moveDefinitionsOutOfAssets(files: LoopFiles, paths: ProjectPaths,
   for (const item of plan.moved) {
     await files.writeFile(`${paths.definitions}/${item.id}.md`, item.raw);
     await files.deleteFile!(`${paths.assets}/${item.id}.md`);
-    report.review.push(`${paths.definitions}/${item.id}.md: moved from assets; confirm it is a commonly used definition and keep project-specific conditions as linked remark assets.`);
+    report.review.push(`${paths.definitions}/${item.id}.md: moved from assets; confirm it defines a concept a result uses; keep standing assumptions and conventions that define nothing as linked remark assets.`);
   }
   report.review.push(...plan.review);
 }
