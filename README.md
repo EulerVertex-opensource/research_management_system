@@ -262,7 +262,16 @@ node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --preview
 node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --apply
 ```
 
-For a new document, Research Assistant creates the input markers in `main.tex`. In an adopted document, place `% research-assistant:sections:start` and `% research-assistant:sections:end` on their own lines around the section inputs once. The command changes only the text between them; it refuses to guess an insertion point in an existing manuscript. Review the Git diff and compile after syncing. Use Git changes for coauthor review; [Overleaf warns](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/advanced-git-operations) that Git pushes can displace comments and tracked changes.
+For a new document, Research Assistant creates the input markers in `main.tex`. The command changes only the text between them; it refuses to guess an insertion point in an existing manuscript.
+
+An existing manuscript (an Overleaf project whose `main.tex` already holds the paper) is adopted once:
+
+```bash
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs adopt --preview
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs adopt --apply
+```
+
+It cuts the body at each `\section`, from the first heading up to the bibliography, and moves each piece unchanged into `sections/<id>.tex`. `main.tex` gets one `\input` per section between the markers and keeps its preamble, front matter, and bibliography. It then writes the outline in the manuscript's order and one brief per section. The ID comes from the heading's `\label{sec:...}`, or from its title. If `main.tex` already inputs files from `sections/`, only the markers are added. The section files concatenate to the original text, so the compiled document is unchanged. Moving text out of `main.tex` detaches Overleaf comments and tracked changes on it, so the agent asks before `--apply`. When you ask the agent to organize such a project, it first extracts the results and definitions into nodes, then adopts the manuscript, fills the briefs with those node IDs, and wraps the passages that present them in blocks; sections lock after you approve their nodes. Review the Git diff and compile after syncing. Use Git changes for coauthor review; [Overleaf warns](https://docs.overleaf.com/integrations-and-add-ons/git-integration-and-github-synchronization/git-integration/advanced-git-operations) that Git pushes can displace comments and tracked changes.
 
 ## Research loop from the agent chat
 

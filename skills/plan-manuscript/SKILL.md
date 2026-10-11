@@ -1,6 +1,6 @@
 ---
 name: plan-manuscript
-description: Plan the paper - the section order for the whole manuscript, or one section's brief - from approved research nodes. Use for presentation order, section outlines, result selection, and identifying missing arguments; use draft-latex to write the TeX.
+description: Plan the paper - the section order for the whole manuscript, or one section's brief - from approved research nodes. Use for presentation order, section outlines, result selection, identifying missing arguments, and adopting an existing manuscript (a main TeX that already holds the paper) into section files and briefs; use draft-latex to write the TeX.
 ---
 
 # Plan the manuscript
@@ -18,6 +18,18 @@ sources:
     uses: [statement]
 project_facets: [contribution]
 ``` Section IDs are stable lowercase letters, digits, underscores, or hyphens. Briefs are writing plans, distinct from proof plans.
+
+Briefs cite node IDs. When the project has no nodes but a written draft holds the results, extract them first (`extract-research-nodes`); never write briefs that describe a draft's results in prose under Gaps.
+
+## Scope: adopt an existing manuscript
+
+Use this scope when the main TeX document already holds the paper (inline `\section`s, or its own inputs from the sections folder) and the outline lists no sections. Extract its nodes first.
+
+1. Run `node .agents/skills/draft-latex/scripts/manuscript-writing.cjs adopt --preview` and show the researcher the split. Each section's text moves unchanged into `sections/<id>.tex`, and the main document gets `\input` lines between the sync markers; the preamble, front matter, and bibliography stay. Moving text detaches Overleaf comments and tracked changes, so ask before `adopt --apply` (`ask_researcher` with kind `discussion`, or in chat). Never split or retype the TeX by hand.
+2. `adopt --apply` writes the outline in the manuscript's order and one brief per section with `assets: []`. Fill each brief: `sources` for the nodes its TeX states or proves, each with a role and `uses`, plus Purpose and Subsections from the existing text. Draft nodes belong in `sources` here, because the prose already presents them; `lock` waits for their approval. Record under Gaps what the TeX asserts without a node, such as an unproved claim or an uncited fact.
+3. Keep the order and the TeX: adoption plans the existing paper; it does not restructure it. Propose any reordering separately (scope manuscript).
+
+Then `draft-latex` wraps the existing passages in blocks (Adopt existing prose).
 
 ## Scope: manuscript
 

@@ -9,8 +9,13 @@ Scope the request: `results` (theorems, lemmas, propositions, examples, construc
 
 ## Organizing materials
 
-When the researcher hands over a batch of materials to organize, sort each item to its one destination and extract it; do not invent another structure:
+When the researcher hands over a batch of materials to organize, sort each part to its one destination and extract it; do not invent another structure:
 
+- A written manuscript: the main TeX document when it already holds the paper, or a Markdown draft of it. Its mathematics and its prose have different destinations, and organizing is not finished until both are filled, in this order:
+  1. Every result, definition, and remark becomes a draft node as below, `source.kind: original`, with the statement and proof (under `## Proof`) as written. A proof's `\ref` or `\cite` to another result becomes a `depends_on` or a cited library or paper node.
+  2. Propose `project.md` text from the abstract and introduction, with the main theorems as `required_results`.
+  3. The prose: `plan-manuscript` (scope adopt) splits the TeX into section files and writes briefs citing the new node IDs, then `draft-latex` wraps the passages that present them in blocks. A Markdown draft gets the outline and briefs only; `draft-latex` writes its TeX when the researcher asks.
+  4. Finish below, then request approval of the extracted nodes (`request_approval`) so the researcher reviews them together.
 - A paper PDF: `import-math-paper` (transcription in `papers/<slug>/`, PDF in the local source folder), then extract its useful results and definitions below.
 - Notes, drafts, or TeX with mathematical content: results and definitions below; anything that is not yet a statement (an approach, a question, an observation) becomes an idea (`type: idea`, `status: draft`, `idea_kind`).
 - Earlier work or known results the project will use, not prove: the library (below).
