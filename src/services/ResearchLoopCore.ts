@@ -8,10 +8,10 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, approvalDigest, isApproved, isWaitingForHuman, newState,
+  LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, approvalDigest, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
-import { IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { INACTIVE_STATUSES, IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
 import { AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
 import { readLoopSettings } from './LoopSettingsStore';
 import { DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
@@ -246,15 +246,33 @@ export class ResearchLoopCore {
     if (!project || !(await this.isProjectApproved(project))) return;
     const state = this.require();
     state.extension = { goal, at: this.now(), baselineRequired: requiredAssetIds(project) };
+    await this.refreshRetired();
     await this.event('extended', { goal, baselineRequired: state.extension.baselineRequired });
   }
 
-  /** While extending, project.md may only gain required results. */
-  private extensionProblems(project: string): string[] {
+  /** Record which baseline results are retired, so the draft_project instruction stops asking to keep them. */
+  private async refreshRetired(): Promise<void> {
+    const extension = this.state?.extension;
+    if (!extension || extension.projectApproved) return;
+    const retired = await this.retiredBaseline();
+    if (retired.length) extension.retired = retired; else delete extension.retired;
+  }
+
+  /** Baseline required results since deprecated or archived: the researcher retired them, so an extension may drop them. */
+  private async retiredBaseline(): Promise<string[]> {
+    const extension = this.state?.extension;
+    if (!extension) return [];
+    const assets = await this.collectKind('asset');
+    return extension.baselineRequired.filter((id) => INACTIVE_STATUSES.has(assets.get(id)?.data.status));
+  }
+
+  /** While extending, project.md may only gain required results, apart from retired ones. */
+  private async extensionProblems(project: string): Promise<string[]> {
     const extension = this.state?.extension;
     if (!extension || extension.projectApproved) return [];
     const required = requiredAssetIds(project);
-    const removed = extension.baselineRequired.filter((id) => !required.includes(id));
+    const retired = await this.retiredBaseline();
+    const removed = extension.baselineRequired.filter((id) => !required.includes(id) && !retired.includes(id));
     const added = required.filter((id) => !extension.baselineRequired.includes(id));
     const problems: string[] = [];
     if (removed.length) problems.push(`project.md: keep the existing required results ${removed.join(', ')}; extending only adds results (deprecate an asset to retire it).`);
@@ -1374,6 +1392,7 @@ export class ResearchLoopCore {
     const state = this.require();
     if (state.status !== 'running') return this.result(`The loop is ${state.status}. Run: ${LOOP_COMMAND} resume`);
     if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
+    await this.refreshRetired();
     const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute'].includes(state.stage);
     // `falsify` is the stage name older loop versions saved; selection now runs an object search instead.
     let recompute = ['select', 'waiting', 'ready', 'review_project', 'discuss_goals', 'falsify'].includes(state.stage);
@@ -1583,6 +1602,14 @@ export class ResearchLoopCore {
     return { stage: state.stage, instruction: blocked ?? this.instruction(state), brief, blocked };
   }
 
+  private extensionInstruction(extension: LoopExtension): string {
+    const retired = extension.retired ?? [];
+    const kept = extension.baselineRequired.filter((id) => !retired.includes(id));
+    const keep = kept.length ? `keep every existing required_results entry (${kept.join(', ')}) and leave approved statements unchanged` : 'leave approved statements unchanged';
+    const replace = retired.length ? ` The required result(s) ${retired.join(', ')} were deprecated or archived: drop them from required_results, and give any revised statement a new asset ID.` : '';
+    return ` This extends an approved project: ${keep}; add the new goal as new asset ID(s) and update ## Intended Contribution.${replace}`;
+  }
+
   instruction(state: LoopState): string {
     const asset = state.current.assetId ?? '(none)';
     const input = state.researcherInput ? `\nResearcher input: ${state.researcherInput.text}` : '';
@@ -1591,7 +1618,7 @@ export class ResearchLoopCore {
       case 'discuss_goals':
         return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: ${LOOP_COMMAND} question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
-        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? ` This extends an approved project: keep every existing required_results entry (${state.extension.baselineRequired.join(', ')}) and leave approved statements unchanged; add the new goal as new asset ID(s) and update ## Intended Contribution.` : ''}${input}${report('complete|question')}`;
+        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}${input}${report('complete|question')}`;
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
@@ -1862,7 +1889,7 @@ export class ResearchLoopCore {
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
-        const extensionProblems = this.extensionProblems(project);
+        const extensionProblems = await this.extensionProblems(project);
         if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
         state.researcherInput = undefined;

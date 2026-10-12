@@ -319,6 +319,28 @@ test('confirmed counterexample deprecates the asset and returns to the project g
   assert.equal((await f.core.next()).stage, 'draft_project');
 });
 
+test('an extension may replace a refuted required result with a new ID in one approval', async () => {
+  const f = fixture();
+  await driveToReady(f);
+  f.map.set('research/assets/counterexample_1.md', matter.stringify('\n## Assumptions\n\nAll hypotheses hold.\n\n## Calculation\n\nThe conclusion fails.\n\n## Verdict\n\nconfirmed\n', { type: 'example', title: 'Counterexample', status: 'draft', refutes: 'main_theorem' }));
+  await f.core.confirmCounterexample('counterexample_1', 'test');
+  assert.equal((await f.core.next()).stage, 'draft_project');
+  await f.core.extend('Replace the main theorem by a corrected statement and also prove the second theorem.');
+  assert.deepEqual(f.core.current.extension.baselineRequired, ['main_theorem']);
+  const drafting = await f.core.next();
+  assert.equal(drafting.stage, 'draft_project');
+  assert.deepEqual(f.core.current.extension.retired, ['main_theorem']);
+  assert.doesNotMatch(drafting.instruction, /keep every existing required_results entry/);
+  assert.match(drafting.instruction, /main_theorem were deprecated or archived: drop them from required_results/);
+  f.map.set(paths.projectMd, project.replace('  - id: main_theorem\n    role: the central claim\n', '  - id: main_theorem_v2\n    role: the corrected claim\n  - id: second_theorem\n    role: the new conjecture\n'));
+  await f.core.report({ outcome: 'complete', summary: 'Replaced main_theorem and added second_theorem' });
+  assert.equal(f.core.current.stage, 'review_project');
+  const request = f.core.current.approvalQueue.find((item) => item.kind === 'project');
+  await f.core.resolveApproval(request.id, 'approved', '', 'test');
+  assert.equal((await f.core.next()).stage, 'scaffold');
+  assert.deepEqual([...f.core.current.scaffoldBrief.missing].sort(), ['main_theorem_v2', 'second_theorem']);
+});
+
 test('a confirmed counterexample abandons the refuted asset\'s pending plans', async () => {
   const f = fixture();
   await driveToPlan(f);

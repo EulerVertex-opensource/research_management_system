@@ -81,8 +81,8 @@ export interface LoopQuestion {
 export interface LoopAnswer { questionId: string; decision: 'answer' | 'skip'; text: string; answeredAt: string; source: string; consumed?: boolean }
 export interface ApprovalRequest { id: string; kind: ApprovalKind; target: string; digest: string; reason: string; requestedAt: string }
 export interface ResearcherInput { kind: string; text: string; at: string }
-/** A new goal added to an approved project; baselineRequired are the required results that must be kept. */
-export interface LoopExtension { goal: string; at: string; baselineRequired: string[]; projectApproved?: boolean; newResults?: string[] }
+/** A new goal added to an approved project; baselineRequired are the required results that must be kept, except retired ones (since deprecated or archived). */
+export interface LoopExtension { goal: string; at: string; baselineRequired: string[]; retired?: string[]; projectApproved?: boolean; newResults?: string[] }
 export interface LoopLock { sessionId: string; provider?: AgentProvider; acquiredAt: string; heartbeatAt: string }
 export interface StageSummary { stage: LoopStage; assetId?: string; outcome: ReportOutcome; summary: string; files: string[]; at: string }
 
