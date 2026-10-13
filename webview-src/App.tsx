@@ -179,6 +179,9 @@ export function App() {
       case 'graphData':
         dispatch({ type: 'GRAPH_DATA', payload: msg.payload });
         break;
+      case 'showView':
+        dispatch({ type: 'SET_VIEW', view: msg.view });
+        break;
       case 'settingsData':
         dispatch({ type: 'SETTINGS_DATA', settings: msg.settings, requestId: msg.requestId, errors: msg.errors });
         break;

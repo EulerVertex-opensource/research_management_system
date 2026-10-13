@@ -8,7 +8,7 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, approvalDigest, isApproved, isWaitingForHuman, newState,
+  LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { INACTIVE_STATUSES, IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
@@ -56,7 +56,7 @@ type Selection =
   | { stage: 'scaffold'; missing: string[]; incomplete: string[] }
   | { stage: 'plan'; assetId: string }
   | { stage: 'search'; assetId: string; mode: SearchMode }
-  | { stage: 'waiting'; reason: string };
+  | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
 type Finish = (message: string, next: LoopStage, patch?: Partial<LoopState['current']>) => Promise<{ stage: LoopStage; message: string }>;
 type SearchRound = NonNullable<LoopState['current']['search']>;
 /** A construction to search for: it lists required properties (`- P1: ...`) and no construction has been written yet. */
@@ -191,6 +191,7 @@ export class ResearchLoopCore {
     state.stage = stage;
     state.current = { ...state.current, ...patch, stageStartedAt: this.now(), baseCommit: await this.git?.head() };
     if (!SEARCH_STAGES.has(stage)) delete state.current.search;
+    if (stage !== 'waiting') delete state.waitingOn;
     await this.takeSnapshot();
     await this.save();
     await this.event('stage', { stage, assetId: state.current.assetId, planId: state.current.planId });
@@ -1306,7 +1307,7 @@ export class ResearchLoopCore {
       return { stage: 'draft_project', note: state.researcherInput.text };
     }
     const { order, missing, cycle } = assetClosure(required, assets);
-    if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.` };
+    if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.`, waitingOn: [{ kind: 'cycle', target: cycle }] };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
     const incomplete = order.filter((id) => !assets.get(id)!.origin && assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
     if (incomplete.length) return { stage: 'scaffold', missing: [], incomplete };
@@ -1384,7 +1385,13 @@ export class ResearchLoopCore {
       Object.keys(state.parked).length ? `parked: ${Object.entries(state.parked).map(([id, info]) => `${id} (${info.reason})`).join(', ')}` : '',
       unapproved.filter((id) => !definitions.has(id)).length ? `missing definitions: ${unapproved.filter((id) => !definitions.has(id)).join(', ')}` : '',
     ].filter(Boolean);
-    return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable' };
+    const missingDefinitions = unapproved.filter((id) => !definitions.has(id));
+    const waitingOn: WaitingReason[] = [
+      ...state.approvalQueue.map((item): WaitingReason => ({ kind: 'approval', target: item.target, detail: item.kind })),
+      ...Object.entries(state.parked).map(([id, info]): WaitingReason => ({ kind: 'parked', target: id, detail: info.reason })),
+      ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
+    ];
+    return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
   }
 
   /** Compute or confirm the current stage and return the instruction for the agent. */
@@ -1421,7 +1428,7 @@ export class ResearchLoopCore {
       }
       await this.setStage(selection.stage, patch);
       if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete };
-      if (selection.stage === 'waiting') state.lastError = selection.reason;
+      if (selection.stage === 'waiting') { state.lastError = selection.reason; state.waitingOn = selection.waitingOn; }
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
     }
     const result = this.result();

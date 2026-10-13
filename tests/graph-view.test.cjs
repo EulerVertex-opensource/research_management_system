@@ -18,8 +18,10 @@ const { loadManuscriptModel, loadImpactNodes, readSectionBriefFile } = load('../
 const { lockBinding } = load('../src/domain/manuscriptImpact.ts');
 const { researchDigest } = load('../src/domain/digests.ts');
 const { computeAttention } = load('../src/domain/attention.ts');
-const { visibleGraph, transitiveReduction, impactOf, DEFAULT_OPTIONS, MAX_VISIBLE } = load('../webview-src/graph/graphModel.ts');
-const { layout, laneOrder } = load('../webview-src/graph/layout.ts');
+const { visibleGraph, transitiveReduction, impactOf, goalGraph, needsGraph, blockingStates, defaultGoal, DEFAULT_OPTIONS, MAX_VISIBLE } = load('../webview-src/graph/graphModel.ts');
+const { layout } = load('../webview-src/graph/layout.ts');
+const { computeLoopHealth } = load('../src/domain/loopHealth.ts');
+const { buildHistory } = load('../src/domain/history.ts');
 const views = load('../webview-src/graph/GraphTab.tsx', ['react']);
 const { CoverageMatrix } = load('../webview-src/graph/CoverageMatrix.tsx', ['react']);
 const { ImpactView } = load('../webview-src/graph/ImpactView.tsx', ['react']);
@@ -127,13 +129,19 @@ test('coverage shows each presentation and its freshness; sections carry their b
   assert.equal(payload.sections.find((item) => item.id === 'sec_new').state, 'unlocked');
 });
 
-test('attention: blocking questions and counterexamples first, then critical reviews, then stuck work, then the rest', async () => {
+test('attention: a question first, then what holds up a main result, then what can wait, then housekeeping', async () => {
   const { payload } = await fixture();
   assert.deepEqual(payload.attention.map((item) => `${item.priority}:${item.key}`), [
-    '0:question:q1', '0:approval:r3', '1:approval:r1', '2:parked:side', '2:section:sec_main', '3:approval:r2', '3:section:sec_new',
+    '0:question:q1', '1:approval:r1', '1:approval:r3', '2:parked:side', '2:section:sec_main', '4:approval:r2', '4:section:sec_new',
   ]);
-  const counterexample = payload.attention[1];
-  assert.match(counterexample.title, /counterexample cex to second/);
+  const counterexample = payload.attention.find((item) => item.key === 'approval:r3');
+  assert.equal(counterexample.title, 'Check a possible counterexample to Second');
+  assert.match(counterexample.why, /If it holds, Second is false/);
+  const review = payload.attention.find((item) => item.key === 'approval:r1');
+  assert.equal(review.title, 'Review the proof of Second');
+  assert.deepEqual(review.buttons.map((button) => button.label), ['Read the proof', 'Accept proof', 'Ask for changes…']);
+  assert.equal(review.ifIgnored, 'Second keeps waiting. Other work continues.');
+  assert.ok(payload.attention.every((item) => !/\b(P[0-3]|three_failures|asset|Lock)\b/.test(`${item.title} ${item.why} ${item.ifIgnored}`)), 'no internal words in cards');
   assert.deepEqual(counterexample.blocks, ['second']);
   const stale = payload.attention.find((item) => item.key === 'section:sec_main');
   assert.equal(stale.buttons[0].action.action, 'agent');
@@ -193,38 +201,134 @@ test('impact of a definition reaches its dependants and the manuscript passages 
   assert.deepEqual(main.unaffected.map((item) => item.id), ['sec_new']);
 });
 
-test('layout puts prerequisites left of their dependants and shared prerequisites in the top band', async () => {
+test('layout reads top to bottom: prerequisites above what rests on them, main results on the bottom row', async () => {
   const { payload } = await fixture();
-  const visible = visibleGraph(payload, { ...DEFAULT_OPTIONS, showDefinitions: true });
-  const placed = layout(visible.nodes, visible.edges, payload.required);
-  const x = (id) => placed.positions.get(id).x;
-  assert.ok(x('widget') < x('helper') && x('helper') < x('main') && x('helper') < x('second'));
-  assert.deepEqual(laneOrder(visible.nodes, payload.required), ['shared', 'main', 'second', 'other']);
-  assert.equal(placed.bands[0].lane, 'shared');
+  const visible = visibleGraph(payload, { ...DEFAULT_OPTIONS, mode: 'all', showDefinitions: true, scope: 'all' });
+  const placed = layout(visible.nodes.map((node) => ({ id: node.id, required: node.required })), visible.edges.filter((edge) => edge.type !== 'refutes'));
+  const y = (id) => placed.positions.get(id).y;
+  assert.ok(y('widget') < y('helper') && y('helper') < y('main') && y('helper') < y('second'));
+  assert.equal(y('main'), y('second'), 'both main results end on the bottom row');
+  assert.equal(y('main'), Math.max(...[...placed.positions.values()].map((item) => item.y)));
   const boxes = [...placed.positions.values()];
-  for (const a of boxes) for (const b of boxes) if (a !== b) assert.ok(a.x !== b.x || Math.abs(a.y - b.y) >= 56, `${a.id} overlaps ${b.id}`);
+  for (const a of boxes) for (const b of boxes) if (a !== b) assert.ok(a.y !== b.y || Math.abs(a.x - b.x) >= 216, `${a.id} overlaps ${b.id}`);
+});
+
+test('nodes carry one of five states, and main results how much of what they rest on is done', async () => {
+  const { byId } = await fixture();
+  assert.deepEqual([byId.get('main').progress, byId.get('main').progressLabel], ['done', 'Done']);
+  assert.deepEqual([byId.get('second').progress, byId.get('second').progressLabel], ['needs_you', 'Check counterexample']);
+  assert.deepEqual([byId.get('side').progress, byId.get('side').progressLabel, byId.get('side').progressDetail], ['stuck', 'Set aside', '']);
+  assert.deepEqual(byId.get('main').closure, { done: 3, total: 3 });
+  assert.deepEqual(byId.get('second').closure, { done: 2, total: 3 });
+  assert.equal(byId.get('helper').statement, 'A statement.');
+});
+
+test('the goal view folds finished branches; the needs view keeps only blockers and what they hold up', async () => {
+  const { payload } = await fixture();
+  const second = goalGraph(payload, 'second');
+  assert.deepEqual(second.nodes.map((node) => node.id), ['second']);
+  assert.deepEqual(second.folds.map((fold) => [fold.parent, fold.members.sort()]), [['second', ['helper', 'widget']]]);
+  assert.deepEqual(second.edges, [{ from: 'second', to: 'fold:second', type: 'depends_on' }]);
+  const needs = needsGraph(payload);
+  assert.deepEqual(needs.nodes.map((node) => node.id).sort(), ['cex', 'second', 'side'], 'the counterexample itself waits for the researcher');
+  assert.equal(blockingStates(payload).get('second'), 'needs_you');
+  assert.equal(defaultGoal(payload), 'second');
 });
 
 test('the graph views render', async () => {
   const { payload } = await fixture();
   const noop = () => {};
   const tab = renderToStaticMarkup(React.createElement(views.GraphTab, { payload, onAction: noop, onNavigate: noop }));
-  assert.match(tab, /Attention \(7\)/);
+  assert.match(tab, /The agent has a question about Second/);
   assert.match(tab, /Which norm\?/);
-  assert.match(tab, /Confirm counterexample/);
-  assert.match(tab, /Update in chat ↗/);
-  assert.match(tab, /Manuscript:.*stale/);
+  assert.match(tab, /Yes, it is a counterexample/);
+  assert.match(tab, /Update it in chat ↗/);
+  assert.match(tab, /Waiting on you now/);
+  assert.match(tab, /Holds up a main result/);
+  assert.match(tab, /If you do nothing:/);
+  assert.match(tab, /Paper:.*out of date/);
+  assert.match(tab, /Why isn’t it done\?/);
   assert.match(renderToStaticMarkup(React.createElement(views.GraphTab, { payload: null, onAction: noop, onNavigate: noop })), /Loading/);
   const coverage = renderToStaticMarkup(React.createElement(CoverageMatrix, { payload, onFocus: noop, onAction: noop }));
   assert.match(coverage, /Main result/);
-  assert.match(coverage, /stale/);
+  assert.match(coverage, /out of date/);
   const impact = renderToStaticMarkup(React.createElement(ImpactView, { payload, selectedId: 'widget', onSelect: noop, onNavigate: noop, onAction: noop }));
-  assert.match(impact, /Manuscript impact/);
+  assert.match(impact, /Passages in the paper/);
   assert.match(impact, /main-proof/);
-  const progress = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: DEFAULT_OPTIONS, onOptions: noop, selectedId: 'main', onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
-  assert.match(progress, /<svg/);
-  assert.match(progress, /data-node="helper"/);
-  assert.match(progress, /1 implied edges omitted|4 shown/);
+  const list = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: DEFAULT_OPTIONS, onOptions: noop, selectedId: 'second', onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.doesNotMatch(list, /<svg/, 'results show as a list by default');
+  assert.match(list, /data-result="second"/);
+  assert.match(list, /2 finished results/);
+  assert.match(list, /A statement\./, 'the opened card shows the statement');
+  assert.match(list, /Show in graph/);
+  assert.match(list, />Details</);
+  const graph = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph' }, onOptions: noop, selectedId: 'second', onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.match(graph, /<svg/);
+  assert.match(graph, /data-node="second"/);
+  assert.match(graph, /\+ 1 more · all done/);
+  assert.match(graph, /Prerequisites above, main results below/);
+  assert.match(graph, /data-card/, 'a clicked result opens its card on the graph');
+  assert.match(graph, /Show in list/);
+  assert.doesNotMatch(graph, /Double-click/);
+  const everything = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph', mode: 'all' }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.match(everything, /data-node="helper"/);
+  assert.match(everything, /4 shown/);
+});
+
+test('with many main results the goal picker stays one compact control, and an all-done project starts from everything', async () => {
+  const { payload } = await fixture();
+  const noop = () => {};
+  const done = { ...payload, required: ['main', 'second', 'helper', 'widget'], nodes: payload.nodes.map((item) => ({ ...item, progress: 'done', inScope: true })) };
+  const start = renderToStaticMarkup(React.createElement(ProgressView, { payload: done, options: DEFAULT_OPTIONS, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.match(start, /aria-pressed="true"[^>]*>Everything</, 'nothing is unfinished: start from everything');
+  assert.match(start, /data-result="main"/);
+  const goal = renderToStaticMarkup(React.createElement(ProgressView, { payload: done, options: { ...DEFAULT_OPTIONS, mode: 'goal' }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.match(goal, /<select/);
+  assert.match(goal, /4 of 4 done/);
+  assert.doesNotMatch(goal, /aria-pressed="false"[^>]*>[^<]*<span[^>]*><\/span><span[^>]*>★/, 'no row of goal buttons');
+});
+
+test('a neighborhood says so and always offers the way back to everything', async () => {
+  const { payload } = await fixture();
+  const noop = () => {};
+  for (const display of ['graph', 'list']) {
+    const html = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display, mode: 'all', focus: { id: 'main', depth: 1 } }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+    assert.match(html, /Showing only the results around <b>Main<\/b>/, display);
+    assert.match(html, /Show everything/, display);
+  }
+  const goal = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, mode: 'goal', focus: { id: 'main', depth: 1 } }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.doesNotMatch(goal, /Showing only the results around/, 'a neighborhood narrows only the Everything view');
+});
+
+test('a result cited from a paper is marked as cited, with where it comes from', () => {
+  const files = memoryFiles({
+    'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft', deps: ['quoted'] }),
+    'research/assets/second.md': node('theorem', { title: 'Second', status: 'draft' }),
+    'research/assets/quoted.md': node('lemma', { title: 'Quoted', extra: { source: { kind: 'paper', paper_id: 'smith2021', location: 'Thm 3.2' } } }),
+  });
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state: undefined, manuscript: undefined, sectionsDir: 'sections', now: 'now' });
+  const byId = new Map(payload.nodes.map((item) => [item.id, item]));
+  assert.deepEqual(byId.get('quoted').cited, { kind: 'paper', paper: 'smith2021', location: 'Thm 3.2' });
+  assert.deepEqual([byId.get('quoted').progressLabel, byId.get('quoted').progressDetail], ['Cited', 'From smith2021, Thm 3.2']);
+  assert.equal(byId.get('main').cited, undefined);
+});
+
+test('an unchecked citation reads as not done and waits in "Before you finish", not as a call to act now', () => {
+  const files = memoryFiles({
+    'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft', deps: ['quoted'] }),
+    'research/assets/second.md': node('theorem', { title: 'Second', status: 'draft' }),
+    'research/assets/quoted.md': node('lemma', { title: 'Quoted', status: 'draft', extra: { source: { kind: 'paper', paper_id: 'smith2021', location: 'Thm 3.2' } } }),
+  });
+  const state = { status: 'running', stage: 'plan', current: { assetId: 'main', stageStartedAt: 'now' }, parked: {}, approvalQueue: [{ id: 'c1', kind: 'citation', target: 'quoted', digest: 'd', reason: '', requestedAt: '1' }], answers: [] };
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state, manuscript: undefined, sectionsDir: 'sections', now: 'now' });
+  const quoted = payload.nodes.find((item) => item.id === 'quoted');
+  assert.deepEqual([quoted.progress, quoted.progressLabel, quoted.progressDetail], ['waiting', 'Not checked', 'From smith2021, Thm 3.2 · check before you finish']);
+  const item = payload.attention.find((entry) => entry.key === 'approval:c1');
+  assert.equal(item.priority, 3);
+  assert.equal(item.title, 'Check the citation for Quoted');
+  assert.equal(item.why, 'It is quoted from smith2021, Thm 3.2. Check that the statement matches the source.');
+  assert.match(item.ifIgnored, /cannot count as done/);
+  assert.equal(payload.health.key, 'working', 'a citation to check is not "your turn"');
 });
 
 test('a node under an object search carries the searching flag', () => {
@@ -234,4 +338,89 @@ test('a node under an object search carries the searching flag', () => {
   const byId = new Map(payload.nodes.map((item) => [item.id, item]));
   assert.deepEqual(byId.get('main').flags, ['active', 'searching']);
   assert.deepEqual(byId.get('second').flags, []);
+});
+
+const healthNodes = new Map([
+  ['main', { title: 'Main Theorem', type: 'theorem' }],
+  ['reduction', { title: 'Reduction', type: 'proposition' }],
+  ['key', { title: 'Key bound', type: 'lemma', counts: { failedPlans: 3 } }],
+  ['sharp', { title: 'Sharpness example', type: 'construction' }],
+]);
+const healthEdges = [{ from: 'main', to: 'reduction' }, { from: 'reduction', to: 'key' }];
+const loopState = (patch) => ({
+  status: 'running', stage: 'search', current: { assetId: 'sharp', stageStartedAt: '2026-10-12T10:00:00Z', search: { mode: 'construct', round: 3, slots: [] } },
+  parked: {}, approvalQueue: [], answers: [], updatedAt: '2026-10-12T10:00:00Z', ...patch,
+});
+const health = (state, now = '2026-10-12T10:05:00Z') => computeLoopHealth({ state, nodes: healthNodes, edges: healthEdges, required: ['main', 'sharp'], now });
+
+test('loop health: a result set aside on a main result’s path while the agent works elsewhere', () => {
+  const result = health(loopState({ parked: { key: { reason: 'three_failures', at: '2026-10-12T09:00:00Z' } } }));
+  assert.equal(result.key, 'set_aside');
+  assert.equal(result.turn, 'agent');
+  assert.equal(result.headline, 'Key bound is set aside, and it holds up Main Theorem.');
+  assert.match(result.body, /tried 3 different proofs/);
+  assert.match(result.body, /Meanwhile the agent is searching for Sharpness example\./);
+  assert.deepEqual(result.chain, ['key', 'reduction', 'main']);
+  assert.match(result.ifIgnored, /Main Theorem stays unproved/);
+  assert.equal(result.statusBar.level, 'warning');
+  assert.equal(result.buttons[0].action.action, 'agent');
+});
+
+test('loop health: stopped lists each thing the researcher must resolve', () => {
+  const state = loopState({
+    stage: 'waiting', current: { stageStartedAt: '2026-10-12T10:00:00Z' },
+    parked: { key: { reason: 'three_failures', at: '1' }, sharp: { reason: 'search_exhausted', at: '2' } },
+    waitingOn: [{ kind: 'parked', target: 'key', detail: 'three_failures' }, { kind: 'missing_definition', target: 'nb_walk', detail: 'reduction' }, { kind: 'parked', target: 'sharp', detail: 'search_exhausted' }],
+  });
+  const result = health(state);
+  assert.equal(result.key, 'stopped');
+  assert.equal(result.headline, 'The loop has stopped. 3 things need you before it can continue.');
+  assert.deepEqual(result.blockers.map((item) => item.title), [
+    'Key bound is set aside after 3 failed proof attempts',
+    'The definition “nb walk” is used but never written down',
+    'Sharpness example is set aside because its search ran out without a match',
+  ]);
+  assert.equal(result.blockers[1].detail, 'Reduction uses it; the agent may not invent definitions.');
+  assert.equal(result.statusBar.text, 'Research: stopped — 3 things need you');
+  assert.equal(result.statusBar.level, 'error');
+});
+
+test('loop health: an agent quiet for 20 minutes is reported as stopped, with a way to continue', () => {
+  const state = loopState({ stage: 'execute', current: { assetId: 'reduction', stageStartedAt: '2026-10-12T10:00:00Z' } });
+  assert.equal(health(state, '2026-10-12T10:10:00Z').key, 'working');
+  const result = health(state, '2026-10-12T10:42:00Z');
+  assert.equal(result.key, 'stalled');
+  assert.equal(result.headline, 'The agent stopped responding 42 min ago.');
+  assert.match(result.body, /^It was proving Reduction\./);
+  assert.deepEqual(result.chain, ['reduction', 'main']);
+  assert.match(result.buttons[0].action.prompt, /research-loop next/);
+});
+
+test('loop health: a review on the main path, a pause at the continuation limit, and plain work', () => {
+  const review = health(loopState({ approvalQueue: [{ id: 'r1', kind: 'asset', target: 'key', digest: 'd', reason: '', requestedAt: '1' }] }));
+  assert.equal(review.key, 'needs_you');
+  assert.equal(review.headline, 'Review the proof of Key bound.');
+  assert.deepEqual(review.buttons.map((button) => button.label), ['Read the proof', 'Accept proof', 'Ask for changes…']);
+  const paused = health(loopState({ status: 'paused', lastError: 'Autopilot stopped after 30 automatic continuations in this session.' }));
+  assert.equal(paused.key, 'paused');
+  assert.match(paused.body, /30 automatic continuations/);
+  const working = health(loopState({}));
+  assert.equal(working.headline, 'Searching for Sharpness example.');
+  assert.equal(working.ifIgnored, 'Nothing is needed from you right now.');
+  assert.equal(health(undefined).key, 'idle');
+});
+
+test('the timeline tells loop events in words, newest first', () => {
+  const title = (id) => healthNodes.get(id)?.title ?? id;
+  const lines = buildHistory([
+    { at: '1', type: 'stage', stage: 'select' },
+    { at: '2', type: 'report', outcome: 'failed', summary: 'Attempt 3 failed: the moment estimate loses a log factor.' },
+    { at: '3', type: 'parked', assetId: 'key', reason: 'three_failures' },
+    { at: '4', type: 'stage', stage: 'waiting' },
+  ], title);
+  assert.deepEqual(lines.map((line) => [line.text, line.tone]), [
+    ['Stopped: nothing left that the agent can work on.', 'error'],
+    ['Set Key bound aside after repeated failed proof attempts.', 'error'],
+    ['Attempt 3 failed: the moment estimate loses a log factor.', 'warning'],
+  ]);
 });

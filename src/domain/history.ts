@@ -1,0 +1,83 @@
+import type { HistoryEntry, LoopTone } from '../models/graph';
+import { approvalTitle, parkClause, plural } from './copy';
+
+/**
+ * The "What happened" timeline: loop events (events.jsonl) as sentences for
+ * the researcher, newest first. Events with nothing to tell (stage `select`,
+ * context bookkeeping) are left out.
+ */
+
+type LoopEvent = Record<string, unknown>;
+
+const text = (value: unknown) => (typeof value === 'string' ? value : '');
+const clip = (value: string, max = 220) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
+
+const REPORT_TONE: Record<string, LoopTone> = {
+  proved: 'success', confirmed: 'success', complete: 'success', summarized: 'neutral', searched: 'neutral',
+  failed: 'warning', rejected: 'warning', candidate: 'warning', question: 'warning', none: 'neutral',
+};
+
+export function describeEvent(event: LoopEvent, title: (id: string) => string, type: (id: string) => string = () => ''): Omit<HistoryEntry, 'at'> | undefined {
+  const asset = text(event.assetId) || text(event.target);
+  const name = asset ? title(asset) : '';
+  const entry = (line: string, tone: LoopTone = 'neutral'): Omit<HistoryEntry, 'at'> => ({ text: line, tone, ...(asset ? { target: asset } : {}) });
+  switch (event.type) {
+    case 'started': return entry('The research loop started.', 'info');
+    case 'resumed': return entry('The loop resumed.', 'info');
+    case 'stopped': return entry('The loop was stopped.');
+    case 'extended': return entry(`New goal added: ${clip(text(event.goal), 120)}`, 'info');
+    case 'paused': return entry(/^Autopilot stopped/.test(text(event.reason)) ? 'The loop paused itself: it reached its limit of automatic continuations.' : 'The loop was paused.', 'warning');
+    case 'stage': {
+      const stage = text(event.stage);
+      if (stage === 'waiting') return entry('Stopped: nothing left that the agent can work on.', 'error');
+      if (stage === 'ready') return entry('Every main result is done.', 'success');
+      if (stage === 'plan') return entry(`Started planning a proof of ${name}.`);
+      if (stage === 'execute') return entry(`Started proving ${name}.`);
+      if (stage === 'search') return entry(`Started a search round on ${name}.`);
+      if (stage === 'verify_counterexample') return entry(`Started checking a possible counterexample to ${name}.`);
+      if (stage === 'verify_construction') return entry(`Started checking a candidate for ${name}.`);
+      if (stage === 'scaffold') return entry('Started setting up the results to prove.');
+      if (stage === 'draft_project') return entry('Started writing up the goals.');
+      return undefined;
+    }
+    case 'report': {
+      const summary = clip(text(event.summary));
+      return summary ? entry(summary, REPORT_TONE[text(event.outcome)] ?? 'neutral') : undefined;
+    }
+    case 'parked': return entry(`Set ${name} aside ${parkClause(text(event.reason))}.`, 'error');
+    case 'unparked': return entry(`${name} is back in the queue.`, 'info');
+    case 'approved': return entry(`${text(event.source) === 'auto' ? 'Auto mode' : 'You'} accepted ${name}.`, 'success');
+    case 'auto_approved': return entry(`Auto mode accepted ${name}.`, 'success');
+    case 'approval_requested': return entry(`Asked you: ${approvalTitle(text(event.kind), name, type(asset))}.`, 'warning');
+    case 'approval_resolved': return event.decision === 'changes_requested' ? entry(`You asked for changes to ${name}.`, 'info') : undefined;
+    case 'approval_invalidated': {
+      const id = text(event.id);
+      return { text: `${title(id)} changed after it was accepted; it needs your review again.`, tone: 'warning', target: id };
+    }
+    case 'refuted': return { text: `${name} is disproved by ${title(text(event.exampleId))}.`, tone: 'error', target: asset };
+    case 'counterexample_rejected': return { text: `You rejected the possible counterexample ${title(text(event.exampleId))}.`, tone: 'info' };
+    case 'construction_found': return entry(`Found a candidate for ${name}.`, 'success');
+    case 'search_round': return entry(`Search round ${Number(event.round) || '?'} on ${name}: ${plural(Number(event.candidates) || 0, 'candidate')}.`);
+    case 'search_finished': return entry(`The search on ${name} finished${event.rounds ? ` after ${plural(Number(event.rounds), 'round')}` : ''}.`);
+    case 'question': return entry(`The agent asked you a question${name ? ` about ${name}` : ''}.`, 'warning');
+    case 'question_answered': return entry(event.decision === 'skip' ? 'You skipped a question.' : 'You answered the agent’s question.', 'info');
+    case 'question_expired': return entry('A question went unanswered; the agent used its default.');
+    case 'plans_abandoned': return entry(`Dropped ${plural(Array.isArray(event.plans) ? event.plans.length : 0, 'proof plan')} for ${name}.`);
+    case 'idea_saved': {
+      const related = Array.isArray(event.relatedAssets) ? event.relatedAssets.map(String) : [];
+      return { text: `Saved an idea${related.length ? ` about ${title(related[0])}` : ''}.`, tone: 'neutral', ...(related[0] ? { target: related[0] } : {}) };
+    }
+    default: return undefined;
+  }
+}
+
+/** Newest first, at most `limit` lines. */
+export function buildHistory(events: LoopEvent[], title: (id: string) => string, type?: (id: string) => string, limit = 12): HistoryEntry[] {
+  const lines: HistoryEntry[] = [];
+  for (const event of [...events].reverse()) {
+    const described = describeEvent(event, title, type);
+    if (described) lines.push({ at: text(event.at), ...described });
+    if (lines.length >= limit) break;
+  }
+  return lines;
+}

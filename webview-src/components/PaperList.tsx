@@ -17,23 +17,25 @@ export function PaperList({ papers, selectedSlug, onSelect }: Props) {
   }
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto' }}>
+    <div style={{ flex: 1, overflowY: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
       {papers.map((p) => {
         const selected = p.slug === selectedSlug;
         return (
           <button
             key={p.slug}
             onClick={() => onSelect(p.slug)}
+            aria-current={selected}
             style={{
               display: 'block',
               width: '100%',
               padding: '8px 12px',
               textAlign: 'left',
-              border: 'none',
-              borderBottom: '1px solid var(--vscode-panel-border)',
+              border: `1px solid ${selected ? 'var(--vscode-focusBorder)' : 'var(--vscode-panel-border)'}`,
+              borderRadius: 6,
+              flexShrink: 0,
               background: selected
                 ? 'var(--vscode-list-activeSelectionBackground)'
-                : 'transparent',
+                : 'var(--vscode-editorWidget-background, transparent)',
               color: selected
                 ? 'var(--vscode-list-activeSelectionForeground)'
                 : 'var(--vscode-foreground)',

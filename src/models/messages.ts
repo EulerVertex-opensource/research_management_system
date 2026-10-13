@@ -12,6 +12,8 @@ export type ExtensionMessage =
   | { type: 'papersData'; papers: PaperEntry[] }
   | { type: 'manuscriptStatus'; status: ManuscriptStatus }
   | { type: 'graphData'; payload: GraphPayload }
+  /** Switch the dashboard to a view, e.g. the Overview after a status bar click. */
+  | { type: 'showView'; view: 'graph' }
   /** Current settings; after an update, `requestId` echoes it and `errors` lists invalid fields (nothing was written then). */
   | { type: 'settingsData'; settings: SettingsPayload; requestId?: string; errors?: SettingsErrors }
   /** Answer to `refreshDashboard`, after every panel's data was re-sent. */

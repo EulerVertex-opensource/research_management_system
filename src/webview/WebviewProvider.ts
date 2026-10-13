@@ -36,6 +36,8 @@ export class WebviewProvider {
   private readonly skillInstaller: SkillInstallerService;
   private readonly agentIntegration: AgentIntegrationService;
   readonly loopHost: LoopHost;
+  /** Show the Overview once the newly opened dashboard has loaded. */
+  private pendingOverview = false;
   private integrationEnsured = false;
   private readonly context: vscode.ExtensionContext;
   private readonly manuscriptBuildService: ManuscriptBuildService;
@@ -63,6 +65,8 @@ export class WebviewProvider {
     this.manuscriptBuildService = new ManuscriptBuildService(this.fileService, workspaceRoot);
     this.settingsService = new SettingsService(this.configService, this.loopHost);
     this.loopHost.onDidChangeState(() => this.scheduleGraph());
+    this.loopHost.setNodeSource(() => this.nodeIndex?.getAll() ?? []);
+    this.loopHost.setOverviewHandler(() => this.openOverview());
     this.loopHost.onDidChangeSettings(() => void this.sendSettings());
     // Not onDidChangeState: computing the badge goes through the loop core, which fires it again.
     this.loopHost.onDidSync(() => this.scheduleSyncState(0));
@@ -81,6 +85,14 @@ export class WebviewProvider {
     this.watchers.forEach((watcher) => watcher.dispose());
     this.watchers = [];
     this.loopHost.dispose();
+  }
+
+  /** Open the dashboard on its Overview (status bar clicks and loop popups land here). */
+  async openOverview(): Promise<void> {
+    const existing = Boolean(this.panel);
+    if (!existing) this.pendingOverview = true;
+    await this.open();
+    if (existing) { this.send({ type: 'showView', view: 'graph' }); this.scheduleGraph(); }
   }
 
   async open(): Promise<void> {
@@ -162,11 +174,7 @@ export class WebviewProvider {
       await this.sendProjectMd();
 
       this.output.appendLine(`[refresh] Completed in ${Date.now() - startedAt} ms`);
-      if (showConfirmation) {
-        void vscode.window.showInformationMessage(
-          'Research Assistant: refreshed project paths, shared scaffold, agent guidance, LaTeX build settings, and manuscript preview.'
-        );
-      }
+      if (showConfirmation) vscode.window.setStatusBarMessage('$(check) Research Assistant: project setup refreshed', 6000);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       this.output.appendLine(`[refresh] FAILED after ${Date.now() - startedAt} ms: ${message}`);
@@ -208,6 +216,7 @@ export class WebviewProvider {
       paths: this.pathSummary(config, paths),
     });
     this.send({ type: 'papersData', papers });
+    if (this.pendingOverview && initialized) { this.pendingOverview = false; this.send({ type: 'showView', view: 'graph' }); this.scheduleGraph(); }
     await this.sendManuscriptStatus();
     this.scheduleSyncState(0);
     if (initialized) {
@@ -689,9 +698,9 @@ export class WebviewProvider {
           // Batch approval is for library results only; project results are approved one by one after review.
           const targets = msg.ids.map((id) => this.nodeIndex!.getById(id)).filter((node): node is ResearchNode => Boolean(node && node.origin === 'library' && node.status === 'draft'));
           if (!targets.length) break;
-          const confirm = `Approve ${targets.length}`;
+          const confirm = `Mark ${targets.length} as checked`;
           const choice = await vscode.window.showWarningMessage(
-            `Approve ${targets.length} library result${targets.length > 1 ? 's' : ''} in ${msg.label}? The research loop will use them as known and never re-prove them; an edit later reverts the edited one to draft.`,
+            `Mark ${targets.length} known result${targets.length > 1 ? 's' : ''} in ${msg.label} as checked against their sources? The research loop will use them as known and never re-prove them; an edit later makes the edited one unchecked again.`,
             { modal: true }, confirm);
           if (choice !== confirm) break;
           for (const node of targets) {

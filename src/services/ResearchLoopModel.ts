@@ -85,6 +85,8 @@ export interface ResearcherInput { kind: string; text: string; at: string }
 export interface LoopExtension { goal: string; at: string; baselineRequired: string[]; retired?: string[]; projectApproved?: boolean; newResults?: string[] }
 export interface LoopLock { sessionId: string; provider?: AgentProvider; acquiredAt: string; heartbeatAt: string }
 export interface StageSummary { stage: LoopStage; assetId?: string; outcome: ReportOutcome; summary: string; files: string[]; at: string }
+/** One reason the loop has nothing actionable (stage `waiting`); the dashboard lists each one. */
+export interface WaitingReason { kind: 'approval' | 'parked' | 'missing_definition' | 'cycle'; target: string; detail?: string }
 
 export interface LoopState {
   version: 2;
@@ -111,6 +113,8 @@ export interface LoopState {
   autopilot: { iterationCap: number; sessions: Record<string, { blocks: number; lastSignature: string; lastBlockAt: string }> };
   lastSummary?: StageSummary;
   lastError?: string | null;
+  /** Set with stage `waiting`: what the researcher must resolve; `lastError` holds the same as text for the agent. */
+  waitingOn?: WaitingReason[];
   startedAt: string;
   updatedAt: string;
 }

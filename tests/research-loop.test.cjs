@@ -284,8 +284,10 @@ test('three failed approaches ask the researcher; silence parks the asset', asyn
   await f.core.autoResolveQuestion(f.core.current.pendingQuestion.id);
   assert.equal(f.core.current.parked.main_theorem.reason, 'three_failures');
   assert.equal((await f.core.next()).stage, 'waiting');
+  assert.deepEqual(f.core.current.waitingOn, [{ kind: 'parked', target: 'main_theorem', detail: 'three_failures' }], 'the dashboard lists each reason the loop stopped');
   await f.core.unpark('main_theorem');
   assert.equal((await f.core.next()).stage, 'plan');
+  assert.equal(f.core.current.waitingOn, undefined, 'leaving the waiting stage clears the reasons');
 });
 
 test('confirmed counterexample deprecates the asset and returns to the project goals', async () => {

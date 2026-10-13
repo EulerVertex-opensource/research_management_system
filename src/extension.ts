@@ -28,6 +28,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   );
 
+  const openOverview = vscode.commands.registerCommand('research-assistant.openOverview', async () => { await provider!.openOverview(); });
+
   const refreshAgentSetup = vscode.commands.registerCommand(
     'research-assistant.refreshAgentSetup',
     async () => {
@@ -76,7 +78,7 @@ export function activate(context: vscode.ExtensionContext): void {
     loop('refreshIntegration', () => provider!.refreshProject(true)),
   ];
 
-  context.subscriptions.push(output, openDashboard, refreshAgentSetup, showOutput, ...loopCommands);
+  context.subscriptions.push(output, openDashboard, openOverview, refreshAgentSetup, showOutput, ...loopCommands);
 }
 
 export function deactivate(): void {

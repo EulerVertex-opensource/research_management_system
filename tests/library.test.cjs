@@ -226,6 +226,9 @@ test('the dashboard lists library results in their own view, with a batch approv
   assert.doesNotMatch(library, /Main theorem/);
   assert.match(library, /Library lemma A/);
   assert.match(library, /Library lemma B/);
-  assert.match(library, /Approve 1 draft</);
+  assert.match(library, /Mark 1 as checked</);
+  assert.match(library, /✓ KNOWN RESULT</, 'a checked known result shows one purple badge');
+  assert.match(library, /NOT CHECKED · KNOWN RESULT</, 'an unchecked one shows the grey badge');
+  assert.doesNotMatch(library, /<span[^>]*>approved<\/span>/i, 'no separate status badge next to it');
   assert.match(library, /<option value="thesis">thesis<\/option>/);
 });
