@@ -78,7 +78,7 @@ const stamped = (id, raw, fields) => node(id, matter.stringify(matter(raw).conte
 // ---------- settings ----------
 
 test('every numeric loop setting has exactly one field in the settings table, with its default in range', () => {
-  const keys = Object.keys(DEFAULT_LOOP_SETTINGS).filter((key) => key !== 'version' && key !== 'autoApprove').sort();
+  const keys = Object.keys(DEFAULT_LOOP_SETTINGS).filter((key) => key !== 'version' && key !== 'autoApprove' && key !== 'rigor').sort();
   assert.deepEqual(keys, [...LOOP_NUMBER_KEYS].sort());
   assert.deepEqual(Object.keys(LOOP_NUMBER_FIELDS).sort(), keys);
   for (const key of LOOP_NUMBER_KEYS) {

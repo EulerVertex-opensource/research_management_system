@@ -54,6 +54,8 @@ export interface GraphNodeView {
   progressDetail: string;
   /** Taken from the literature rather than proved here: a paper or textbook source, or a library result. */
   cited?: { kind: string; paper?: string; location?: string };
+  /** Marked for re-check: the ID of the statement or definition it rests on that changed (rigor "flag"). */
+  recheck?: string;
   /** The statement (Markdown, the part above the proof), shown when a result's card is opened. */
   statement: string;
   /** For a required result: how many of the results it rests on (itself included) are done. */
@@ -79,14 +81,16 @@ export type GraphAction =
   | { action: 'agent'; prompt: string }
   /** Loop controls the researcher may use from the dashboard. */
   | { action: 'loop'; op: 'start' | 'resume' | 'extend' | 'openChat' }
-  | { action: 'syncPull' };
+  | { action: 'syncPull' }
+  /** The researcher read a result marked for re-check again, and it still holds. */
+  | { action: 'confirmRecheck'; id: string };
 
 export interface AttentionButton { label: string; action: GraphAction; kind?: 'primary' | 'secondary'; needsText?: string }
 
 export interface AttentionItem {
   key: string;
   priority: AttentionPriority;
-  category: 'question' | 'counterexample' | 'approval' | 'manuscript_invalid' | 'manuscript_stale' | 'parked' | 'uncovered' | 'unlocked' | 'required_inactive' | 'upstream' | 'loop';
+  category: 'question' | 'counterexample' | 'approval' | 'manuscript_invalid' | 'manuscript_stale' | 'parked' | 'uncovered' | 'unlocked' | 'required_inactive' | 'upstream' | 'loop' | 'recheck';
   title: string;
   /** Extra detail, e.g. the agent's summary of what it wants reviewed; may be empty. */
   reason: string;

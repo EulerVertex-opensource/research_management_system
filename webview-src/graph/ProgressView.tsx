@@ -6,7 +6,7 @@ import { GraphCanvas } from './GraphCanvas';
 import { buttonStyle } from './AttentionList';
 import { ResultCard } from './ResultCard';
 import { ResultList } from './ResultList';
-import { CITED_COLOR, COLOR, PROGRESS_STYLE, nodeStyle, tint } from './colors';
+import { CITED_COLOR, COLOR, DEFINITION_COLOR, PROGRESS_STYLE, nodeStyle, tint } from './colors';
 
 interface Props {
   payload: GraphPayload;
@@ -51,6 +51,7 @@ function Legend() {
           <span style={{ width: 11, height: 11, borderRadius: 3, boxSizing: 'border-box', background: tint(PROGRESS_STYLE[state].color, 14), border: `1.5px ${PROGRESS_STYLE[state].dashed ? 'dashed' : 'solid'} ${PROGRESS_STYLE[state].color}` }} />{label}
         </span>
       ))}
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><span style={{ width: 11, height: 11, borderRadius: 3, boxSizing: 'border-box', background: tint(DEFINITION_COLOR, 14), border: `1.5px solid ${DEFINITION_COLOR}` }} />Definition</span>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><span style={{ width: 11, height: 11, borderRadius: 3, boxSizing: 'border-box', background: tint(CITED_COLOR, 14), border: `1.5px solid ${CITED_COLOR}` }} />Cited from a paper or the library</span>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><span style={{ width: 20, height: 3, background: COLOR.error }} />Thick line: what holds it up</span>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><span style={{ width: 18, height: 9, borderRadius: 3, background: tint(COLOR.approved, 12), border: `1px solid ${tint(COLOR.approved, 55)}` }} />Finished branch, folded</span>

@@ -23,7 +23,30 @@ export const LOOP_NUMBER_KEYS = [
 export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
 
 /** Local loop policy in `.research-assistant-loop/settings.json`; the agent may not write it. */
-export type LoopSettings = { version: 1; autoApprove: AutoApprovePolicy } & Record<LoopNumberKey, number>;
+/**
+ * How careful the loop is: the policies that trade rigor for speed. Each key
+ * has one entry in RIGOR_FIELDS (src/domain/loopSettings.ts), which drives
+ * defaults, validation, presets, and the Settings view.
+ */
+export const RIGOR_OPTIONS = {
+  /** Counterexample search before a proof: every result, main results only, or none. */
+  refuteSearch: ['all', 'main', 'off'],
+  /** The definitions main results use must be agreed before any proof work, or are checked at the end. */
+  agreeDefinitions: ['main', 'off'],
+  /** When a statement or definition a result rests on changes: send everything downstream back to review, or mark it for re-check. */
+  onDependencyChange: ['revert', 'flag'],
+  /** A definition used but missing: the agent drafts it, then waits for the researcher or goes on with the draft. */
+  missingDefinitions: ['wait', 'continue'],
+  /** A result stuck with no direction from the researcher: set it aside, or let the agent try one new approach itself. */
+  whenStuck: ['park', 'retry'],
+  /** A question nobody answers: the loop waits, or the agent goes on with its stated default after the timeout. */
+  unansweredQuestions: ['wait', 'default'],
+} as const;
+export type RigorKey = keyof typeof RIGOR_OPTIONS;
+export const RIGOR_KEYS = Object.keys(RIGOR_OPTIONS) as RigorKey[];
+export type RigorPolicy = { [K in RigorKey]: (typeof RIGOR_OPTIONS)[K][number] };
+
+export type LoopSettings = { version: 1; autoApprove: AutoApprovePolicy; rigor: RigorPolicy } & Record<LoopNumberKey, number>;
 
 export type ProviderSetting = 'auto' | 'claude' | 'codex';
 export type AutoPullMode = 'pull' | 'notify' | 'off';
@@ -52,7 +75,7 @@ export interface SettingsPayload {
 /** A partial update; `null` clears an optional field (or resets a budget to its default). */
 export interface SettingsPatch {
   agent?: { provider?: ProviderSetting; useDefaultOnStart?: boolean };
-  loop?: { autoApprove?: Partial<AutoApprovePolicy> } & Partial<Record<LoopNumberKey, number>>;
+  loop?: { autoApprove?: Partial<AutoApprovePolicy>; rigor?: Partial<RigorPolicy> } & Partial<Record<LoopNumberKey, number>>;
   sync?: {
     autoPull?: AutoPullMode;
     autoPullIntervalMinutes?: number;

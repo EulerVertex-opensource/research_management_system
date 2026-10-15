@@ -221,6 +221,7 @@ test('nodes carry one of five states, and main results how much of what they res
   assert.deepEqual(byId.get('main').closure, { done: 3, total: 3 });
   assert.deepEqual(byId.get('second').closure, { done: 2, total: 3 });
   assert.equal(byId.get('helper').statement, 'A statement.');
+  assert.deepEqual([byId.get('widget').kind, byId.get('widget').progress, byId.get('widget').progressLabel], ['definition', 'done', 'Agreed']);
 });
 
 test('the goal view folds finished branches; the needs view keeps only blockers and what they hold up', async () => {

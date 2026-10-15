@@ -62,6 +62,10 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'question': return entry(`The agent asked you a question${name ? ` about ${name}` : ''}.`, 'warning');
     case 'question_answered': return entry(event.decision === 'skip' ? 'You skipped a question.' : 'You answered the agent’s question.', 'info');
     case 'question_expired': return entry('A question went unanswered; the agent used its default.');
+    case 'agent_retry': return entry(`No direction from you: the agent is trying one new approach on ${name}.`, 'warning');
+    case 'recheck_flagged': { const id = text(event.id); return { text: `${title(id)} needs a re-check: ${title(text(event.because))} changed.`, tone: 'warning', target: id }; }
+    case 'recheck_cleared': { const id = text(event.id); return { text: `You confirmed ${title(id)} still holds.`, tone: 'success', target: id }; }
+    case 'auto_mode_reset': return entry('Auto mode was switched on outside the dashboard, so it was turned off.', 'warning');
     case 'plans_abandoned': return entry(`Dropped ${plural(Array.isArray(event.plans) ? event.plans.length : 0, 'proof plan')} for ${name}.`);
     case 'idea_saved': {
       const related = Array.isArray(event.relatedAssets) ? event.relatedAssets.map(String) : [];

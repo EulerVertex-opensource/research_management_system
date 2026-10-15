@@ -1,4 +1,4 @@
-import { AUTO_APPROVE_RULES, AutoApprovePolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, SettingsErrors, SettingsPatch } from '../models/settings';
+import { AUTO_APPROVE_RULES, AutoApprovePolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, RIGOR_KEYS, RIGOR_OPTIONS, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch } from '../models/settings';
 
 /**
  * Pure defaults, normalization, and validation for the Settings view and the
@@ -9,10 +9,35 @@ export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
   enabled: false, proofs: true, supporting: true, citations: true, definitions: true, counterexamples: false, specifications: false, project: false,
 };
 
+/** Rigor or speed: Careful is the default; Fast trades checks for progress. */
+export const RIGOR_PRESETS: Record<'careful' | 'fast', RigorPolicy> = {
+  careful: { refuteSearch: 'all', agreeDefinitions: 'main', onDependencyChange: 'revert', missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' },
+  fast: { refuteSearch: 'main', agreeDefinitions: 'off', onDependencyChange: 'flag', missingDefinitions: 'continue', whenStuck: 'retry', unansweredQuestions: 'default' },
+};
+export const DEFAULT_RIGOR: RigorPolicy = RIGOR_PRESETS.careful;
+
+/** The preset a policy matches, or `custom`. */
+export function rigorPreset(policy: RigorPolicy): 'careful' | 'fast' | 'custom' {
+  for (const name of ['careful', 'fast'] as const) if (RIGOR_KEYS.every((key) => RIGOR_PRESETS[name][key] === policy[key])) return name;
+  return 'custom';
+}
+
+export interface RigorField { label: string; hint: string; options: Record<string, string> }
+
+/** Every "How careful" setting, in display order, with the words for each choice. */
+export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(typeof RIGOR_OPTIONS)[K][number], string> } } = {
+  refuteSearch: { label: 'Look for counterexamples before proving', hint: 'A search for a counterexample before each proof catches false statements early, at a cost in tokens.', options: { all: 'Every result', main: 'Main results only', off: 'Never' } },
+  agreeDefinitions: { label: 'Agree on definitions before proving', hint: 'The definitions a main result’s statement uses decide what the goal means.', options: { main: 'Main results’ definitions first', off: 'Check them at the end' } },
+  onDependencyChange: { label: 'When something a result rests on changes', hint: 'A changed definition or statement can make the proofs built on it be about something else.', options: { revert: 'Everything downstream back to review', flag: 'Mark it for re-check' } },
+  missingDefinitions: { label: 'When a definition is used but missing', hint: 'The agent drafts it in either case; it never accepts it for you.', options: { wait: 'Draft it, then wait for me', continue: 'Draft it and go on' } },
+  whenStuck: { label: 'When a result is stuck and you give no direction', hint: 'After the failed-attempt limit, or when a construction search runs out.', options: { park: 'Set it aside', retry: 'Agent tries one new approach itself' } },
+  unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout below.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
+};
+
 /** Where a numeric loop setting appears in the Settings view. */
 export type LoopFieldGroup = 'general' | 'refute' | 'construct' | 'search';
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
-  general: '',
+  general: 'Search & effort',
   refute: 'Object search: refute (falsify)',
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
@@ -28,7 +53,7 @@ export interface LoopNumberField { defaultValue: number; range: readonly [number
 export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   maxFailedPlans: { defaultValue: 3, range: [1, 10], group: 'general', label: 'Proof attempts per asset', hint: 'Failed plans before the loop asks you for a new direction.' },
   iterationCap: { defaultValue: 10, range: [1, 100], group: 'general', label: 'Autopilot continuations', hint: 'Times the Stop hook sends the agent on per chat session; applies to the running loop too.' },
-  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'general', unit: 'seconds', label: 'Question timeout', hint: 'How long a question or approval popup waits before the agent continues without you.' },
+  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'general', unit: 'seconds', label: 'Question timeout', hint: 'How long a question waits before “When a question goes unanswered” applies. Reviews never time out; they wait in Needs you.' },
   refuteWidth: { defaultValue: 1, range: [1, 8], group: 'refute', label: 'Workers per round', hint: 'Parallel subagents searching for a counterexample, each in its own direction.' },
   refuteRounds: { defaultValue: 1, range: [1, 10], group: 'refute', label: 'Rounds', hint: 'Rounds without a counterexample before the loop moves on to planning a proof.' },
   constructWidth: { defaultValue: 3, range: [1, 8], group: 'construct', label: 'Workers per round', hint: 'Parallel subagents proposing constructions, each in its own direction.' },
@@ -43,7 +68,7 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
 
 const loopNumberDefaults = Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, LOOP_NUMBER_FIELDS[key].defaultValue])) as Record<LoopNumberKey, number>;
 
-export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, ...loopNumberDefaults };
+export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, rigor: DEFAULT_RIGOR, ...loopNumberDefaults };
 
 export const LIMITS = {
   autoPullIntervalMinutes: [0, 1440],
@@ -69,10 +94,20 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
     if (valid) autoApprove = { ...DEFAULT_AUTO_APPROVE, ...(auto as Partial<AutoApprovePolicy>) };
     else problems.push('autoApprove is malformed; auto mode is off.');
   }
+  const rigorInput = input.rigor && typeof input.rigor === 'object' && !Array.isArray(input.rigor) ? input.rigor as Record<string, unknown> : {};
+  if (input.rigor !== undefined && rigorInput !== input.rigor) problems.push('rigor is malformed; using the careful defaults.');
+  const rigor = Object.fromEntries(RIGOR_KEYS.map((key) => {
+    const value = rigorInput[key];
+    if (value === undefined) return [key, DEFAULT_RIGOR[key]];
+    if ((RIGOR_OPTIONS[key] as readonly unknown[]).includes(value)) return [key, value];
+    problems.push(`rigor.${key} is not one of ${RIGOR_OPTIONS[key].join(', ')}; using ${DEFAULT_RIGOR[key]}.`);
+    return [key, DEFAULT_RIGOR[key]];
+  })) as RigorPolicy;
   return {
     settings: {
       version: 1,
       autoApprove,
+      rigor,
       ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, clampInt(input[key], LOOP_NUMBER_FIELDS[key].range, LOOP_NUMBER_FIELDS[key].defaultValue)])) as Record<LoopNumberKey, number>,
     },
     problems,
@@ -87,7 +122,7 @@ export function parseLoopSettings(text: string | undefined): { settings: LoopSet
 
 export function applyLoopPatch(settings: LoopSettings, patch: SettingsPatch['loop']): LoopSettings {
   if (!patch) return settings;
-  return normalizeLoopSettings({ ...settings, ...patch, autoApprove: { ...settings.autoApprove, ...patch.autoApprove } }).settings;
+  return normalizeLoopSettings({ ...settings, ...patch, autoApprove: { ...settings.autoApprove, ...patch.autoApprove }, rigor: { ...settings.rigor, ...patch.rigor } }).settings;
 }
 
 /** Git remote and branch names go into git arguments: no options, no ranges, no shell characters. */
@@ -117,6 +152,7 @@ export function validateSettingsPatch(patch: SettingsPatch, budgetStages: readon
   if (patch.loop) {
     for (const key of ['enabled', ...AUTO_APPROVE_RULES] as const) bool(`loop.autoApprove.${key}`, patch.loop.autoApprove?.[key]);
     for (const key of LOOP_NUMBER_KEYS) intIn(`loop.${key}`, patch.loop[key], LOOP_NUMBER_FIELDS[key].range);
+    for (const key of RIGOR_KEYS) oneOf(`loop.rigor.${key}`, patch.loop.rigor?.[key], RIGOR_OPTIONS[key]);
   }
   if (patch.sync) {
     const sync = patch.sync;

@@ -31,6 +31,8 @@ export interface GraphInputs {
   now: string;
   /** Recent loop events (events.jsonl), oldest first, for the timeline. */
   events?: Array<Record<string, unknown>>;
+  /** Results marked for re-check: node ID → the changed node it rests on. */
+  recheck?: Record<string, string>;
 }
 
 const RESEARCH_KINDS = new Set(['asset', 'definition']);
@@ -114,13 +116,14 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       ...(node.origin ? { origin: node.origin, collection: node.collection } : {}),
       filePath: node.filePath,
       statement: statementOf(node.body ?? ''),
+      ...(input.recheck?.[node.id] ? { recheck: input.recheck[node.id] } : {}),
       ...citedOf(node),
-      ...progressOf(node, flags, failedPlans),
+      ...progressOf(node, flags, failedPlans, kind),
     };
   });
 
   /** The graph state of one node: the most urgent fact about it wins. */
-  function progressOf(node: ResearchNode, flags: GraphFlag[], failedPlans: number): { progress: NodeProgress; progressLabel: string; progressDetail: string } {
+  function progressOf(node: ResearchNode, flags: GraphFlag[], failedPlans: number, kind: string): { progress: NodeProgress; progressLabel: string; progressDetail: string } {
     const result = (progress: NodeProgress, progressLabel: string, progressDetail = '') => ({ progress, progressLabel, progressDetail });
     const status = node.status ?? 'draft';
     if (['deprecated', 'archived'].includes(status)) return result('inactive', 'Retired', status === 'deprecated' ? 'Deprecated' : 'Archived');
@@ -133,6 +136,8 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       return result('stuck', parkLabel(parked.reason), detail);
     }
     if (flags.includes('question')) return result('needs_you', needsLabel('question'), 'The agent asked you something');
+    const changed = input.recheck?.[node.id];
+    if (changed) return result('needs_you', 'Needs re-check', `${titleOf.get(changed) ?? changed} changed after it was proved`);
     // Taken from the literature but not checked yet: nothing waits on the check, so it reads as not done, not as a call for action.
     const cited = citedOf(node).cited;
     if (cited && status === 'draft') return result('waiting', 'Not checked', cited.kind === 'library' ? 'Known result · check before you finish' : `${citationText(cited)} · check before you finish`);
@@ -143,6 +148,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       return result('needs_you', needsLabel(kind), detail);
     }
     if (status === 'approved') {
+      if (kind === 'definition') return result('done', cited ? 'Cited' : 'Agreed', cited ? citationText(cited) : '');
       if (node.origin) return result('done', 'Known result', 'From the literature');
       return cited ? result('done', 'Cited', citationText(cited)) : result('done', 'Done');
     }
@@ -153,6 +159,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     }
     const unfinished = [...(node.depends_on ?? []), ...(node.uses_definitions ?? [])].filter((id) => ids.has(id) && statusOf.get(id) !== 'approved');
     if (unfinished.length) return result('waiting', 'Waiting', unfinished.length === 1 ? `Needs ${titleOf.get(unfinished[0]) ?? unfinished[0]} first` : `Needs ${unfinished.length} results first`);
+    if (kind === 'definition') return result('waiting', 'Not agreed yet', 'Agree on it before you finish');
     return result('waiting', 'Not started', 'Ready to start');
   }
 
@@ -225,7 +232,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     const current = byId.get(state.current.assetId);
     if (current && current.progress === 'working') Object.assign(current, { progress: 'stalled', progressLabel: 'Agent stopped', progressDetail: 'No activity from the agent' });
   }
-  const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
+  const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, recheck: input.recheck, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
   // The loop itself can be what waits on the researcher: an agent gone quiet, a pause, or a stopped loop's reasons that are not nodes.
   if (health.key === 'stalled' || health.key === 'paused') {
     attention.unshift({ key: `loop:${health.key}`, priority: 0, category: 'loop', title: health.headline.replace(/\.$/, ''), reason: health.body, why: health.key === 'stalled' ? 'No agent is working on the research.' : 'The loop does not move while it is paused.', ifIgnored: health.ifIgnored, blocks: [], sections: [], buttons: health.buttons });
@@ -270,13 +277,13 @@ function statementOf(body: string): string {
 }
 
 /** Read everything the Graph tab needs through the loop file interface. */
-export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths, nodes: ResearchNode[], state: LoopState | undefined, events: Array<Record<string, unknown>> = []): Promise<GraphPayload> {
+export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths, nodes: ResearchNode[], state: LoopState | undefined, events: Array<Record<string, unknown>> = [], recheck: Record<string, string> = {}): Promise<GraphPayload> {
   const project = await files.readFile(paths.projectMd).catch(() => '');
   const approvals = (await readApprovals(files, paths.researchRoot).catch(() => ({ records: [] }))).records;
   const manuscript = await loadManuscriptModel(files, paths).catch(() => undefined);
   return buildGraphPayload({
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
-    state, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events,
+    state, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck,
   });
 }
 

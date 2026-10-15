@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphEdgeView, GraphNodeView } from '../../src/models/graph';
 import { kindLabel } from '../../src/domain/copy';
-import { COLOR, nodeStyle, tint } from './colors';
+import { COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
 import type { FoldView } from './graphModel';
 import { Layout, NODE_H, NODE_W, layout } from './layout';
 
@@ -195,6 +195,7 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ fontSize: 11, fontWeight: 600, padding: '0 7px', borderRadius: 9, background: tint(style.color, 30), color: 'var(--vscode-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.progressLabel}</span>
                       {isRequired && <span style={{ fontSize: 11, fontWeight: 700, color: COLOR.waiting, whiteSpace: 'nowrap' }}>★ Main</span>}
+                      {node.kind === 'definition' && <span style={{ fontSize: 10.5, fontWeight: 700, color: DEFINITION_COLOR, whiteSpace: 'nowrap', letterSpacing: 0.3 }}>DEFINITION</span>}
                     </span>
                     <span style={{ fontSize: detailed ? 12.5 : 14, fontWeight: 600, lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{node.title}</span>
                     {detailed && <span style={{ fontSize: 10.5, color: COLOR.muted, fontFamily: 'var(--vscode-editor-font-family, monospace)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{kindLabel(node.type)}{node.origin === 'library' ? ' · known result' : node.cited ? ' · cited' : ''} · {node.id}</span>}

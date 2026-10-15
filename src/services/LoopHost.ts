@@ -103,6 +103,10 @@ export class LoopHost implements vscode.Disposable {
   /** Signature of the last situation announced by a popup, so each one is announced once. */
   private alerted: string | undefined;
   private nodeSource: (() => ResearchNode[]) | undefined;
+  /** Guards the health check against re-entering while it resolves an overdue question. */
+  private resolving = false;
+  /** Questions whose popup is still open, so the health check neither shows a second one nor resolves them behind it. */
+  private readonly openQuestions = new Set<string>();
   private openOverviewHandler: (() => Promise<void>) | undefined;
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel, private readonly memento?: vscode.Memento) {
@@ -360,8 +364,19 @@ export class LoopHost implements vscode.Disposable {
   private async askResearcher(questionId: string, prompt: string, kind: QuestionKind, options: string[] | undefined, waitSeconds: number): Promise<ToolResult> {
     const question = { id: questionId };
     const popup = Promise.race([this.showQuestion(prompt, kind, options), this.fromDashboard<{ decision: 'answer' | 'skip' | 'pause'; text: string }>(questionId)]);
+    this.openQuestions.add(questionId);
+    void popup.finally(() => this.openQuestions.delete(questionId));
     const outcome = await Promise.race([popup, this.timeout<{ decision: 'answer' | 'skip' | 'pause'; text: string }>(waitSeconds * 1000)]);
     if (outcome !== 'timeout') this.dashboardAnswers.delete(questionId);
+    if (outcome === 'timeout' && (await readLoopSettings(this.files)).settings.rigor.unansweredQuestions === 'wait') {
+      // The researcher asked to be waited for: the question stays open and the agent stops; a late answer still lands.
+      void popup.then(async (late) => {
+        if (!late) return;
+        if (late.decision === 'pause') { await this.pauseCommand(); return; }
+        await this.withCore((core) => core.answerQuestion(question.id, late.decision === 'answer' ? 'answer' : 'skip', late.text, 'popup'));
+      });
+      return { answered: false, question_id: question.id, reason: 'waiting', auto_action: 'The researcher has not answered yet and asked the loop to wait for them. Stop working now; the question stays open and the loop resumes when they answer.' };
+    }
     if (outcome === 'timeout') {
       await this.withCore((core) => core.autoResolveQuestion(question.id));
       void popup.then(async (late) => {
@@ -385,7 +400,7 @@ export class LoopHost implements vscode.Disposable {
   private autoActionText(kind: QuestionKind): string {
     switch (kind) {
       case 'goals': return 'No goal given. Continue only if project.md already has a Main Problem; otherwise wait.';
-      case 'blocked': return 'The asset was parked; run research-loop next to continue with other work.';
+      case 'blocked': return 'The loop acted on the researcher’s setting: the asset is set aside, or a new approach of your own is recorded for it. Do not park it yourself; run research-loop next.';
       case 'counterexample_review': return 'No comment; the counterexample stays queued for the researcher.';
       default: return 'Proceed with the default you stated; the open question was recorded as an idea.';
     }
@@ -453,7 +468,8 @@ export class LoopHost implements vscode.Disposable {
     let state: LoopState | undefined;
     try { state = await this.core?.load(); } catch { state = undefined; }
     const events = this.core ? await this.core.recentEvents(80) : [];
-    const payload = await collectGraphPayload(this.files, paths, nodes, state, events);
+    const recheck = this.core ? await this.core.recheckFlags() : {};
+    const payload = await collectGraphPayload(this.files, paths, nodes, state, events, recheck);
     payload.autoMode = (await readLoopSettings(this.files)).settings.autoApprove.enabled;
     if (this.pendingUpstream) {
       const { ref, behind, reason } = this.pendingUpstream;
@@ -518,6 +534,7 @@ export class LoopHost implements vscode.Disposable {
         return;
       }
       case 'syncPull': await this.syncPullCommand(); return;
+      case 'confirmRecheck': await this.withCore((core) => core.confirmRecheck(request.id)); return;
     }
   }
 
@@ -563,11 +580,16 @@ export class LoopHost implements vscode.Disposable {
     if (!this.core) { this.statusBar.hide(); return; }
     let state: LoopState | undefined;
     try { state = await this.core.load(); } catch { state = undefined; }
+    if (state?.pendingQuestion && !this.openQuestions.has(state.pendingQuestion.id) && !this.resolving) {
+      // A question the loop raised itself (no popup is waiting on it): resolve it once overdue, per the researcher's setting.
+      this.resolving = true;
+      try { if (await this.withCore((core) => core.resolveOverdueQuestion())) return; } finally { this.resolving = false; }
+    }
     const health = await this.currentHealth(state);
     // Time alone can change the health (an agent going quiet): tell the dashboard when it does.
     if (this.lastHealthKey !== undefined && this.lastHealthKey !== health.signature) this.stateChanged.fire();
     this.lastHealthKey = health.signature;
-    void this.announce(health);
+    void this.announce(health, state);
     if (health.key === 'idle') { this.statusBar.hide(); return; }
     this.statusBar.text = `${HEALTH_ICON[health.key]} ${health.statusBar.text}`;
     this.statusBar.backgroundColor = health.statusBar.level === 'error' ? new vscode.ThemeColor('statusBarItem.errorBackground')
@@ -582,7 +604,19 @@ export class LoopHost implements vscode.Disposable {
    * agent went quiet, or the loop paused itself. Each situation is announced
    * once; everything else waits in the dashboard.
    */
-  private async announce(health: LoopHealth): Promise<void> {
+  private async announce(health: LoopHealth, state: LoopState | undefined): Promise<void> {
+    // A question the loop raised itself has no popup of its own (one asked through ask_researcher does): show it, like any direct question.
+    const question = state?.pendingQuestion;
+    if (question && !this.openQuestions.has(question.id)) {
+      if (this.alerted === `question:${question.id}`) return;
+      this.alerted = `question:${question.id}`;
+      this.openQuestions.add(question.id);
+      const outcome = await this.showQuestion(question.prompt, question.kind, question.options).finally(() => this.openQuestions.delete(question.id));
+      if (!outcome || this.core?.current?.pendingQuestion?.id !== question.id) return;
+      if (outcome.decision === 'pause') { await this.pauseCommand(); return; }
+      await this.withCore((core) => core.answerQuestion(question.id, outcome.decision === 'answer' ? 'answer' : 'skip', outcome.text, 'popup'));
+      return;
+    }
     const alerting = health.key === 'stopped' || health.key === 'stalled' || (health.key === 'paused' && /automatic continuations/.test(health.headline));
     if (!alerting) { this.alerted = undefined; return; }
     if (this.alerted === health.signature) return;

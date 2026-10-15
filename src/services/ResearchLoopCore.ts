@@ -12,7 +12,7 @@ import {
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { INACTIVE_STATUSES, IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
-import { AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
+import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
 import { readLoopSettings } from './LoopSettingsStore';
 import { DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
 import {
@@ -53,7 +53,7 @@ export interface ValidationResult { problems: string[]; fixed: string[] }
 type AssetInfo = ContextNode;
 type Selection =
   | { stage: 'discuss_goals' | 'draft_project' | 'review_project' | 'ready'; note?: string }
-  | { stage: 'scaffold'; missing: string[]; incomplete: string[] }
+  | { stage: 'scaffold'; missing: string[]; incomplete: string[]; missingDefinitions?: string[] }
   | { stage: 'plan'; assetId: string }
   | { stage: 'search'; assetId: string; mode: SearchMode }
   | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
@@ -503,8 +503,10 @@ export class ResearchLoopCore {
   }
 
   /**
-   * Revert approvals that no longer match their digest, and invalidate
-   * dependants whose approved dependency changed its statement.
+   * Revert approvals that no longer match their digest. When an approved
+   * statement or definition changed, everything that rests on it, however
+   * indirectly, either goes back to review (rigor "revert") or is marked for
+   * re-check and kept from auto mode (rigor "flag").
    */
   async reconcile(changedId?: string, options: { dryRun?: boolean; details?: Array<{ id: string; reason: string }> } = {}): Promise<string[]> {
     const approvals = await this.approvals();
@@ -531,6 +533,29 @@ export class ResearchLoopCore {
       await this.addHold(node.kind, id, reason.split(':')[0]);
       await this.event('approval_invalidated', { id, reason });
     };
+    /** Everything that rests on `id`: results through depends_on or uses_definitions, definitions through depends_on. */
+    const downstream = (id: string): string[] => {
+      const found = new Set<string>();
+      const queue = [id];
+      while (queue.length) {
+        const current = queue.shift()!;
+        for (const [otherId, other] of nodes) {
+          if (found.has(otherId) || otherId === id) continue;
+          const uses = [...(Array.isArray(other.data.depends_on) ? other.data.depends_on : []), ...(other.kind === 'asset' && Array.isArray(other.data.uses_definitions) ? other.data.uses_definitions : [])];
+          if (uses.includes(current)) { found.add(otherId); queue.push(otherId); }
+        }
+      }
+      return [...found];
+    };
+    /** Mark for re-check: an approved result, or a draft with a written proof, that rests on something changed. */
+    const flag = async (id: string, because: string) => {
+      const node = nodes.get(id);
+      if (!node || !(node.data.status === 'approved' || (node.kind === 'asset' && proofText(parseMarkdown(node.raw).content)))) return;
+      options.details?.push({ id, reason: `recheck:${because}` });
+      if (options.dryRun) return;
+      await this.addHold(node.kind, id, `recheck:${because}`);
+      await this.event('recheck_flagged', { id, because });
+    };
     const candidates = changedId ? [changedId] : [...nodes.keys()];
     for (const id of candidates) {
       const node = nodes.get(id);
@@ -541,9 +566,10 @@ export class ResearchLoopCore {
         await revert(id, 'content_changed');
       }
       if (record.statement && record.statement !== statementDigest(node.raw)) {
-        for (const [otherId, other] of nodes) {
-          const deps = node.kind === 'asset' ? other.data.depends_on : other.kind === 'asset' ? other.data.uses_definitions : other.data.depends_on;
-          if (Array.isArray(deps) && deps.includes(id)) await revert(otherId, `dependency_changed:${id}`);
+        const policy = (await this.loopSettings()).rigor.onDependencyChange;
+        for (const otherId of downstream(id)) {
+          if (policy === 'revert') await revert(otherId, `dependency_changed:${id}`);
+          else await flag(otherId, id);
         }
       }
     }
@@ -597,7 +623,18 @@ export class ResearchLoopCore {
         if (await this.isConstructionSearch(assetId)) await this.setStage('select', { assetId: undefined });
         else await this.setStage('plan', { assetId, planId: undefined });
       } else {
-        if (await this.isConstructionSearch(assetId)) await this.park(assetId, 'search_exhausted', 'no new direction from the researcher');
+        const construct = await this.isConstructionSearch(assetId);
+        // With "retry", the agent gets one new approach of its own per stuck episode; a second time it is set aside.
+        if ((await this.loopSettings()).rigor.whenStuck === 'retry' && latestDirection(await this.decisions(), assetId)?.reason !== 'agent_retry') {
+          const searchRound = construct ? (await this.searchProgressFor(assetId)).lastRound : undefined;
+          await this.writeDecision('direction', assetId, 'No direction from the researcher. Try one genuinely different approach of your own, unlike every failed one; if it fails too, the result is set aside.', { reason: 'agent_retry', failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
+          delete state.parked[assetId];
+          await this.event('agent_retry', { assetId });
+          if (construct) await this.setStage('select', { assetId: undefined });
+          else await this.setStage('plan', { assetId, planId: undefined });
+          return;
+        }
+        if (construct) await this.park(assetId, 'search_exhausted', 'no new direction from the researcher');
         else await this.park(assetId, 'three_failures', 'no new direction from the researcher');
         await this.setStage('select');
       }
@@ -618,6 +655,22 @@ export class ResearchLoopCore {
     state.pendingQuestion.expiredAt = this.now();
     await this.save();
     await this.event('question_expired', { questionId, kind: state.pendingQuestion.kind });
+  }
+
+  /**
+   * A question past its timeout resolves as unanswered when the researcher's
+   * setting says the agent goes on with its default; with "wait" it stays open.
+   * Returns whether it resolved one. Callers: next, report, and the extension's
+   * health check, so a question the loop raised itself never hangs forever.
+   */
+  async resolveOverdueQuestion(now = Date.now()): Promise<boolean> {
+    const question = this.state?.pendingQuestion;
+    if (!question?.timeoutSec) return false;
+    if ((await this.loopSettings()).rigor.unansweredQuestions !== 'default') return false;
+    if (now - Date.parse(question.createdAt) < question.timeoutSec * 1000) return false;
+    await this.event('question_expired', { questionId: question.id, kind: question.kind });
+    await this.autoResolveQuestion(question.id);
+    return true;
   }
 
   /** Auto-mode resolution when a timed question got no answer. */
@@ -834,6 +887,23 @@ export class ResearchLoopCore {
     await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
   }
 
+  /** Results marked for re-check because something they rest on changed: node ID → the changed node's ID. */
+  async recheckFlags(): Promise<Record<string, string>> {
+    const flags: Record<string, string> = {};
+    for (const [key, hold] of Object.entries(await this.holds())) if (hold.reason.startsWith('recheck:')) flags[key.slice(key.indexOf(':') + 1)] = hold.reason.slice('recheck:'.length);
+    return flags;
+  }
+
+  /** The researcher read a flagged result again and it still holds. */
+  async confirmRecheck(id: string): Promise<void> {
+    const holds = await this.holds();
+    const key = Object.keys(holds).find((entry) => entry.endsWith(`:${id}`) && holds[entry].reason.startsWith('recheck:'));
+    if (!key) return;
+    delete holds[key];
+    await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
+    await this.event('recheck_cleared', { id });
+  }
+
   private async clearHold(kind: 'asset' | 'definition', target: string): Promise<void> {
     const holds = await this.holds();
     if (!holds[`${kind}:${target}`]) return;
@@ -1003,9 +1073,9 @@ export class ResearchLoopCore {
     const used = await this.constructionUsage(assetId);
     const observations = [...(await this.collect(this.paths.ideas)).values()].filter((idea) => idea.data.status === 'draft' && idea.data.idea_kind === 'observation' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId)).map((idea) => idea.id);
     await this.setStage('select', { assetId });
-    await this.askQuestion('blocked', `The construction search for ${assetId} used ${used.rounds} round(s) and ${used.candidates} candidate(s) since the last direction without an object that passes every property${observations.length ? `; see the observations ${observations.join(', ')}` : ''}. Give a new direction (or relax the specification under a new asset ID), or skip to park it.`, { assetId });
+    await this.askQuestion('blocked', `The construction search for ${assetId} used ${used.rounds} round(s) and ${used.candidates} candidate(s) since the last direction without an object that passes every property${observations.length ? `; see the observations ${observations.join(', ')}` : ''}. Give a new direction (or relax the specification under a new asset ID), or skip to park it.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
     await this.event('search_finished', { assetId, mode: 'construct', ...used });
-    return `The construction search for ${assetId} is exhausted. Ask the researcher with ask_researcher(kind: "blocked"); on timeout park the asset.`;
+    return `The construction search for ${assetId} is exhausted. Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.`;
   }
 
   /** The search board workers read: obstructions, near-misses, and directions tried on the current statement. */
@@ -1311,6 +1381,25 @@ export class ResearchLoopCore {
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
     const incomplete = order.filter((id) => !assets.get(id)!.origin && assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
     if (incomplete.length) return { stage: 'scaffold', missing: [], incomplete };
+    const rigor = (await this.loopSettings()).rigor;
+    // A definition used but missing: the agent drafts it in scaffold (it never accepts it); with "wait", the results using it hold until the researcher agrees.
+    const undrafted = definitionClosure(order, assets, definitions).filter((id) => !definitions.has(id));
+    if (undrafted.length) {
+      if (rigor.missingDefinitions === 'wait') state.awaitingDefinitions = [...new Set([...(state.awaitingDefinitions ?? []), ...undrafted])];
+      return { stage: 'scaffold', missing: [], incomplete: [], missingDefinitions: undrafted };
+    }
+    const definitionAgreed = (id: string) => { const definition = definitions.get(id); return Boolean(definition && definition.data.status === 'approved' && isApproved(approvals, 'definition', id, definition.raw)); };
+    if (rigor.agreeDefinitions === 'main') {
+      // The definitions main results' statements use decide what the goals mean: agree on them before any proof work.
+      const toAgree = definitionClosure(required.filter((id) => assets.has(id)), assets, definitions).filter((id) => definitions.has(id) && !definitionAgreed(id));
+      for (const id of toAgree) await this.enqueueApproval('definition', id, 'A main result’s statement uses it: agree on it before the proofs start.');
+      if (toAgree.length) return { stage: 'waiting', reason: `Definitions to agree on before proving: ${toAgree.join(', ')}`, waitingOn: toAgree.map((id): WaitingReason => ({ kind: 'approval', target: id, detail: 'definition' })) };
+    }
+    state.awaitingDefinitions = (state.awaitingDefinitions ?? []).filter((id) => !definitions.has(id) || (!definitionAgreed(id) && !['deprecated', 'archived'].includes(definitions.get(id)!.data.status)));
+    if (!state.awaitingDefinitions.length) delete state.awaitingDefinitions;
+    const awaiting = (state.awaitingDefinitions ?? []).filter((id) => definitions.has(id));
+    for (const id of awaiting) await this.enqueueApproval('definition', id, 'Drafted to fill a missing definition: agree on it before the results that use it go on.');
+    const waitsOnDefinition = (assetId: string) => awaiting.length > 0 && definitionClosure([assetId], assets, definitions).some((id) => awaiting.includes(id));
     const examples = [...assets.values()].filter((asset) => asset.data.type === 'example' && typeof asset.data.refutes === 'string');
     const checks = await this.checks();
     const decisions = await this.decisions();
@@ -1360,13 +1449,19 @@ export class ResearchLoopCore {
       }
       const deps = Array.isArray(asset.data.depends_on) ? asset.data.depends_on as string[] : [];
       if (!deps.every((dep) => settled.has(dep))) continue;
+      if (waitsOnDefinition(id)) continue;
       if (isConstructionSpec(asset.raw)) {
         // What to search for is the researcher's call: no search tokens before the specification is approved.
         if (!isApproved(approvals, 'specification', id, asset.raw)) await this.enqueueApproval('specification', id, 'Approve the required properties (P1, P2, …) before the construction search starts.');
         else if (!candidate) candidate = { stage: 'search', assetId: id, mode: 'construct' };
         continue;
       }
-      if (!candidate) candidate = this.isFalsified(id, asset.raw, checks) && !(await this.searchRequest(id, decisions)) ? { stage: 'plan', assetId: id } : { stage: 'search', assetId: id, mode: 'refute' };
+      if (!candidate) {
+        // The researcher's setting may skip the counterexample search (for every result, or for all but the main ones); a requested search always runs.
+        const skipSearch = rigor.refuteSearch === 'off' || (rigor.refuteSearch === 'main' && !required.includes(id));
+        const requested = await this.searchRequest(id, decisions);
+        candidate = (this.isFalsified(id, asset.raw, checks) || skipSearch) && !requested ? { stage: 'plan', assetId: id } : { stage: 'search', assetId: id, mode: 'refute' };
+      }
     }
     if (candidate) return candidate;
     const definitionIds = definitionClosure(order, assets, definitions);
@@ -1398,6 +1493,7 @@ export class ResearchLoopCore {
   async next(): Promise<NextResult> {
     const state = this.require();
     if (state.status !== 'running') return this.result(`The loop is ${state.status}. Run: ${LOOP_COMMAND} resume`);
+    await this.resolveOverdueQuestion();
     if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
     await this.refreshRetired();
     const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute'].includes(state.stage);
@@ -1427,7 +1523,7 @@ export class ResearchLoopCore {
         patch.search = search;
       }
       await this.setStage(selection.stage, patch);
-      if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete };
+      if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete, ...(selection.missingDefinitions?.length ? { missingDefinitions: selection.missingDefinitions } : {}) };
       if (selection.stage === 'waiting') { state.lastError = selection.reason; state.waitingOn = selection.waitingOn; }
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
     }
@@ -1630,6 +1726,9 @@ export class ResearchLoopCore {
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
         const brief = state.scaffoldBrief;
+        if (brief?.missingDefinitions?.length && !brief.missing?.length && !brief.incomplete?.length) {
+          return `Stage scaffold. These definitions are used but have no file: ${brief.missingDefinitions.join(', ')}. Draft each in ${this.paths.definitions}/<id>.md with type: definition, a title "Definition (concept)", status: draft, source (original, or paper/textbook with paper_id and location when the meaning is taken from a source), depends_on for the definitions it uses, and the defining statement with its notation. Read the results that use it so the definition says what they need; search the library first (${LOOP_COMMAND} library search <words>) and, if a lib_ definition means the same, point the users at it instead of drafting. Do not modify existing assets or definitions; never approve a definition. Run research-maintenance validate and links.${input}${report('complete|question')}`;
+        }
         return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. A construction the loop should search for lists its required properties in the statement, one per line as \`- P1: ...\`, \`- P2: ...\` (the researcher approves them before the search); a construction of a given object states the object. Create draft definitions in ${this.paths.definitions}/ as needed. Before creating a dependency or definition, search the library of known results (${LOOP_COMMAND} library search <words>) and reference a matching lib_ ID in depends_on/uses_definitions instead of re-creating it. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
       }
       case 'sources':
@@ -1864,6 +1963,7 @@ export class ResearchLoopCore {
   async report(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
     const state = this.require();
     if (state.status !== 'running') throw new Error(`The loop is ${state.status}; resume it first.`);
+    await this.resolveOverdueQuestion();
     if (state.pendingQuestion) throw new Error(`Question ${state.pendingQuestion.id} is still pending; answer it (or wait) before reporting.`);
     const stale = report.outcome === 'question' ? undefined : await this.staleBaseProblem();
     if (stale) throw new Error(stale);
@@ -2019,7 +2119,6 @@ export class ResearchLoopCore {
           // What the proof stands on, so auto mode can tell when a statement it relied on changed.
           plan.data.statement_digest = statementDigest(assetRaw);
           plan.data.dependency_digests = await this.dependencyDigests(asset.data) ?? {};
-          await this.clearHold('asset', assetId);
           await this.writeOwned(`${this.paths.plans}/${planId}.md`, stringifyMarkdown(plan.content, plan.data));
           await this.enqueueApproval('asset', assetId, `Proof from ${planId}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
           for (const definition of report.assumedDefinitions ?? []) if (await this.files.exists(`${this.paths.definitions}/${definition}.md`)) await this.enqueueApproval('definition', definition, `Used by the proof of ${assetId}.`);
@@ -2034,8 +2133,8 @@ export class ResearchLoopCore {
         delete state.current.statementDigest;
         if (failures >= limit) {
           await this.setStage('plan', { planId: undefined });
-          await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId });
-          return { stage: 'plan', message: `${failures} approaches failed for ${assetId} (limit ${limit}). Ask the researcher with ask_researcher(kind: "blocked"); on timeout park the asset.` };
+          await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
+          return { stage: 'plan', message: `${failures} approaches failed for ${assetId} (limit ${limit}). Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.` };
         }
         return finish(`Plan ${planId} failed (${failures}/${limit}). Next: a different plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
       }
@@ -2250,7 +2349,9 @@ export class ResearchLoopCore {
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
     const auto = this.lastSettings?.autoApprove;
-    if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${(['proofs', 'supporting', 'citations', 'definitions', 'counterexamples', 'project'] as const).filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
+    if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${AUTO_APPROVE_RULES.filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
+    const rigor = this.lastSettings?.rigor;
+    if (rigor) lines.push(`How careful (set by the researcher): counterexample search ${rigor.refuteSearch === 'all' ? 'for every result' : rigor.refuteSearch === 'main' ? 'for main results only' : 'off'}; definitions ${rigor.agreeDefinitions === 'main' ? 'used by main results are agreed before proving' : 'checked at the end'}; when stuck without a direction, ${rigor.whenStuck === 'retry' ? 'try one new approach of your own' : 'the result is set aside'}; unanswered questions ${rigor.unansweredQuestions === 'wait' ? 'wait for the researcher' : 'proceed with your stated default'}.`);
     if (state.stage === 'ready') lines.push(`If the researcher's message asks for a new result or goal, run: ${LOOP_COMMAND} extend --goal "<their goal>"`);
     lines.push(state.status === 'running' && !state.pendingQuestion ? `Continue with: ${LOOP_COMMAND} next` : 'Approval is a researcher action; never set status: approved.');
     return lines.join('\n');

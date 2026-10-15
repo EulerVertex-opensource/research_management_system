@@ -102,7 +102,9 @@ export interface LoopState {
   };
   /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
   progress: Record<string, { falsifiedAt?: string; changesRequested?: string }>;
-  scaffoldBrief?: { missing?: string[]; incomplete?: string[] };
+  scaffoldBrief?: { missing?: string[]; incomplete?: string[]; missingDefinitions?: string[] };
+  /** Definitions drafted to fill a gap while the researcher asked to be waited for (rigor.missingDefinitions: wait). */
+  awaitingDefinitions?: string[];
   parked: Record<string, { reason: string; at: string; note?: string }>;
   pendingQuestion?: LoopQuestion;
   answers: LoopAnswer[];

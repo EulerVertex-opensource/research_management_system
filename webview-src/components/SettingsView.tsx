@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS } from '../../src/models/settings';
-import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
-import { LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, validateSettingsPatch } from '../../src/domain/loopSettings';
+import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS, RIGOR_KEYS } from '../../src/models/settings';
+import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, RigorPolicy, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
+import { LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, rigorPreset, validateSettingsPatch } from '../../src/domain/loopSettings';
 import { COLOR } from '../graph/colors';
 
 type SectionId = 'agent' | 'loop' | 'sync' | 'budgets';
@@ -34,7 +34,7 @@ const toNumber = (text: string) => text.trim() === '' ? NaN : Number(text);
 
 function agentDraft(s: SettingsPayload) { return { provider: s.agent.provider, useDefaultOnStart: s.agent.useDefaultOnStart }; }
 function loopDraft(s: SettingsPayload) {
-  return { autoApprove: { ...s.loop.autoApprove }, ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, num(s.loop[key])])) as Record<LoopNumberKey, string> };
+  return { autoApprove: { ...s.loop.autoApprove }, rigor: { ...s.loop.rigor }, ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, num(s.loop[key])])) as Record<LoopNumberKey, string> };
 }
 function syncDraft(s: SettingsPayload) {
   const sync = s.sync;
@@ -54,8 +54,8 @@ function patchFor(section: SectionId, draft: Drafts, saved: Drafts): SettingsPat
   const changed = <T extends Record<string, unknown>>(next: T, old: T) => Object.fromEntries(Object.entries(next).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(old[key])));
   if (section === 'agent') return { agent: changed(draft.agent, saved.agent) };
   if (section === 'loop') {
-    const { autoApprove, ...numbers } = changed(draft.loop, saved.loop) as Partial<Drafts['loop']>;
-    return { loop: { ...(autoApprove ? { autoApprove } : {}), ...Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, toNumber(value as string)])) } };
+    const { autoApprove, rigor, ...numbers } = changed(draft.loop, saved.loop) as Partial<Drafts['loop']>;
+    return { loop: { ...(autoApprove ? { autoApprove } : {}), ...(rigor ? { rigor } : {}), ...Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, toNumber(value as string)])) } };
   }
   if (section === 'sync') {
     const sync = changed(draft.sync, saved.sync) as Record<string, unknown>;
@@ -143,6 +143,31 @@ export function SettingsView({ settings, result, onSave, onNavigate }: Props) {
         </Section>
 
         <Section title="Research loop" scope="this machine" note={settings.loop.file}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 320px' }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>How careful</div>
+                <div style={{ fontSize: 12, color: COLOR.muted }}>Careful checks more before the loop builds on something; Fast moves on and leaves more for you to check later.</div>
+              </div>
+              <Segmented value={rigorPreset(loop.rigor)}
+                options={[['careful', 'Careful'], ['fast', 'Fast'], ...(rigorPreset(loop.rigor) === 'custom' ? [['custom', 'Custom'] as [string, string]] : [])]}
+                onChange={(value) => { if (value === 'careful' || value === 'fast') update('loop', { rigor: { ...RIGOR_PRESETS[value] } }); }} />
+            </div>
+            <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '8px 12px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '10px 16px' }}>
+              {RIGOR_KEYS.map((key) => {
+                const field = RIGOR_FIELDS[key];
+                return (
+                  <Field key={key} label={field.label} hint={field.hint}>
+                    <select value={loop.rigor[key]} aria-label={field.label} style={inputStyle}
+                      onChange={(event) => update('loop', { rigor: { ...loop.rigor, [key]: event.target.value } as RigorPolicy })}>
+                      {Object.entries(field.options).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                    <FieldError text={error('loop', `loop.rigor.${key}`)} />
+                  </Field>
+                );
+              })}
+            </div>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Switch on={autoOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, enabled: value } })} label="Auto mode" />
             <div>

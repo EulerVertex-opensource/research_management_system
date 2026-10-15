@@ -144,12 +144,28 @@ test('auto approvals in one selection are followed by a fresh one: supporting re
 });
 
 test('a kind switched off stays with the researcher', async () => {
+  // Checked at the end (Fast): the definition comes to the researcher once the proof is in.
   const f = fixture();
-  f.map.set(SETTINGS, auto({ definitions: false }));
+  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off' } }));
   await driveToFalsify(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   await prove(f);
   assert.equal((await f.core.next()).stage, 'waiting');
   assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'definition' && item.target === 'natural'));
+  // Agreed before proving (Careful, the default): the same definition comes to the researcher before any search.
+  const careful = fixture();
+  careful.map.set(SETTINGS, auto({ definitions: false }));
+  await careful.core.start('claude', { goal: 'Prove the main theorem.' });
+  careful.map.set(paths.projectMd, project);
+  await careful.core.report({ outcome: 'complete', summary: 'Drafted' });
+  const request = careful.core.current.approvalQueue.find((item) => item.kind === 'project');
+  await careful.core.resolveApproval(request.id, 'approved', '', 'test');
+  await careful.core.next();
+  careful.map.set('research/assets/main_theorem.md', asset('', { uses_definitions: ['natural'] }));
+  careful.map.set('research/definitions/natural.md', definition('A natural number is a member of N.'));
+  await careful.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await careful.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await careful.core.next()).stage, 'waiting');
+  assert.ok(careful.core.current.approvalQueue.some((item) => item.kind === 'definition' && item.target === 'natural'));
 });
 
 test('auto mode on project goals skips review_project; off by default', async () => {

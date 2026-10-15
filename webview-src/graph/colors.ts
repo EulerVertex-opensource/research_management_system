@@ -30,6 +30,9 @@ export const PROGRESS_STYLE: Record<NodeProgress, { color: string; dashed: boole
   inactive: { color: COLOR.inactive, dashed: true },
 };
 
+/** Definitions, so they read apart from results in both the list and the graph. */
+export const DEFINITION_COLOR = 'var(--vscode-terminal-ansiCyan, #11a8cd)';
+
 /** Results taken from the literature (cited from a paper or textbook, or a library result). */
 export const CITED_COLOR = 'var(--vscode-charts-purple, #b180d7)';
 
@@ -38,13 +41,15 @@ export const CITED_COLOR = 'var(--vscode-charts-purple, #b180d7)';
  * shows in the cited color, so what the project proves and what it quotes are
  * told apart at a glance. An unchecked citation stays grey ("Not checked").
  */
-export function nodeStyle(node: Pick<GraphNodeView, 'progress' | 'cited'>): { color: string; dashed: boolean } {
+export function nodeStyle(node: Pick<GraphNodeView, 'progress' | 'cited'> & { kind?: GraphNodeView['kind'] }): { color: string; dashed: boolean } {
   const state = PROGRESS_STYLE[node.progress] ?? PROGRESS_STYLE.waiting;
+  // A definition that is agreed, or not yet, shows in the definition color; one that needs the researcher keeps that state's color.
+  if (node.kind === 'definition' && (node.progress === 'done' || node.progress === 'waiting')) return { color: DEFINITION_COLOR, dashed: node.progress === 'waiting' };
   if (node.cited && node.progress === 'done') return { color: CITED_COLOR, dashed: false };
   return state;
 }
 
-export function nodeColor(node: Pick<GraphNodeView, 'progress' | 'cited'>): string {
+export function nodeColor(node: Pick<GraphNodeView, 'progress' | 'cited'> & { kind?: GraphNodeView['kind'] }): string {
   return nodeStyle(node).color;
 }
 

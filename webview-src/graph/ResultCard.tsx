@@ -3,7 +3,7 @@ import type { GraphAction, GraphNodeView, GraphPayload } from '../../src/models/
 import { kindLabel } from '../../src/domain/copy';
 import { MarkdownPreview } from '../components/MarkdownPreview';
 import { ActionRow, buttonStyle } from './AttentionList';
-import { COLOR, CITED_COLOR, nodeStyle, tint } from './colors';
+import { COLOR, CITED_COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
 
 /**
  * One result as a box: its state, title and one line of detail; opened, it
@@ -60,6 +60,7 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <StatePill node={node} />
           {required && <span style={{ fontSize: 11, fontWeight: 700, color: COLOR.waiting }}>★ Main result</span>}
+          {node.kind === 'definition' && <span style={{ fontSize: 11, fontWeight: 700, color: DEFINITION_COLOR, padding: '0 6px', borderRadius: 8, border: `1px solid ${DEFINITION_COLOR}` }}>Definition</span>}
           {node.cited && node.progress !== 'done' && <span style={{ fontSize: 11, fontWeight: 600, color: CITED_COLOR }}>Cited</span>}
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
             {onClose

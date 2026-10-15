@@ -24,6 +24,8 @@ export interface AttentionInput {
   required: string[];
   /** Nodes the stopped loop waits on; their items move to group 0. */
   stoppedOn?: string[];
+  /** Results marked for re-check: node ID → the changed node it rests on. */
+  recheck?: Record<string, string>;
 }
 
 const open = (id: string): AttentionButton => ({ label: 'Open', action: { action: 'openNode', id }, kind: 'secondary' });
@@ -171,6 +173,23 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
       ifIgnored: blocks.length ? `${mains(blocks)} ${blocks.length === 1 ? 'stays' : 'stay'} unproved. Other work continues.` : 'Nothing is held up.',
       target: id, blocks, sections: sectionsOf(id), since: info.at,
       buttons: [...setAsideButtons(id, info.reason), open(id)],
+    });
+  }
+
+  for (const [id, changed] of Object.entries(input.recheck ?? {})) {
+    if (!nodes.has(id)) continue;
+    const blocks = blocksOf(id);
+    items.push({
+      key: `recheck:${id}`, priority: blocks.length ? 1 : 2, category: 'recheck',
+      title: `${title(id)} may no longer hold: ${title(changed)} changed`,
+      reason: '', why: `It was proved for the earlier version of ${title(changed)}.`,
+      ifIgnored: 'It keeps counting as done, though what it rests on has changed.',
+      target: id, blocks, sections: sectionsOf(id),
+      buttons: [
+        { label: 'Read it', action: { action: 'openNode', id }, kind: 'primary' },
+        { label: 'Still holds', action: { action: 'confirmRecheck', id }, kind: 'secondary' },
+        { label: 'Ask the agent to re-check', action: { action: 'agent', prompt: `${changed} changed after ${id} was proved. Re-read the proof of ${id} against the current ${changed} and tell me whether it still holds and what would need to change; edit nothing.` }, kind: 'secondary' },
+      ],
     });
   }
 
