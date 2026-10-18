@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { searchNothing, writeRound } = require('./search-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -60,9 +61,8 @@ async function driveToFalsify(f, scaffold = { 'research/assets/main_theorem.md':
   for (const [file, content] of Object.entries(scaffold)) f.map.set(file, content);
   await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
   await f.core.report({ outcome: 'none', summary: 'No sources' });
-  assert.equal((await f.core.next()).stage, 'falsify');
-  f.map.set(`research/checks/check_main_theorem_${++counter}.md`, check());
-  await f.core.report({ outcome: 'none', summary: 'No counterexample' });
+  assert.equal((await f.core.next()).stage, 'search');
+  await searchNothing(f);
   assert.equal(f.core.current.stage, 'plan');
 }
 
@@ -144,12 +144,28 @@ test('auto approvals in one selection are followed by a fresh one: supporting re
 });
 
 test('a kind switched off stays with the researcher', async () => {
+  // Checked at the end (Fast): the definition comes to the researcher once the proof is in.
   const f = fixture();
-  f.map.set(SETTINGS, auto({ definitions: false }));
+  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off' } }));
   await driveToFalsify(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   await prove(f);
   assert.equal((await f.core.next()).stage, 'waiting');
   assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'definition' && item.target === 'natural'));
+  // Agreed before proving (Careful, the default): the same definition comes to the researcher before any search.
+  const careful = fixture();
+  careful.map.set(SETTINGS, auto({ definitions: false }));
+  await careful.core.start('claude', { goal: 'Prove the main theorem.' });
+  careful.map.set(paths.projectMd, project);
+  await careful.core.report({ outcome: 'complete', summary: 'Drafted' });
+  const request = careful.core.current.approvalQueue.find((item) => item.kind === 'project');
+  await careful.core.resolveApproval(request.id, 'approved', '', 'test');
+  await careful.core.next();
+  careful.map.set('research/assets/main_theorem.md', asset('', { uses_definitions: ['natural'] }));
+  careful.map.set('research/definitions/natural.md', definition('A natural number is a member of N.'));
+  await careful.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await careful.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await careful.core.next()).stage, 'waiting');
+  assert.ok(careful.core.current.approvalQueue.some((item) => item.kind === 'definition' && item.target === 'natural'));
 });
 
 test('auto mode on project goals skips review_project; off by default', async () => {
@@ -179,10 +195,11 @@ test('counterexamples are confirmed automatically only when switched on', async 
     f.map.set('research/assets/main_theorem.md', asset());
     await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
     await f.core.report({ outcome: 'none', summary: 'No sources' });
-    assert.equal((await f.core.next()).stage, 'falsify');
-    f.map.set('research/assets/counterexample_1.md', matter.stringify('\n## Assumptions\n\nAll hypotheses hold.\n\n## Calculation\n\nThe conclusion fails.\n', { type: 'example', title: 'Counterexample', status: 'draft', refutes: 'main_theorem', depends_on: [], uses_definitions: [] }));
-    await f.core.report({ outcome: 'candidate', summary: 'Found', counterexampleId: 'counterexample_1' });
-    f.map.set('research/assets/counterexample_1.md', f.map.get('research/assets/counterexample_1.md') + '\n## Verdict\n\nconfirmed\n');
+    assert.equal((await f.core.next()).stage, 'search');
+    writeRound(f, { status: 'survived' });
+    await f.core.report({ outcome: 'searched', summary: 'Found' });
+    const exampleFile = `research/assets/${f.core.current.current.counterexampleId}.md`;
+    f.map.set(exampleFile, f.map.get(exampleFile) + '\n## Verdict\n\nconfirmed\n');
     await f.core.report({ outcome: 'confirmed', summary: 'Checked' });
     if (enabled) {
       assert.equal(status(f, 'research/assets/main_theorem.md'), 'deprecated');

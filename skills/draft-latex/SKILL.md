@@ -1,6 +1,6 @@
 ---
 name: draft-latex
-description: Write or revise a manuscript section in LaTeX from approved research nodes, update sections the research changed since they were locked, and keep the main document's section inputs in outline order. Use when drafting section text, creating a missing section file, updating stale sections, or syncing section order after plan-manuscript changed the outline.
+description: Write or revise a manuscript section in LaTeX from approved research nodes, update sections the research changed since they were locked, and keep the main document's section inputs in outline order. Use when drafting section text, creating a missing section file, updating stale sections, syncing section order after plan-manuscript changed the outline, or marking the passages of an adopted manuscript.
 ---
 
 # Draft manuscript LaTeX
@@ -12,6 +12,7 @@ node .agents/skills/draft-latex/scripts/manuscript-writing.cjs impact
 node .agents/skills/draft-latex/scripts/manuscript-writing.cjs prepare <section_id> --preview
 node .agents/skills/draft-latex/scripts/manuscript-writing.cjs lock <section_id> --preview
 node .agents/skills/draft-latex/scripts/manuscript-writing.cjs sync --preview
+node .agents/skills/draft-latex/scripts/manuscript-writing.cjs adopt --preview
 ```
 
 ## Write a section
@@ -41,6 +42,10 @@ The assets are working documents; the paper is not a concatenation of them. [ref
 - Labels: never print codes carried over from the assets, such as (M1), (S1), (F1), asset-local numbering, or node IDs. Name the object in words ("the monotonicity assumption", "the second step of the proof"). Labels the manuscript itself defines, such as hypotheses (H1)-(H3) in a displayed list referenced with `\ref`, are fine.
 - Wording: describe what the mathematics does directly ("the estimate requires $p > 2$") instead of figurative framing ("the decisive clause", "the argument hinges on"). Repeat the precise term rather than varying it. Keep mathematical statements and proof steps intact.
 
+## Adopt existing prose
+
+After `plan-manuscript` adopted a manuscript and filled its briefs, the section files hold the researcher's own prose. Do not run `prepare --apply` (the files exist) and do not redraft. Wrap each passage that presents a brief source, such as a theorem environment with its proof or a definition, in a block with its `sources` and `policy=assisted`. Add only the two marker lines; never change, reflow, or translate a line of the existing text. Use `policy=manual` where the researcher wants the text left alone. Then run `impact`: a section stays `unlocked` until the researcher has approved its nodes and reviewed it, and only then is it locked.
+
 ## Keep sections current
 
 A lock records, in `writing/bindings/<id>.json` (shared in Git), the digests of the node components a section presents and the project facets it restates. `impact` compares them with the research now:
@@ -62,7 +67,7 @@ After the researcher has reviewed a drafted or revised section, show `lock <id> 
 
 ## Sync input order
 
-After section files exist, run `sync --preview` to see the proposed `\input` order from the outline, then `sync --apply`. It changes only the block between these markers in the main document; for an adopted manuscript, add them once around the existing section inputs:
+After section files exist, run `sync --preview` to see the proposed `\input` order from the outline, then `sync --apply`. It changes only the block between these markers in the main document (`adopt` adds them to an existing manuscript):
 
 ```tex
 % research-assistant:sections:start

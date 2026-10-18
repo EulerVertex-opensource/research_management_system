@@ -3,7 +3,7 @@ import * as path from 'path';
 import { parseMarkdown } from '../services/Frontmatter';
 import { NodeLoopFiles, loadProjectConfig, loadProjectPaths } from './nodeFiles';
 import { openGit } from './nodeGit';
-import { SectionBrief, parseSectionBrief, parseWritingOutline, sectionTexSkeleton, syncInputBlock, validSectionId, WritingSection } from '../services/ManuscriptWriting';
+import { SectionBrief, adoptManuscript, adoptedBrief, adoptedOutline, parseSectionBrief, parseWritingOutline, sectionHeadingTitle, sectionTexSkeleton, syncInputBlock, validSectionId, WritingSection } from '../services/ManuscriptWriting';
 import { bindingPath, loadImpactNodes, loadManuscriptImpact, loadProjectRevision, readSectionBinding } from '../services/ManuscriptImpactLoader';
 import { lockBinding, renderImpact, sectionImpact } from '../domain/manuscriptImpact';
 import { ProjectPaths } from '../models/types';
@@ -212,6 +212,72 @@ async function sync(paths: Paths, mode: Mode): Promise<void> {
   }
 }
 
+/** Section IDs already used by a section file or a brief, so a split never overwrites either. */
+async function takenSectionIds(paths: Paths): Promise<string[]> {
+  const ids = async (dir: string, extension: string) => (await fs.readdir(dir).catch(() => [] as string[]))
+    .filter((file) => file.endsWith(extension)).map((file) => file.slice(0, -extension.length));
+  return [...await ids(paths.sections, '.tex'), ...await ids(paths.briefs, '.md')];
+}
+
+/**
+ * Bring an existing manuscript under the outline: split its inline sections
+ * into section files (text unchanged), or mark its existing section inputs,
+ * then write the outline and one brief per section.
+ */
+async function adopt(paths: Paths, mode: Mode): Promise<void> {
+  const outline = await fs.readFile(paths.outline, 'utf8').catch(() => undefined);
+  let planned: WritingSection[] = [];
+  try { if (outline !== undefined) planned = parseWritingOutline(outline); }
+  catch (error) { if (!(error instanceof Error && /has no sections/.test(error.message))) throw error; }
+  if (planned.length) throw new Error(`${paths.config.writingOutline} already lists sections; the manuscript is adopted. Use plan-manuscript and sync.`);
+
+  const main = await fs.readFile(paths.main, 'utf8');
+  const mainName = path.relative(paths.root, paths.main).split(path.sep).join('/');
+  const sectionsDir = path.relative(paths.latexRoot, paths.sections).split(path.sep).join('/') || '.';
+  const result = adoptManuscript(main, sectionsDir, await takenSectionIds(paths));
+  const rel = (file: string) => path.relative(paths.root, file).split(path.sep).join('/');
+  if (result.mode === 'inputs') {
+    for (const section of result.sections) {
+      const tex = await fs.readFile(texFileOf(paths, section.id), 'utf8').catch(() => { throw new Error(`${mainName}:${section.lines[0]} inputs ${rel(texFileOf(paths, section.id))}, which does not exist.`); });
+      section.title = sectionHeadingTitle(tex) ?? section.id;
+    }
+  }
+  const briefFile = (id: string) => path.join(paths.briefs, `${id}.md`);
+  const existingBriefs = (await Promise.all(result.sections.map(async (section) => (await fs.access(briefFile(section.id)).then(() => true, () => false)) ? rel(briefFile(section.id)) : undefined))).filter(Boolean);
+  if (existingBriefs.length) throw new Error(`Briefs already exist for: ${existingBriefs.join(', ')}. Remove them or add the sections to the outline by hand.`);
+
+  const [first, last] = result.lines;
+  process.stdout.write(result.mode === 'split'
+    ? `Adopt ${mainName}: split lines ${first}-${last} at ${result.sections.length} \\section heading(s) into section files.\n`
+    : `Adopt ${mainName}: its section inputs (lines ${first}-${last}) already use ${sectionsDir}/; add the section markers around them.\n`);
+  for (const [index, section] of result.sections.entries()) {
+    const where = result.mode === 'split' ? `${mainName}:${section.lines[0]}-${section.lines[1]} -> ${rel(texFileOf(paths, section.id))}` : rel(texFileOf(paths, section.id));
+    process.stdout.write(`  ${index + 1}. ${section.id} "${section.title}" ${where}\n`);
+  }
+  if (result.mode === 'split') {
+    process.stdout.write(`Stays in ${mainName}: the preamble and front matter above line ${first} (title, abstract), and lines ${last + 1}-end (bibliography, \\end{document}).\n`);
+    for (const item of result.left) process.stdout.write(`Not split: "${item.title}" at line ${item.line} comes after the bibliography; it stays in ${mainName}.\n`);
+    process.stdout.write('The section files hold the moved lines unchanged and in order, so the compiled document should not change; compile once to confirm.\n');
+    process.stdout.write(`Moving text out of ${mainName} detaches Overleaf comments and tracked changes on it: confirm with the researcher before --apply.\n`);
+  }
+  process.stdout.write(`Outline: ${paths.config.writingOutline} lists the ${result.sections.length} section(s); one brief each in ${paths.config.writingSections}/ with assets: [] to fill from the extracted nodes.\n`);
+  if (mode !== 'apply') { process.stdout.write('Preview only; run with --apply to write the files.\n'); return; }
+
+  if (result.mode === 'split') {
+    await fs.mkdir(paths.sections, { recursive: true });
+    for (const section of result.sections) await fs.writeFile(texFileOf(paths, section.id), section.text!, { flag: 'wx' });
+  }
+  await fs.mkdir(paths.briefs, { recursive: true });
+  for (const section of result.sections) {
+    const origin = result.mode === 'split' ? `${mainName} lines ${section.lines[0]}-${section.lines[1]}` : rel(texFileOf(paths, section.id));
+    await fs.writeFile(briefFile(section.id), adoptedBrief(section, origin), { flag: 'wx' });
+  }
+  await fs.mkdir(path.dirname(paths.outline), { recursive: true });
+  await fs.writeFile(paths.outline, adoptedOutline(outline, result.sections));
+  await fs.writeFile(paths.main, result.updated);
+  process.stdout.write(`Adopted: ${result.sections.length} section(s). Next: extract nodes, fill each brief's sources, and wrap the passages that present them in blocks.\n`);
+}
+
 async function impact(paths: Paths, only: string | undefined, json: boolean): Promise<void> {
   const result = await loadManuscriptImpact(paths.files, paths.config, only);
   if (!result) throw new Error(`No writing outline at ${paths.config.writingOutline}; plan the manuscript first.`);
@@ -248,8 +314,8 @@ async function lock(paths: Paths, id: string, mode: Mode): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const action = args[0];
-  const usage = 'Usage: manuscript-writing <sync | prepare SECTION_ID [--full] | impact [SECTION_ID] [--json] | lock SECTION_ID> [--preview | --apply] [--project PROJECT_ROOT]';
-  if (!['sync', 'prepare', 'impact', 'lock'].includes(action)) throw new Error(usage);
+  const usage = 'Usage: manuscript-writing <adopt | sync | prepare SECTION_ID [--full] | impact [SECTION_ID] [--json] | lock SECTION_ID> [--preview | --apply] [--project PROJECT_ROOT]';
+  if (!['adopt', 'sync', 'prepare', 'impact', 'lock'].includes(action)) throw new Error(usage);
   const projectIndex = args.indexOf('--project');
   if (projectIndex >= 0 && !args[projectIndex + 1]) throw new Error('--project needs a path');
   if (args.includes('--apply') && args.includes('--preview')) throw new Error('Choose --preview or --apply');
@@ -258,7 +324,7 @@ async function main(): Promise<void> {
     const previous = args[index];
     return previous !== '--project' && !allowed.has(arg);
   });
-  if (action === 'sync' && positional.length) throw new Error('sync takes no section ID');
+  if ((action === 'sync' || action === 'adopt') && positional.length) throw new Error(`${action} takes no section ID`);
   if ((action === 'prepare' || action === 'lock') && positional.length !== 1) throw new Error(`${action} needs one section ID`);
   if (action === 'impact' && positional.length > 1) throw new Error('impact takes at most one section ID');
   const root = path.resolve(projectIndex >= 0 ? args[projectIndex + 1] : process.cwd());
@@ -267,6 +333,7 @@ async function main(): Promise<void> {
   if (action === 'prepare') await prepare(paths, positional[0], mode, args.includes('--full'));
   else if (action === 'impact') await impact(paths, positional[0], args.includes('--json'));
   else if (action === 'lock') await lock(paths, positional[0], mode);
+  else if (action === 'adopt') await adopt(paths, mode);
   else await sync(paths, mode);
 }
 

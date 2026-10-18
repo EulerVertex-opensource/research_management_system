@@ -8,21 +8,26 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  QuestionKind, SNAPSHOT_PATH, STATE_PATH, StageReport, isApproved, isWaitingForHuman, newState,
+  LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
-import { IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
-import { AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
+import { INACTIVE_STATUSES, IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
 import { readLoopSettings } from './LoopSettingsStore';
+import { DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
+import {
+  CandidateInfo, NEGATED_CONCLUSION, RoundInfo, SearchMode, SearchProgress, assignDirections, candidateChecks, checkSections, parseCandidate, parseRound, renderBoard, roundDigest, searchProgress, specProperties,
+} from '../domain/search';
 import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
-import { hasSection, sectionContent } from '../domain/sections';
+import { hasSection, sectionContent, statementPart } from '../domain/sections';
+import { layoutReport } from '../domain/layout';
 import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
 import {
-  CheckInfo, DecisionInfo, DecisionKind, Provenance, checkMarkdown, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
-  failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampCheck,
+  CheckInfo, DecisionExtra, DecisionInfo, DecisionKind, Provenance, checkMarkdown, sortDecisions, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
+  failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampSearchRecord,
 } from './ResearchRecords';
 import {
   ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, projectPart, renderContext, renderShow,
@@ -48,9 +53,20 @@ export interface ValidationResult { problems: string[]; fixed: string[] }
 type AssetInfo = ContextNode;
 type Selection =
   | { stage: 'discuss_goals' | 'draft_project' | 'review_project' | 'ready'; note?: string }
-  | { stage: 'scaffold'; missing: string[]; incomplete: string[] }
-  | { stage: 'falsify' | 'plan'; assetId: string }
-  | { stage: 'waiting'; reason: string };
+  | { stage: 'scaffold'; missing: string[]; incomplete: string[]; missingDefinitions?: string[] }
+  | { stage: 'plan'; assetId: string }
+  | { stage: 'search'; assetId: string; mode: SearchMode }
+  | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
+type Finish = (message: string, next: LoopStage, patch?: Partial<LoopState['current']>) => Promise<{ stage: LoopStage; message: string }>;
+type SearchRound = NonNullable<LoopState['current']['search']>;
+/** A construction to search for: it lists required properties (`- P1: ...`) and no construction has been written yet. */
+function isConstructionSpec(raw: string): boolean {
+  let parsed: { data: Record<string, any>; content: string };
+  try { parsed = parseMarkdown(raw); } catch { return false; }
+  return parsed.data.type === 'construction' && parsed.data.status === 'draft' && !hasSection(parsed.content, 'Construction') && specProperties(statementPart(parsed.content)).length > 0;
+}
+/** One worker pack per search slot, beside the stage's index pack. */
+const searchPackPath = (slot: number) => `${STATE_DIR}/context/search-${slot}.md`;
 
 const LOCK_TTL_MS = 10 * 60 * 1000;
 /** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
@@ -174,6 +190,8 @@ export class ResearchLoopCore {
     const state = this.require();
     state.stage = stage;
     state.current = { ...state.current, ...patch, stageStartedAt: this.now(), baseCommit: await this.git?.head() };
+    if (!SEARCH_STAGES.has(stage)) delete state.current.search;
+    if (stage !== 'waiting') delete state.waitingOn;
     await this.takeSnapshot();
     await this.save();
     await this.event('stage', { stage, assetId: state.current.assetId, planId: state.current.planId });
@@ -229,15 +247,33 @@ export class ResearchLoopCore {
     if (!project || !(await this.isProjectApproved(project))) return;
     const state = this.require();
     state.extension = { goal, at: this.now(), baselineRequired: requiredAssetIds(project) };
+    await this.refreshRetired();
     await this.event('extended', { goal, baselineRequired: state.extension.baselineRequired });
   }
 
-  /** While extending, project.md may only gain required results. */
-  private extensionProblems(project: string): string[] {
+  /** Record which baseline results are retired, so the draft_project instruction stops asking to keep them. */
+  private async refreshRetired(): Promise<void> {
+    const extension = this.state?.extension;
+    if (!extension || extension.projectApproved) return;
+    const retired = await this.retiredBaseline();
+    if (retired.length) extension.retired = retired; else delete extension.retired;
+  }
+
+  /** Baseline required results since deprecated or archived: the researcher retired them, so an extension may drop them. */
+  private async retiredBaseline(): Promise<string[]> {
+    const extension = this.state?.extension;
+    if (!extension) return [];
+    const assets = await this.collectKind('asset');
+    return extension.baselineRequired.filter((id) => INACTIVE_STATUSES.has(assets.get(id)?.data.status));
+  }
+
+  /** While extending, project.md may only gain required results, apart from retired ones. */
+  private async extensionProblems(project: string): Promise<string[]> {
     const extension = this.state?.extension;
     if (!extension || extension.projectApproved) return [];
     const required = requiredAssetIds(project);
-    const removed = extension.baselineRequired.filter((id) => !required.includes(id));
+    const retired = await this.retiredBaseline();
+    const removed = extension.baselineRequired.filter((id) => !required.includes(id) && !retired.includes(id));
     const added = required.filter((id) => !extension.baselineRequired.includes(id));
     const problems: string[] = [];
     if (removed.length) problems.push(`project.md: keep the existing required results ${removed.join(', ')}; extending only adds results (deprecate an asset to retire it).`);
@@ -313,7 +349,7 @@ export class ResearchLoopCore {
     const previous = file.records.find((entry) => entry.kind === kind && entry.target === target);
     file.records = file.records.filter((entry) => !(entry.kind === kind && entry.target === target));
     const provenance = await this.provenance();
-    const record: ApprovalRecord = { kind, target, digest: researchDigest(raw, kind), approvedAt: provenance.created_at, source, performed_by: provenance.performed_by };
+    const record: ApprovalRecord = { kind, target, digest: approvalDigest(raw, kind), approvedAt: provenance.created_at, source, performed_by: provenance.performed_by };
     if (kind !== 'project') record.statement = statementDigest(raw);
     if (provenance.base_commit) record.base_commit = provenance.base_commit;
     if (provenance.extension_version) record.extension_version = provenance.extension_version;
@@ -361,11 +397,16 @@ export class ResearchLoopCore {
    * Researcher approval. Only the extension (a human click, dashboard, or editor)
    * may call this, or auto mode the researcher turned on (source `auto`).
    */
-  async approve(kind: 'project' | 'asset' | 'definition', target: string, source: string): Promise<void> {
+  async approve(kind: 'project' | 'asset' | 'definition' | 'specification', target: string, source: string): Promise<void> {
     if (kind === 'project') {
       const raw = await this.files.readFile(this.paths.projectMd);
       if (!requiredAssetIds(raw).length) throw new Error('Add asset IDs to required_results in project.md before approving the project.');
       await this.record('project', 'project', raw, source);
+    } else if (kind === 'specification') {
+      // Approves what to search for; the asset stays draft until its construction and proof are approved.
+      const raw = await this.files.readFile(`${this.paths.assets}/${target}.md`);
+      if (!isConstructionSpec(raw)) throw new Error(`${target} is not a construction with a specification (- P1: ... in its statement).`);
+      await this.record('specification', target, raw, source);
     } else {
       const file = await this.nodeFile(kind, target);
       const raw = await this.files.readFile(file);
@@ -381,7 +422,7 @@ export class ResearchLoopCore {
       if (kind === 'asset') await this.clearPark(target, `approved (${source})`);
       await this.save();
     }
-    if (kind !== 'project' && source !== 'auto') await this.clearHold(kind, target);
+    if ((kind === 'asset' || kind === 'definition') && source !== 'auto') await this.clearHold(kind, target);
     await this.event('approved', { kind, target, source });
   }
 
@@ -462,8 +503,10 @@ export class ResearchLoopCore {
   }
 
   /**
-   * Revert approvals that no longer match their digest, and invalidate
-   * dependants whose approved dependency changed its statement.
+   * Revert approvals that no longer match their digest. When an approved
+   * statement or definition changed, everything that rests on it, however
+   * indirectly, either goes back to review (rigor "revert") or is marked for
+   * re-check and kept from auto mode (rigor "flag").
    */
   async reconcile(changedId?: string, options: { dryRun?: boolean; details?: Array<{ id: string; reason: string }> } = {}): Promise<string[]> {
     const approvals = await this.approvals();
@@ -490,6 +533,29 @@ export class ResearchLoopCore {
       await this.addHold(node.kind, id, reason.split(':')[0]);
       await this.event('approval_invalidated', { id, reason });
     };
+    /** Everything that rests on `id`: results through depends_on or uses_definitions, definitions through depends_on. */
+    const downstream = (id: string): string[] => {
+      const found = new Set<string>();
+      const queue = [id];
+      while (queue.length) {
+        const current = queue.shift()!;
+        for (const [otherId, other] of nodes) {
+          if (found.has(otherId) || otherId === id) continue;
+          const uses = [...(Array.isArray(other.data.depends_on) ? other.data.depends_on : []), ...(other.kind === 'asset' && Array.isArray(other.data.uses_definitions) ? other.data.uses_definitions : [])];
+          if (uses.includes(current)) { found.add(otherId); queue.push(otherId); }
+        }
+      }
+      return [...found];
+    };
+    /** Mark for re-check: an approved result, or a draft with a written proof, that rests on something changed. */
+    const flag = async (id: string, because: string) => {
+      const node = nodes.get(id);
+      if (!node || !(node.data.status === 'approved' || (node.kind === 'asset' && proofText(parseMarkdown(node.raw).content)))) return;
+      options.details?.push({ id, reason: `recheck:${because}` });
+      if (options.dryRun) return;
+      await this.addHold(node.kind, id, `recheck:${because}`);
+      await this.event('recheck_flagged', { id, because });
+    };
     const candidates = changedId ? [changedId] : [...nodes.keys()];
     for (const id of candidates) {
       const node = nodes.get(id);
@@ -500,9 +566,10 @@ export class ResearchLoopCore {
         await revert(id, 'content_changed');
       }
       if (record.statement && record.statement !== statementDigest(node.raw)) {
-        for (const [otherId, other] of nodes) {
-          const deps = node.kind === 'asset' ? other.data.depends_on : other.kind === 'asset' ? other.data.uses_definitions : other.data.depends_on;
-          if (Array.isArray(deps) && deps.includes(id)) await revert(otherId, `dependency_changed:${id}`);
+        const policy = (await this.loopSettings()).rigor.onDependencyChange;
+        for (const otherId of downstream(id)) {
+          if (policy === 'revert') await revert(otherId, `dependency_changed:${id}`);
+          else await flag(otherId, id);
         }
       }
     }
@@ -549,11 +616,26 @@ export class ResearchLoopCore {
       if (decision === 'answer' && text.trim()) {
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
         // The decision record is the one home of a direction (plan packs read the latest one). It answers every failed plan so far; the shared record resets the failure count on every machine.
-        await this.writeDecision('direction', assetId, text, { failedPlansAtDirection: await this.failedPlans(assetId) });
+        const searchRound = await this.isConstructionSearch(assetId) ? (await this.searchProgressFor(assetId)).lastRound : undefined;
+        await this.writeDecision('direction', assetId, text, { failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
         delete state.parked[assetId];
-        await this.setStage('plan', { assetId, planId: undefined });
+        // A direction also restarts a construction search's round and candidate limits.
+        if (await this.isConstructionSearch(assetId)) await this.setStage('select', { assetId: undefined });
+        else await this.setStage('plan', { assetId, planId: undefined });
       } else {
-        await this.park(assetId, 'three_failures', 'no new direction from the researcher');
+        const construct = await this.isConstructionSearch(assetId);
+        // With "retry", the agent gets one new approach of its own per stuck episode; a second time it is set aside.
+        if ((await this.loopSettings()).rigor.whenStuck === 'retry' && latestDirection(await this.decisions(), assetId)?.reason !== 'agent_retry') {
+          const searchRound = construct ? (await this.searchProgressFor(assetId)).lastRound : undefined;
+          await this.writeDecision('direction', assetId, 'No direction from the researcher. Try one genuinely different approach of your own, unlike every failed one; if it fails too, the result is set aside.', { reason: 'agent_retry', failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
+          delete state.parked[assetId];
+          await this.event('agent_retry', { assetId });
+          if (construct) await this.setStage('select', { assetId: undefined });
+          else await this.setStage('plan', { assetId, planId: undefined });
+          return;
+        }
+        if (construct) await this.park(assetId, 'search_exhausted', 'no new direction from the researcher');
+        else await this.park(assetId, 'three_failures', 'no new direction from the researcher');
         await this.setStage('select');
       }
     } else if (question.kind === 'counterexample_review') {
@@ -575,6 +657,22 @@ export class ResearchLoopCore {
     await this.event('question_expired', { questionId, kind: state.pendingQuestion.kind });
   }
 
+  /**
+   * A question past its timeout resolves as unanswered when the researcher's
+   * setting says the agent goes on with its default; with "wait" it stays open.
+   * Returns whether it resolved one. Callers: next, report, and the extension's
+   * health check, so a question the loop raised itself never hangs forever.
+   */
+  async resolveOverdueQuestion(now = Date.now()): Promise<boolean> {
+    const question = this.state?.pendingQuestion;
+    if (!question?.timeoutSec) return false;
+    if ((await this.loopSettings()).rigor.unansweredQuestions !== 'default') return false;
+    if (now - Date.parse(question.createdAt) < question.timeoutSec * 1000) return false;
+    await this.event('question_expired', { questionId: question.id, kind: question.kind });
+    await this.autoResolveQuestion(question.id);
+    return true;
+  }
+
   /** Auto-mode resolution when a timed question got no answer. */
   async autoResolveQuestion(questionId: string): Promise<void> {
     const state = this.require();
@@ -588,7 +686,7 @@ export class ResearchLoopCore {
     if (kind === 'project') target = 'project';
     const state = this.require();
     const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(await this.nodeFile(kind === 'definition' ? 'definition' : 'asset', target)).catch(() => '');
-    const digest = raw ? researchDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : 'asset') : '';
+    const digest = raw ? approvalDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : kind === 'specification' ? 'specification' : 'asset') : '';
     const existing = state.approvalQueue.find((item) => item.kind === kind && item.target === target);
     if (existing) {
       if (existing.digest !== digest) { existing.digest = digest; existing.reason = reason; existing.requestedAt = this.now(); await this.save(); }
@@ -634,6 +732,7 @@ export class ResearchLoopCore {
     if (request.kind === 'project') await this.approve('project', 'project', source);
     else if (request.kind === 'definition') await this.approve('definition', request.target, source);
     else if (request.kind === 'counterexample') await this.confirmCounterexample(request.target, source);
+    else if (request.kind === 'specification') await this.approve('specification', request.target, source);
     else await this.approve('asset', request.target, source);
   }
 
@@ -650,6 +749,10 @@ export class ResearchLoopCore {
 
   private async isCurrentlyApproved(kind: ApprovalKind, target: string): Promise<boolean> {
     if (kind === 'project') return this.isProjectApproved();
+    if (kind === 'specification') {
+      const raw = await this.files.readFile(`${this.paths.assets}/${target}.md`).catch(() => '');
+      return Boolean(raw) && isApproved((await this.approvals()).records, 'specification', target, raw);
+    }
     const recordKind = kind === 'definition' ? 'definition' : 'asset';
     const raw = await this.files.readFile(await this.nodeFile(recordKind, target)).catch(() => '');
     if (!raw) return false;
@@ -692,6 +795,11 @@ export class ResearchLoopCore {
       if (!policy.project) return undefined;
       const raw = await this.files.readFile(this.paths.projectMd).catch(() => '');
       return raw && researchDigest(raw, 'project') === request.digest && requiredAssetIds(raw).length && projectSection(raw, 'Main Problem') ? 'project' : undefined;
+    }
+    if (request.kind === 'specification') {
+      if (!policy.specifications) return undefined;
+      const raw = await this.files.readFile(`${this.paths.assets}/${request.target}.md`).catch(() => '');
+      return raw && statementDigest(raw) === request.digest && isConstructionSpec(raw) ? 'specifications' : undefined;
     }
     const kind: ResultKind = request.kind === 'definition' ? 'definition' : 'asset';
     const file = await findNodeFile(this.files, this.paths, kind, request.target);
@@ -779,6 +887,23 @@ export class ResearchLoopCore {
     await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
   }
 
+  /** Results marked for re-check because something they rest on changed: node ID → the changed node's ID. */
+  async recheckFlags(): Promise<Record<string, string>> {
+    const flags: Record<string, string> = {};
+    for (const [key, hold] of Object.entries(await this.holds())) if (hold.reason.startsWith('recheck:')) flags[key.slice(key.indexOf(':') + 1)] = hold.reason.slice('recheck:'.length);
+    return flags;
+  }
+
+  /** The researcher read a flagged result again and it still holds. */
+  async confirmRecheck(id: string): Promise<void> {
+    const holds = await this.holds();
+    const key = Object.keys(holds).find((entry) => entry.endsWith(`:${id}`) && holds[entry].reason.startsWith('recheck:'));
+    if (!key) return;
+    delete holds[key];
+    await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
+    await this.event('recheck_cleared', { id });
+  }
+
   private async clearHold(kind: 'asset' | 'definition', target: string): Promise<void> {
     const holds = await this.holds();
     if (!holds[`${kind}:${target}`]) return;
@@ -812,7 +937,7 @@ export class ResearchLoopCore {
 
   // ---------- shared records ----------
 
-  private async writeDecision(kind: DecisionKind, target: string, text: string, extra: { reason?: string; failedPlansAtDirection?: string[]; digest?: string } = {}): Promise<string> {
+  private async writeDecision(kind: DecisionKind, target: string, text: string, extra: DecisionExtra = {}): Promise<string> {
     const provenance = await this.provenance();
     const id = decisionId(kind, target, provenance, this.shortId());
     await this.writeOwned(`${this.shared.decisions}/${id}.md`, decisionMarkdown(kind, target, text, provenance, extra));
@@ -850,6 +975,194 @@ export class ResearchLoopCore {
     const file = `${this.shared.checks}/${id}.md`;
     await this.writeOwned(file, checkMarkdown(assetId, outcome, cases, limitations, statementDigest(raw), provenance));
     return file;
+  }
+
+  // ---------- object search ----------
+
+  private async searchRecords(): Promise<{ candidates: CandidateInfo[]; rounds: RoundInfo[] }> {
+    const candidates = [...(await this.collect(this.shared.candidates)).values()].map(parseCandidate).filter((item): item is CandidateInfo => Boolean(item));
+    const rounds = [...(await this.collect(this.shared.checks)).values()].map(parseRound).filter((item): item is RoundInfo => Boolean(item));
+    return { candidates, rounds };
+  }
+
+  /** The shared search records on an asset's current statement. */
+  async searchProgressFor(assetId: string): Promise<SearchProgress> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+    const { candidates, rounds } = await this.searchRecords();
+    return searchProgress(assetId, statementDigest(raw), candidates, rounds);
+  }
+
+  private searchLimits(mode: SearchMode, settings: LoopSettings): { width: number; rounds: number } {
+    return mode === 'refute' ? { width: settings.refuteWidth, rounds: settings.refuteRounds } : { width: settings.constructWidth, rounds: settings.constructRounds };
+  }
+
+  /** A draft construction that lists its required properties and has no construction yet: it is searched for, not falsified. */
+  private async isConstructionSearch(assetId: string): Promise<boolean> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+    return Boolean(raw) && isConstructionSpec(raw);
+  }
+
+  /** Rounds and candidates of a construction search since the researcher's last direction, which the limits count. */
+  private async constructionUsage(assetId: string): Promise<{ rounds: number; candidates: number }> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+    const { candidates, rounds } = await this.searchRecords();
+    const recent = searchProgress(assetId, statementDigest(raw), candidates, rounds, latestDirection(await this.decisions(), assetId)?.searchRound ?? 0);
+    return { rounds: new Set([...recent.rounds.map((item) => item.round), ...recent.candidates.map((item) => item.round)]).size, candidates: recent.candidates.length };
+  }
+
+  /** The next round of a search: its number and each worker slot's direction; undefined when the limits are used up. */
+  private async nextSearchRound(assetId: string, mode: SearchMode): Promise<SearchRound | undefined> {
+    const settings = await this.loopSettings();
+    const limits = this.searchLimits(mode, settings);
+    const progress = await this.searchProgressFor(assetId);
+    const round = progress.lastRound + 1;
+    const requested = mode === 'refute' ? await this.searchRequest(assetId) : undefined;
+    if (mode === 'refute' && !requested && round > limits.rounds) return undefined;
+    if (mode === 'construct') {
+      const used = await this.constructionUsage(assetId);
+      if (used.rounds >= limits.rounds || used.candidates >= settings.constructMaxCandidates) return undefined;
+    }
+    const ideas = [...(await this.collect(this.paths.ideas)).values()]
+      .filter((idea) => idea.data.idea_kind === 'test_case' && idea.data.status === 'draft' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId))
+      .map((idea) => ({ id: idea.id, title: String(idea.data.title ?? idea.id) }));
+    const slots = assignDirections({ mode, round, width: limits.width, tried: progress.directionsTried, ideas, specialFromRound: settings.specialDirectionsFromRound, nearMiss: progress.nearMisses[0]?.id });
+    if (mode === 'refute') return { mode, round, slots, ...(requested ? { requested: true } : {}) };
+    return { mode, round, slots, properties: specProperties(statementPart(parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`)).content)) };
+  }
+
+  /** The researcher's latest request for more counterexample search on an asset, while it still has rounds left. */
+  private async searchRequest(assetId: string, decisions?: DecisionInfo[]): Promise<{ remaining: number } | undefined> {
+    const request = sortDecisions(decisions ?? await this.decisions()).filter((item) => item.kind === 'search_request' && item.target === assetId).pop();
+    if (!request) return undefined;
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+    if (!raw) return undefined;
+    const { candidates, rounds } = await this.searchRecords();
+    const recent = searchProgress(assetId, statementDigest(raw), candidates, rounds, request.searchRound ?? 0);
+    const used = new Set([...recent.rounds.map((item) => item.round), ...recent.candidates.map((item) => item.round)]).size;
+    const remaining = (request.rounds ?? 1) - used;
+    return remaining > 0 ? { remaining } : undefined;
+  }
+
+  /**
+   * The researcher asks for a deeper counterexample search on an asset, even one already checked.
+   * Never automatic: the agent runs this only when the researcher asks. Returns the message for the agent.
+   */
+  async requestSearch(assetId: string, rounds?: number): Promise<string> {
+    const file = `${this.paths.assets}/${assetId}.md`;
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw) throw new Error(`Unknown asset ${assetId}.`);
+    const data = parseMarkdown(raw).data;
+    if (data.status !== 'draft' || !PROVABLE_TYPES.has(data.type)) throw new Error(`${assetId} is not a draft theorem, lemma, proposition, or construction; there is nothing to refute.`);
+    if (isConstructionSpec(raw)) throw new Error(`${assetId} is a construction search; give it a new direction instead (answer its blocked question, or ask the researcher for one).`);
+    const field = LOOP_NUMBER_FIELDS.requestedSearchRounds;
+    const count = rounds ?? (await this.loopSettings()).requestedSearchRounds;
+    if (!Number.isInteger(count) || count < field.range[0] || count > field.range[1]) throw new Error(`--rounds must be a whole number from ${field.range[0]} to ${field.range[1]}.`);
+    await this.writeDecision('search_request', assetId, `Search ${count} more round(s) for a counterexample to ${assetId}.`, { rounds: count, searchRound: (await this.searchProgressFor(assetId)).lastRound });
+    if (this.state) {
+      if (this.state.parked[assetId]) await this.clearPark(assetId, 'counterexample search requested');
+      // A plan not yet written gives way at once; a plan being executed finishes first.
+      if (this.state.current.assetId === assetId && this.state.stage === 'plan') await this.setStage('select', { assetId: undefined });
+      await this.save();
+    }
+    await this.event('search_requested', { assetId, rounds: count });
+    return `Requested ${count} more round(s) of counterexample search for ${assetId}; it starts at the next selection. Run: ${LOOP_COMMAND} next`;
+  }
+
+  /** A construction search used its limits: ask the researcher for a direction; silence parks the asset. */
+  private async exhaustConstructionSearch(assetId: string): Promise<string> {
+    const used = await this.constructionUsage(assetId);
+    const observations = [...(await this.collect(this.paths.ideas)).values()].filter((idea) => idea.data.status === 'draft' && idea.data.idea_kind === 'observation' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId)).map((idea) => idea.id);
+    await this.setStage('select', { assetId });
+    await this.askQuestion('blocked', `The construction search for ${assetId} used ${used.rounds} round(s) and ${used.candidates} candidate(s) since the last direction without an object that passes every property${observations.length ? `; see the observations ${observations.join(', ')}` : ''}. Give a new direction (or relax the specification under a new asset ID), or skip to park it.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
+    await this.event('search_finished', { assetId, mode: 'construct', ...used });
+    return `The construction search for ${assetId} is exhausted. Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.`;
+  }
+
+  /** The search board workers read: obstructions, near-misses, and directions tried on the current statement. */
+  async searchBoard(assetId: string, mode?: SearchMode, round?: number): Promise<string> {
+    const settings = await this.loopSettings();
+    const progress = await this.searchProgressFor(assetId);
+    const searchMode = mode ?? this.state?.current.search?.mode ?? ((await this.isConstructionSearch(assetId)) ? 'construct' : 'refute');
+    const properties = searchMode === 'construct' ? specProperties(statementPart(parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`)).content)) : undefined;
+    return renderBoard(progress, { mode: searchMode, target: assetId, round: round ?? progress.lastRound + 1, obstructions: settings.boardObstructions, nearMisses: settings.boardNearMisses, properties });
+  }
+
+  /** End a refute search that found nothing: the loop writes the falsification check from the search records. */
+  private async finishRefuteSearch(assetId: string): Promise<void> {
+    const progress = await this.searchProgressFor(assetId);
+    const cases = progress.candidates.map((item) => `- Round ${item.round ?? '?'}, ${item.direction ?? 'unknown direction'}: ${item.id} ${item.status === 'archived' ? 'rejected by independent verification' : 'failed'}${item.failure ? ` — ${item.failure}` : ''}`);
+    for (const round of progress.rounds) for (const direction of round.directions) {
+      if (!progress.candidates.some((item) => item.round === round.round && item.direction === direction)) cases.push(`- Round ${round.round}, ${direction}: no plausible candidate.`);
+    }
+    cases.push(...progress.obstructions.map((item) => `- Obstruction: ${item}`));
+    const limitations = `${progress.limitations || 'No limitations were recorded.'}\n\nObject search: ${progress.candidates.length} candidate(s) in ${progress.lastRound} round(s).`;
+    await this.writeCheck(assetId, 'no_counterexample_found', cases.join('\n') || '- No candidate was proposed.', limitations);
+    await this.event('search_finished', { assetId, mode: 'refute', rounds: progress.lastRound, candidates: progress.candidates.length });
+  }
+
+  /** Copy a refute survivor into a draft counterexample (an example with refutes), the form verification and the researcher confirm. */
+  private async promoteCounterexample(candidate: CandidateInfo, assetId: string): Promise<string> {
+    const parsed = parseMarkdown(await this.files.readFile(candidate.file));
+    const checks = checkSections(parsed.content);
+    const hypotheses = Object.keys(candidate.checks).filter((name) => name !== NEGATED_CONCLUSION);
+    const target = parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`)).data;
+    const base = `cx_${candidate.id.replace(/^cand_/, '')}`;
+    let id = base;
+    for (let index = 2; await this.files.exists(`${this.paths.assets}/${id}.md`); index++) id = `${base}_${index}`;
+    const body = [
+      '', '## Statement', '', candidate.object, '',
+      '## Assumptions', '', hypotheses.map((name) => `### ${name}\n\n${checks[name] || '(see the candidate)'}`).join('\n\n') || '(no hypotheses listed)', '',
+      '## Calculation', '', checks[NEGATED_CONCLUSION] || '(see the candidate)', '',
+      `Promoted from search candidate ${candidate.id}.`, '',
+    ].join('\n');
+    await this.writeOwned(`${this.paths.assets}/${id}.md`, stringifyMarkdown(body, {
+      type: 'example', title: `Counterexample to ${assetId}: ${String(parsed.data.title ?? candidate.id)}`, status: 'draft', source: { kind: 'original' },
+      refutes: assetId, depends_on: [], uses_definitions: Array.isArray(target.uses_definitions) ? target.uses_definitions : [], tags: [],
+    }));
+    await this.event('search_survivor', { assetId, candidateId: candidate.id, exampleId: id });
+    return id;
+  }
+
+  /** Write the verified construction and its per-property proof into the asset; its specification (the statement) stays as approved. */
+  private async recordConstruction(assetId: string, candidate: CandidateInfo, verdict: string): Promise<void> {
+    const file = `${this.paths.assets}/${assetId}.md`;
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    const proof = verdict.replace(/^\s*(confirmed|rejected)\b[.:]?\s*/i, '').trim() || verdict.trim();
+    const content = `${parsed.content.trimEnd()}\n\n## Construction\n\n${candidate.object.trim()}\n\n## Proof\n\n${proof}\n\nFound by search candidate ${candidate.id} (round ${candidate.round ?? '?'}) and verified independently.\n`;
+    await this.writeOwned(file, stringifyMarkdown(content, parsed.data));
+    await this.event('construction_found', { assetId, candidateId: candidate.id });
+  }
+
+  /** Independent verification rejected a survivor: it stays on the board as a near-miss. */
+  private async archiveCandidate(candidateId: string, reason: string): Promise<void> {
+    const file = `${this.shared.candidates}/${candidateId}.md`;
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    parsed.data.status = 'archived';
+    const content = sectionContent(parsed.content, 'Failure') ? parsed.content : `${parsed.content.trimEnd()}\n\n## Failure\n\nRejected by independent verification: ${reason.replace(/\s+/g, ' ').trim()}\n`;
+    await this.writeOwned(file, stringifyMarkdown(content, parsed.data));
+  }
+
+  /** After a round's candidates are recorded: verify a survivor, summarize the round, run the next one, or end the search. */
+  private async afterSearchRound(assetId: string, finish: Finish): Promise<{ stage: LoopStage; message: string }> {
+    const search = this.require().current.search!;
+    const progress = await this.searchProgressFor(assetId);
+    const survivor = progress.survivors.find((item) => item.round === search.round);
+    if (survivor && search.mode === 'refute') {
+      const exampleId = await this.promoteCounterexample(survivor, assetId);
+      return finish(`Candidate ${survivor.id} passed its own checks and was copied to ${exampleId}. Next: verify it independently.`, 'verify_counterexample', { counterexampleId: exampleId, search: { ...search, candidateId: survivor.id } });
+    }
+    if (survivor) return finish(`Candidate ${survivor.id} passed its own checks. Next: verify it independently.`, 'verify_construction', { search: { ...search, candidateId: survivor.id } });
+    if (!progress.rounds.some((item) => item.round === search.round)) {
+      return finish(`Round ${search.round} recorded. Next: summarize it.`, 'search_summary', { counterexampleId: undefined, search: { ...search, candidateId: undefined } });
+    }
+    const next = await this.nextSearchRound(assetId, search.mode);
+    if (next) return finish(`Round ${search.round} found nothing. Next: round ${next.round}.`, 'search', { counterexampleId: undefined, search: next });
+    if (search.mode === 'construct') {
+      const result = await finish(`Round ${search.round} found nothing.`, 'select', { counterexampleId: undefined });
+      return { stage: this.require().stage, message: `${result.message} ${await this.exhaustConstructionSearch(assetId)}` };
+    }
+    await this.finishRefuteSearch(assetId);
+    return finish(`No counterexample found for ${assetId} in ${search.round} round(s). Next: plan.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
   }
 
   private async failuresSinceDirection(assetId: string): Promise<number> {
@@ -1064,14 +1377,34 @@ export class ResearchLoopCore {
       return { stage: 'draft_project', note: state.researcherInput.text };
     }
     const { order, missing, cycle } = assetClosure(required, assets);
-    if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.` };
+    if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.`, waitingOn: [{ kind: 'cycle', target: cycle }] };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
     const incomplete = order.filter((id) => !assets.get(id)!.origin && assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
     if (incomplete.length) return { stage: 'scaffold', missing: [], incomplete };
+    const rigor = (await this.loopSettings()).rigor;
+    // A definition used but missing: the agent drafts it in scaffold (it never accepts it); with "wait", the results using it hold until the researcher agrees.
+    const undrafted = definitionClosure(order, assets, definitions).filter((id) => !definitions.has(id));
+    if (undrafted.length) {
+      if (rigor.missingDefinitions === 'wait') state.awaitingDefinitions = [...new Set([...(state.awaitingDefinitions ?? []), ...undrafted])];
+      return { stage: 'scaffold', missing: [], incomplete: [], missingDefinitions: undrafted };
+    }
+    const definitionAgreed = (id: string) => { const definition = definitions.get(id); return Boolean(definition && definition.data.status === 'approved' && isApproved(approvals, 'definition', id, definition.raw)); };
+    if (rigor.agreeDefinitions === 'main') {
+      // The definitions main results' statements use decide what the goals mean: agree on them before any proof work.
+      const toAgree = definitionClosure(required.filter((id) => assets.has(id)), assets, definitions).filter((id) => definitions.has(id) && !definitionAgreed(id));
+      for (const id of toAgree) await this.enqueueApproval('definition', id, 'A main result’s statement uses it: agree on it before the proofs start.');
+      if (toAgree.length) return { stage: 'waiting', reason: `Definitions to agree on before proving: ${toAgree.join(', ')}`, waitingOn: toAgree.map((id): WaitingReason => ({ kind: 'approval', target: id, detail: 'definition' })) };
+    }
+    state.awaitingDefinitions = (state.awaitingDefinitions ?? []).filter((id) => !definitions.has(id) || (!definitionAgreed(id) && !['deprecated', 'archived'].includes(definitions.get(id)!.data.status)));
+    if (!state.awaitingDefinitions.length) delete state.awaitingDefinitions;
+    const awaiting = (state.awaitingDefinitions ?? []).filter((id) => definitions.has(id));
+    for (const id of awaiting) await this.enqueueApproval('definition', id, 'Drafted to fill a missing definition: agree on it before the results that use it go on.');
+    const waitsOnDefinition = (assetId: string) => awaiting.length > 0 && definitionClosure([assetId], assets, definitions).some((id) => awaiting.includes(id));
     const examples = [...assets.values()].filter((asset) => asset.data.type === 'example' && typeof asset.data.refutes === 'string');
     const checks = await this.checks();
+    const decisions = await this.decisions();
     const settled = new Set<string>();
-    let candidate: { stage: 'falsify' | 'plan'; assetId: string } | undefined;
+    let candidate: { stage: 'plan'; assetId: string } | { stage: 'search'; assetId: string; mode: SearchMode } | undefined;
     for (const id of order) {
       const asset = assets.get(id)!;
       const verified = asset.data.status === 'approved' && isApproved(approvals, 'asset', id, asset.raw);
@@ -1116,7 +1449,19 @@ export class ResearchLoopCore {
       }
       const deps = Array.isArray(asset.data.depends_on) ? asset.data.depends_on as string[] : [];
       if (!deps.every((dep) => settled.has(dep))) continue;
-      if (!candidate) candidate = { stage: this.isFalsified(id, asset.raw, checks) ? 'plan' : 'falsify', assetId: id };
+      if (waitsOnDefinition(id)) continue;
+      if (isConstructionSpec(asset.raw)) {
+        // What to search for is the researcher's call: no search tokens before the specification is approved.
+        if (!isApproved(approvals, 'specification', id, asset.raw)) await this.enqueueApproval('specification', id, 'Approve the required properties (P1, P2, …) before the construction search starts.');
+        else if (!candidate) candidate = { stage: 'search', assetId: id, mode: 'construct' };
+        continue;
+      }
+      if (!candidate) {
+        // The researcher's setting may skip the counterexample search (for every result, or for all but the main ones); a requested search always runs.
+        const skipSearch = rigor.refuteSearch === 'off' || (rigor.refuteSearch === 'main' && !required.includes(id));
+        const requested = await this.searchRequest(id, decisions);
+        candidate = (this.isFalsified(id, asset.raw, checks) || skipSearch) && !requested ? { stage: 'plan', assetId: id } : { stage: 'search', assetId: id, mode: 'refute' };
+      }
     }
     if (candidate) return candidate;
     const definitionIds = definitionClosure(order, assets, definitions);
@@ -1135,16 +1480,25 @@ export class ResearchLoopCore {
       Object.keys(state.parked).length ? `parked: ${Object.entries(state.parked).map(([id, info]) => `${id} (${info.reason})`).join(', ')}` : '',
       unapproved.filter((id) => !definitions.has(id)).length ? `missing definitions: ${unapproved.filter((id) => !definitions.has(id)).join(', ')}` : '',
     ].filter(Boolean);
-    return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable' };
+    const missingDefinitions = unapproved.filter((id) => !definitions.has(id));
+    const waitingOn: WaitingReason[] = [
+      ...state.approvalQueue.map((item): WaitingReason => ({ kind: 'approval', target: item.target, detail: item.kind })),
+      ...Object.entries(state.parked).map(([id, info]): WaitingReason => ({ kind: 'parked', target: id, detail: info.reason })),
+      ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
+    ];
+    return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
   }
 
   /** Compute or confirm the current stage and return the instruction for the agent. */
   async next(): Promise<NextResult> {
     const state = this.require();
     if (state.status !== 'running') return this.result(`The loop is ${state.status}. Run: ${LOOP_COMMAND} resume`);
+    await this.resolveOverdueQuestion();
     if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
-    const perAsset = ['falsify', 'verify_counterexample', 'plan', 'execute'].includes(state.stage);
-    let recompute = ['select', 'waiting', 'ready', 'review_project', 'discuss_goals'].includes(state.stage);
+    await this.refreshRetired();
+    const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute'].includes(state.stage);
+    // `falsify` is the stage name older loop versions saved; selection now runs an object search instead.
+    let recompute = ['select', 'waiting', 'ready', 'review_project', 'discuss_goals', 'falsify'].includes(state.stage);
     if (!recompute && !(await this.isProjectApproved()) && state.stage !== 'draft_project') recompute = true;
     if (perAsset && state.current.assetId) {
       const file = `${this.paths.assets}/${state.current.assetId}.md`;
@@ -1155,9 +1509,22 @@ export class ResearchLoopCore {
       const selection = await this.computeSelection();
       const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined };
       if (selection.stage === 'plan' && 'assetId' in selection) patch.planId = await this.pendingPlan(selection.assetId);
+      if (selection.stage === 'search') {
+        const search = await this.nextSearchRound(selection.assetId, selection.mode);
+        if (!search) {
+          if (selection.mode === 'construct') {
+            const message = await this.exhaustConstructionSearch(selection.assetId);
+            return this.result(message);
+          }
+          // The records already hold every allowed round (the limit was lowered, or an earlier run stopped before the check).
+          await this.finishRefuteSearch(selection.assetId);
+          return this.next();
+        }
+        patch.search = search;
+      }
       await this.setStage(selection.stage, patch);
-      if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete };
-      if (selection.stage === 'waiting') state.lastError = selection.reason;
+      if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete, ...(selection.missingDefinitions?.length ? { missingDefinitions: selection.missingDefinitions } : {}) };
+      if (selection.stage === 'waiting') { state.lastError = selection.reason; state.waitingOn = selection.waitingOn; }
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
     }
     const result = this.result();
@@ -1167,8 +1534,12 @@ export class ResearchLoopCore {
     }
     if (!hasContextPack(state.stage)) return result;
     const pack = await this.contextPack();
-    result.brief.context = { file: CONTEXT_PACK_PATH, tokens: pack.tokens, items: pack.included.map((item) => `${item.id}${Array.isArray(item.view) ? `#${item.view.join(',')}` : item.view === 'all' ? '' : `#${item.view}`}`), omitted: pack.omitted.map((item) => item.id) };
+    result.brief.context = { file: CONTEXT_PACK_PATH, tokens: pack.tokens, items: pack.included.map((item) => `${item.id}${Array.isArray(item.view) ? `#${item.view.join(',')}` : item.view === 'all' ? '' : `#${item.view}`}`), omitted: pack.omitted.map((item) => item.id), ...(pack.packs ? { packs: pack.packs } : {}) };
     if (pack.manifest.worker) result.brief.worker = pack.manifest.worker;
+    if (pack.packs) {
+      result.instruction += `\nWorker packs (research-worker-${pack.manifest.worker ?? 'deep'}, one per slot; give each worker only its own pack and do not read them yourself): ${pack.packs.map((item) => `slot ${item.slot}: ${item.file} (~${item.tokens} tokens)`).join('; ')}.`;
+      return result;
+    }
     result.instruction += `\nContext pack (~${pack.tokens} tokens): ${CONTEXT_PACK_PATH}. Read it instead of the research folders; for anything else run ${LOOP_COMMAND} show <id> [--section Heading] and say why.${pack.manifest.worker ? ` Subagent: research-worker-${pack.manifest.worker}.` : ''}`;
     return result;
   }
@@ -1193,7 +1564,7 @@ export class ResearchLoopCore {
       project: await this.files.readFile(this.paths.projectMd).catch(() => ''), projectFile: this.paths.projectMd,
       paperIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''), paperIndexFile: this.paths.paperIndex,
       assets: await this.collectKind('asset'), definitions: await this.collectKind('definition'),
-      plans: await this.collect(this.paths.plans), ideas: await this.collect(this.paths.ideas), checks: await this.collect(this.shared.checks),
+      plans: await this.collect(this.paths.plans), ideas: await this.collect(this.paths.ideas), checks: await this.collect(this.shared.checks), candidates: await this.collect(this.shared.candidates),
       reports: events.filter((event) => event.type === 'report').map((event) => event as ContextSources['reports'][number]),
     };
   }
@@ -1202,25 +1573,65 @@ export class ResearchLoopCore {
    * Compile the current stage's context pack, write it (and its manifest) to
    * the loop folder, and return it. Deterministic: same files, same pack.
    */
-  async contextPack(budget?: number): Promise<RenderedContext & { manifest: ContextManifest }> {
+  async contextPack(budget?: number): Promise<RenderedContext & { manifest: ContextManifest; packs?: Array<{ slot: number; direction: string; file: string; tokens: number }> }> {
     const state = this.require();
     const sources = await this.contextSources();
     const assetId = state.current.assetId;
-    const manifest = planContext({
-      stage: state.stage, assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId,
+    const limit = budget ?? (await this.contextBudget(state.stage));
+    const focus = {
+      // verify_construction checks a search candidate, named like the candidate a counterexample check reads.
+      stage: state.stage, assetId, planId: state.current.planId, counterexampleId: state.stage === 'verify_construction' ? state.current.search?.candidateId : state.current.counterexampleId,
       missing: state.scaffoldBrief?.missing, incomplete: state.scaffoldBrief?.incomplete, researcherInput: state.researcherInput?.text,
       changesRequested: assetId ? state.progress[assetId]?.changesRequested : undefined,
       direction: assetId ? latestDirection(await this.decisions(), assetId)?.text : undefined,
-    }, sources, budget ?? (await this.contextBudget(state.stage)));
+    };
+    const search = assetId && (state.stage === 'search' || state.stage === 'search_summary') ? state.current.search : undefined;
+    const writeManifest = (rendered: RenderedContext, manifest: ContextManifest, extra: Record<string, unknown> = {}) => this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id), ...extra }, null, 2) + '\n');
+    if (search && assetId) {
+      const board = await this.searchBoard(assetId, search.mode, search.round);
+      if (state.stage === 'search_summary') {
+        const progress = await this.searchProgressFor(assetId);
+        const manifest = planContext({ ...focus, search: { mode: search.mode, round: search.round, board, roundDigest: roundDigest(progress.candidates.filter((item) => item.round === search.round)) } }, sources, limit);
+        const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
+        await this.files.writeFile(CONTEXT_PACK_PATH, rendered.text);
+        await writeManifest(rendered, manifest);
+        return { ...rendered, manifest };
+      }
+      // One pack per worker slot; the stage pack only lists them, so the driver never reads the workers' material.
+      const packs: Array<{ slot: number; direction: string; file: string; tokens: number }> = [];
+      const files = new Set<string>();
+      let first: (RenderedContext & { manifest: ContextManifest }) | undefined;
+      for (const slot of search.slots) {
+        const manifest = planContext({ ...focus, search: { mode: search.mode, round: search.round, slot, board, requested: search.requested } }, sources, limit);
+        const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
+        const file = searchPackPath(slot.slot);
+        await this.files.writeFile(file, rendered.text);
+        packs.push({ slot: slot.slot, direction: slot.direction, file, tokens: rendered.tokens });
+        for (const item of rendered.files) files.add(item);
+        first ??= { ...rendered, manifest };
+      }
+      if (this.files.deleteFile) for (const file of await this.files.listFiles(`${STATE_DIR}/context`, '.md')) {
+        const slot = /search-(\d+)\.md$/.exec(file);
+        if (slot && Number(slot[1]) > search.slots.length) await this.files.deleteFile(file);
+      }
+      const index = [`# Search round ${search.round} (${search.mode}) for ${assetId}`, '', 'One pack per worker slot; each worker reads only its own.', '', ...packs.map((item) => `- slot ${item.slot} (${item.direction}): ${item.file} (~${item.tokens} tokens)`), ''].join('\n');
+      await this.files.writeFile(CONTEXT_PACK_PATH, index);
+      const rendered = { ...first!, text: index, files: [...files], tokens: packs.reduce((sum, item) => sum + item.tokens, 0) };
+      await writeManifest(rendered, first!.manifest, { packs });
+      return { ...rendered, packs };
+    }
+    const manifest = planContext(focus, sources, limit);
     const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
     await this.files.writeFile(CONTEXT_PACK_PATH, rendered.text);
-    await this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id) }, null, 2) + '\n');
+    await writeManifest(rendered, manifest);
     return { ...rendered, manifest };
   }
 
   private async contextBudget(stage: LoopStage): Promise<number> {
-    const budgets: Partial<Record<string, number>> = { ...DEFAULT_CONTEXT_BUDGETS, ...(this.contextBudgets ?? normalizeContextBudgets((await this.projectConfig()).contextBudgets)) };
-    return budgets[stage] ?? 8000;
+    const configured: Partial<Record<string, number>> = this.contextBudgets ?? normalizeContextBudgets((await this.projectConfig()).contextBudgets) ?? {};
+    // A budget set for the old falsify stage still applies to the search that replaced it.
+    if (stage === 'search' && configured.search === undefined && configured.falsify !== undefined) return configured.falsify;
+    return { ...DEFAULT_CONTEXT_BUDGETS, ...configured }[stage] ?? 8000;
   }
 
   /** One node (or paper transcription) on request, optionally only some sections; recorded so packs can be tuned. */
@@ -1232,7 +1643,7 @@ export class ResearchLoopCore {
     }
     const files: Array<[string, string | undefined]> = [
       ['asset', await findNodeFile(this.files, this.paths, 'asset', id)], ['definition', await findNodeFile(this.files, this.paths, 'definition', id)],
-      ['plan', `${this.paths.plans}/${id}.md`], ['idea', `${this.paths.ideas}/${id}.md`], ['check', `${this.shared.checks}/${id}.md`],
+      ['plan', `${this.paths.plans}/${id}.md`], ['idea', `${this.paths.ideas}/${id}.md`], ['check', `${this.shared.checks}/${id}.md`], ['candidate', `${this.shared.candidates}/${id}.md`],
     ];
     for (const [kind, file] of files) {
       if (!file) continue;
@@ -1286,12 +1697,20 @@ export class ResearchLoopCore {
   private result(blocked?: string): NextResult {
     const state = this.require();
     const brief: Record<string, unknown> = {
-      stage: state.stage, assetId: state.current.assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId,
+      stage: state.stage, assetId: state.current.assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId, search: state.current.search,
       researcherInput: state.researcherInput?.text, changesRequested: state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined,
       parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: state.scaffoldBrief, extension: state.extension,
-      paths: { project: this.paths.projectMd, assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, checks: this.shared.checks, papers: this.paths.paperIndex, bibliography: this.paths.bibliography },
+      paths: { project: this.paths.projectMd, assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, checks: this.shared.checks, candidates: this.shared.candidates, papers: this.paths.paperIndex, bibliography: this.paths.bibliography },
     };
     return { stage: state.stage, instruction: blocked ?? this.instruction(state), brief, blocked };
+  }
+
+  private extensionInstruction(extension: LoopExtension): string {
+    const retired = extension.retired ?? [];
+    const kept = extension.baselineRequired.filter((id) => !retired.includes(id));
+    const keep = kept.length ? `keep every existing required_results entry (${kept.join(', ')}) and leave approved statements unchanged` : 'leave approved statements unchanged';
+    const replace = retired.length ? ` The required result(s) ${retired.join(', ')} were deprecated or archived: drop them from required_results, and give any revised statement a new asset ID.` : '';
+    return ` This extends an approved project: ${keep}; add the new goal as new asset ID(s) and update ## Intended Contribution.${replace}`;
   }
 
   instruction(state: LoopState): string {
@@ -1302,17 +1721,34 @@ export class ResearchLoopCore {
       case 'discuss_goals':
         return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: ${LOOP_COMMAND} question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
-        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? ` This extends an approved project: keep every existing required_results entry (${state.extension.baselineRequired.join(', ')}) and leave approved statements unchanged; add the new goal as new asset ID(s) and update ## Intended Contribution.` : ''}${input}${report('complete|question')}`;
+        return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}${input}${report('complete|question')}`;
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
       case 'scaffold': {
         const brief = state.scaffoldBrief;
-        return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. Create draft definitions in ${this.paths.definitions}/ as needed. Before creating a dependency or definition, search the library of known results (${LOOP_COMMAND} library search <words>) and reference a matching lib_ ID in depends_on/uses_definitions instead of re-creating it. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
+        if (brief?.missingDefinitions?.length && !brief.missing?.length && !brief.incomplete?.length) {
+          return `Stage scaffold. These definitions are used but have no file: ${brief.missingDefinitions.join(', ')}. Draft each in ${this.paths.definitions}/<id>.md with type: definition, a title "Definition (concept)", status: draft, source (original, or paper/textbook with paper_id and location when the meaning is taken from a source), depends_on for the definitions it uses, and the defining statement with its notation. Read the results that use it so the definition says what they need; search the library first (${LOOP_COMMAND} library search <words>) and, if a lib_ definition means the same, point the users at it instead of drafting. Do not modify existing assets or definitions; never approve a definition. Run research-maintenance validate and links.${input}${report('complete|question')}`;
+        }
+        return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. A construction the loop should search for lists its required properties in the statement, one per line as \`- P1: ...\`, \`- P2: ...\` (the researcher approves them before the search); a construction of a given object states the object. Create draft definitions in ${this.paths.definitions}/ as needed. Before creating a dependency or definition, search the library of known results (${LOOP_COMMAND} library search <words>) and reference a matching lib_ ID in depends_on/uses_definitions instead of re-creating it. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
       }
       case 'sources':
         return `Stage sources. Find results from indexed papers (or a verifiable new paper) that the required results can use; import-math-paper and extract-research-nodes cover transcription and extraction. For a new paper append a ## slug section with a stable DOI/arXiv/publisher URL to ${this.paths.paperIndex} and a matching BibTeX entry to ${this.paths.bibliography}; never change existing entries. Create only draft, paper-sourced assets (paper_id and exact location) and draft definitions. If a source cannot be verified, do not cite it: ask the researcher or record an idea. Return none when nothing verifiable exists.${report('complete|none|question')}`;
-      case 'falsify':
-        return `Stage falsify for asset ${asset}. Use the falsify-asset skill: try to refute the exact statement. A candidate must be a new draft example in ${this.paths.assets}/ with refutes: ${asset}, ## Assumptions, ## Calculation; return candidate --counterexample <id>. With no counterexample, write one falsification check ${this.shared.checks}/check_${asset}_<short_slug>.md (type falsification_check, title, target_asset: ${asset}, outcome: no_counterexample_found, ## Cases checked listing each family tried, ## Limitations naming what was not covered) and return none. A failed proof attempt is not a counterexample.${input}${report('candidate|none|question')}`;
+      case 'search': {
+        const search = state.current.search;
+        if (!search) return `Run: ${LOOP_COMMAND} next`;
+        const perWorker = (this.lastSettings ?? DEFAULT_LOOP_SETTINGS).candidatesPerWorker;
+        const single = search.slots.length === 1;
+        const checks = search.mode === 'refute' ? `H1, H2, … (one per hypothesis) and ${NEGATED_CONCLUSION} (the conclusion fails)` : `${(search.properties ?? []).join(', ')} (every property of the specification)`;
+        return `Stage search (${search.mode}) for asset ${asset}, round ${search.round}. Use the search-object skill. ${single ? 'Run one subagent' : `Run ${search.slots.length} subagents in parallel, all in one message`}, one per slot, each given only its own pack: ${search.slots.map((slot) => `slot ${slot.slot} (${slot.direction})`).join(', ')}. Each worker writes at most ${perWorker} new candidate file(s) ${this.shared.candidates}/cand_${asset}_r${search.round}_s<slot>_<slug>.md (type candidate, title, status failed|survived, target_asset ${asset}, checks {${checks}: pass|fail|unknown}, ## Object, ## Checks with one ### per check, ## Failure naming the first failing check) and stops checking a candidate at its first failing check.${single ? ` The worker also writes the round record ${this.shared.checks}/search_${asset}_r${search.round}_<slug>.md (type search_round, title, target_asset ${asset}, ## Obstructions, ## Limitations).` : ''} Finding no plausible candidate is a valid result: write none. Never write assets or change existing files. A failed proof idea is not a candidate.${input}${report('searched')}`;
+      }
+      case 'verify_construction': {
+        const candidateId = state.current.search?.candidateId ?? '(none)';
+        return `Stage verify_construction for ${candidateId} (a construction for ${asset}). Use the search-object skill (Verify a construction). Independently check that the object in ## Object has every property ${(state.current.search?.properties ?? []).join(', ')}, from the specification, not from the candidate's own checks. Add ## Verdict to ${this.shared.candidates}/${candidateId}.md: first line confirmed or rejected, then one ### <property> per property with the complete argument (it becomes the proof). Change nothing else; never edit ${asset}.${report('confirmed|rejected|question')}`;
+      }
+      case 'search_summary': {
+        const round = state.current.search?.round ?? 1;
+        return `Stage search_summary for asset ${asset}, round ${round}. Use the search-object skill (Summarize). Write one round record ${this.shared.checks}/search_${asset}_r${round}_<slug>.md (type search_round, title, target_asset ${asset}, ## Obstructions with one line per reason a family of candidates fails, ## Limitations naming what no worker covered). Record an obstruction that reads like a proof step with record_idea (kind approach). Change nothing else.${report('summarized')}`;
+      }
       case 'verify_counterexample':
         return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
@@ -1352,7 +1788,7 @@ export class ResearchLoopCore {
     const map: Record<string, string> = {};
     const add = async (file: string) => { const raw = await this.files.readFile(file).catch(() => undefined); if (raw !== undefined) map[file] = crypto.createHash('sha256').update(raw).digest('hex'); };
     const shared = this.shared;
-    for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, shared.checks, shared.decisions, shared.handoffs, ...await libraryFolders(this.files, this.paths)]) for (const file of await this.files.listFiles(folder)) await add(file);
+    for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, shared.checks, shared.candidates, shared.decisions, shared.handoffs, ...await libraryFolders(this.files, this.paths)]) for (const file of await this.files.listFiles(folder)) await add(file);
     for (const file of [this.paths.projectMd, this.paths.paperIndex, this.paths.bibliography, ...await approvalFiles(this.files, this.paths.researchRoot)]) await add(file);
     return map;
   }
@@ -1366,7 +1802,7 @@ export class ResearchLoopCore {
     return { added, modified, before };
   }
 
-  private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, library: this.paths.library, checks: this.shared.checks, decisions: this.shared.decisions, handoffs: this.shared.handoffs }; }
+  private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, library: this.paths.library, checks: this.shared.checks, candidates: this.shared.candidates, decisions: this.shared.decisions, handoffs: this.shared.handoffs }; }
 
   private async paperIds(): Promise<Set<string>> {
     const index = await this.files.readFile(this.paths.paperIndex).catch(() => '');
@@ -1383,8 +1819,11 @@ export class ResearchLoopCore {
     const isIn = (file: string, folder: string) => path.posix.dirname(file) === folder;
     const allowedFolders = new Set<string>([folders.ideas]);
     if (stage === 'scaffold' || stage === 'sources') { allowedFolders.add(folders.assets); allowedFolders.add(folders.definitions); }
-    if (stage === 'falsify' || stage === 'verify_counterexample') allowedFolders.add(folders.assets);
-    if (stage === 'falsify') allowedFolders.add(folders.checks);
+    const search = state.current.search;
+    if (stage === 'verify_counterexample') allowedFolders.add(folders.assets);
+    if (stage === 'search') { allowedFolders.add(folders.candidates); if (search?.slots.length === 1) allowedFolders.add(folders.checks); }
+    if (stage === 'search_summary') allowedFolders.add(folders.checks);
+    if (stage === 'verify_construction') allowedFolders.add(folders.candidates);
     if (stage === 'plan' || stage === 'execute') allowedFolders.add(folders.plans);
     if (stage === 'execute') allowedFolders.add(folders.assets);
     const allowedFiles = new Set<string>();
@@ -1408,13 +1847,31 @@ export class ResearchLoopCore {
       const raw = await this.files.readFile(file);
       try { validateResearchFile(file, raw, folders, paperIds); } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); continue; }
       const data = parseMarkdown(raw).data;
-      if (modified.includes(file) && ['scaffold', 'sources', 'falsify', 'plan'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
+      if (modified.includes(file) && ['scaffold', 'sources', 'search', 'search_summary', 'plan'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
       if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.counterexampleId}.md`) problems.push(`${file}: verification may change only the candidate example.`);
       if (stage === 'execute' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md`) problems.push(`${file}: execution may change only its target asset.`);
       if (stage === 'execute' && isIn(file, folders.plans) && file !== `${folders.plans}/${state.current.planId}.md`) problems.push(`${file}: execution may change only its active plan.`);
       if ((stage === 'plan' || stage === 'execute') && isIn(file, folders.plans) && data.target_asset !== state.current.assetId) problems.push(`${file}: plan targets ${data.target_asset}, not ${state.current.assetId}.`);
-      if ((stage === 'falsify' || stage === 'verify_counterexample') && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md` && (data.type !== 'example' || data.refutes !== state.current.assetId)) problems.push(`${file}: only a counterexample example refuting ${state.current.assetId} may be written now.`);
-      if (isIn(file, folders.checks) && (stage !== 'falsify' || data.target_asset !== state.current.assetId || data.outcome !== 'no_counterexample_found')) problems.push(`${file}: a falsification check may only record no_counterexample_found for ${state.current.assetId} during falsify.`);
+      if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md` && (data.type !== 'example' || data.refutes !== state.current.assetId)) problems.push(`${file}: only a counterexample example refuting ${state.current.assetId} may be written now.`);
+      const id = path.posix.basename(file, '.md');
+      if (isIn(file, folders.checks) && !(search && data.type === 'search_round' && data.target_asset === state.current.assetId && id.startsWith(`search_${state.current.assetId}_r${search.round}_`))) {
+        problems.push(`${file}: only the round record search_${state.current.assetId ?? '<asset>'}_r${search?.round ?? '<round>'}_<slug> (type search_round, target_asset ${state.current.assetId ?? '<asset>'}) may be written, during an object search; the loop writes falsification checks.`);
+      }
+      if (isIn(file, folders.candidates)) {
+        const slot = search ? new RegExp(`^cand_${state.current.assetId}_r${search.round}_s(\\d+)_[a-z0-9_]+$`).exec(id) : null;
+        if (stage !== 'search') { /* verification edits an existing candidate; checked below */ }
+        else if (!search || !slot) problems.push(`${file}: a candidate must be named cand_${state.current.assetId ?? '<asset>'}_r${search?.round ?? '<round>'}_s<slot>_<slug>.`);
+        else if (!search.slots.some((item) => item.slot === Number(slot[1]))) problems.push(`${file}: slot ${slot[1]} was not assigned this round (slots ${search.slots.map((item) => item.slot).join(', ')}).`);
+        if (data.target_asset !== state.current.assetId) problems.push(`${file}: candidate targets ${String(data.target_asset)}, not ${state.current.assetId}.`);
+        if (stage === 'search' && search?.mode === 'refute' && candidateChecks(data)[NEGATED_CONCLUSION] === undefined) problems.push(`${file}: a refute candidate needs the check ${NEGATED_CONCLUSION} (the conclusion fails), after one check per hypothesis.`);
+        if (stage === 'search' && search?.mode === 'construct') {
+          const names = Object.keys(candidateChecks(data));
+          const missing = (search.properties ?? []).filter((name) => !names.includes(name));
+          const extra = names.filter((name) => !(search.properties ?? []).includes(name));
+          if (missing.length || extra.length) problems.push(`${file}: checks must be exactly the specification's properties ${(search.properties ?? []).join(', ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}${extra.length ? `; unknown ${extra.join(', ')}` : ''}.`);
+        }
+        if (stage === 'verify_construction' && (id !== search?.candidateId || data.status !== 'survived')) problems.push(`${file}: verification may only add ## Verdict to the candidate ${search?.candidateId}, leaving its status survived.`);
+      }
       if (isIn(file, folders.plans) && data.type === 'plan') {
         const failed = (await this.failedPlans(String(data.target_asset))).filter((id) => id !== path.posix.basename(file, '.md'));
         if (failed.length && data.status === 'pending') {
@@ -1446,6 +1903,17 @@ export class ResearchLoopCore {
         if (added.some((file) => isIn(file, folders.assets)) && !/https?:\/\//.test(section) && !new RegExp(`^@\\w+\\{${paperId},`, 'm').test(bib)) problems.push(`${paperId}: paper needs a stable source URL and a BibTeX entry.`);
       }
     }
+    if (stage === 'search' && search) {
+      const perWorker = (await this.loopSettings()).candidatesPerWorker;
+      const counts = new Map<string, number>();
+      for (const file of added.filter((item) => isIn(item, folders.candidates))) {
+        const slot = /_s(\d+)_/.exec(path.posix.basename(file, '.md').slice(`cand_${state.current.assetId}_r${search.round}`.length))?.[1] ?? '?';
+        counts.set(slot, (counts.get(slot) ?? 0) + 1);
+      }
+      for (const [slot, count] of counts) if (count > perWorker) problems.push(`slot ${slot} wrote ${count} candidates; at most ${perWorker} per worker. Keep the best and record the others as test_case ideas.`);
+    }
+    const records = added.filter((item) => isIn(item, folders.checks)).length;
+    if (((stage === 'search' && search?.slots.length === 1) || stage === 'search_summary') && records !== 1) problems.push(`Write exactly one round record ${folders.checks}/search_${state.current.assetId}_r${search?.round}_<slug>.md (type search_round, ## Obstructions, ## Limitations); found ${records}.`);
     if (stage === 'execute' && state.current.assetId) {
       const file = `${folders.assets}/${state.current.assetId}.md`;
       const raw = await this.files.readFile(file).catch(() => '');
@@ -1495,6 +1963,7 @@ export class ResearchLoopCore {
   async report(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
     const state = this.require();
     if (state.status !== 'running') throw new Error(`The loop is ${state.status}; resume it first.`);
+    await this.resolveOverdueQuestion();
     if (state.pendingQuestion) throw new Error(`Question ${state.pendingQuestion.id} is still pending; answer it (or wait) before reporting.`);
     const stale = report.outcome === 'question' ? undefined : await this.staleBaseProblem();
     if (stale) throw new Error(stale);
@@ -1527,7 +1996,7 @@ export class ResearchLoopCore {
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
-        const extensionProblems = this.extensionProblems(project);
+        const extensionProblems = await this.extensionProblems(project);
         if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
         state.researcherInput = undefined;
@@ -1544,22 +2013,56 @@ export class ResearchLoopCore {
         await validated();
         return finish('Sources recorded. Next: select.', 'select');
       }
-      case 'falsify': {
+      case 'search': {
+        if (report.outcome !== 'searched') throw new Error('search outcome must be searched or question.');
         const { added } = await validated();
         const assetId = state.current.assetId!;
-        if (report.outcome === 'candidate') {
-          const candidate = report.counterexampleId ?? added.map((file) => path.posix.basename(file, '.md')).find((id) => added.includes(`${this.paths.assets}/${id}.md`));
-          if (!candidate) throw new Error('candidate needs --counterexample <example id>.');
-          const raw = await this.files.readFile(`${this.paths.assets}/${candidate}.md`);
-          if (parseMarkdown(raw).data.refutes !== assetId) throw new Error(`${candidate} must set refutes: ${assetId}.`);
-          return finish(`Candidate ${candidate} recorded. Next: verify it independently.`, 'verify_counterexample', { counterexampleId: candidate });
+        const search = state.current.search!;
+        const digest = statementDigest(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
+        const provenance = await this.provenance();
+        const candidates: string[] = [];
+        for (const file of added.filter((item) => path.posix.dirname(item) === this.shared.candidates)) {
+          const id = path.posix.basename(file, '.md');
+          const slot = Number(/_s(\d+)_/.exec(id.slice(`cand_${assetId}_r${search.round}`.length))![1]);
+          await this.writeOwned(file, stampSearchRecord(await this.files.readFile(file), { mode: search.mode, round: search.round, slot, direction: search.slots.find((item) => item.slot === slot)?.direction }, digest, provenance));
+          candidates.push(id);
         }
-        if (report.outcome !== 'none') throw new Error('falsify outcome must be candidate, none, or question.');
-        const checkFiles = added.filter((file) => path.posix.dirname(file) === this.shared.checks);
-        if (checkFiles.length !== 1) throw new Error(`none needs exactly one new falsification check in ${this.shared.checks}/ for ${assetId} (## Cases checked, ## Limitations); found ${checkFiles.length}.`);
-        const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
-        await this.files.writeFile(checkFiles[0], stampCheck(await this.files.readFile(checkFiles[0]), statementDigest(assetRaw), await this.provenance()));
-        return finish(`No counterexample found for ${assetId}. Next: plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
+        for (const file of added.filter((item) => path.posix.dirname(item) === this.shared.checks)) {
+          await this.writeOwned(file, stampSearchRecord(await this.files.readFile(file), { mode: search.mode, round: search.round, directions: search.slots.map((item) => item.direction), candidates }, digest, provenance));
+        }
+        await this.event('search_round', { assetId, mode: search.mode, round: search.round, candidates });
+        return this.afterSearchRound(assetId, finish);
+      }
+      case 'verify_construction': {
+        await validated();
+        const assetId = state.current.assetId!;
+        const search = state.current.search!;
+        const candidate = (await this.searchProgressFor(assetId)).candidates.find((item) => item.id === search.candidateId);
+        if (!candidate) throw new Error(`Candidate ${search.candidateId} is missing.`);
+        const verdict = sectionContent(parseMarkdown(await this.files.readFile(candidate.file)).content, 'Verdict');
+        if (!verdict) throw new Error(`${candidate.id} needs a ## Verdict.`);
+        if (report.outcome === 'confirmed') {
+          const missing = (search.properties ?? []).filter((name) => !new RegExp(`^### ${name}\\b`, 'm').test(verdict));
+          if (missing.length) throw new Error(`## Verdict of ${candidate.id} needs a ### section with the argument for ${missing.join(', ')}.`);
+          await this.recordConstruction(assetId, candidate, verdict);
+          return finish(`Construction for ${assetId} verified and written into it; the researcher approves it as a proof. Continue with next.`, 'select', { assetId: undefined });
+        }
+        if (report.outcome !== 'rejected') throw new Error('verify_construction outcome must be confirmed, rejected, or question.');
+        await this.archiveCandidate(candidate.id, verdict);
+        return this.afterSearchRound(assetId, finish);
+      }
+      case 'search_summary': {
+        if (report.outcome !== 'summarized') throw new Error('search_summary outcome must be summarized or question.');
+        const { added } = await validated();
+        const assetId = state.current.assetId!;
+        const search = state.current.search!;
+        const digest = statementDigest(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
+        const candidates = (await this.searchProgressFor(assetId)).candidates.filter((item) => item.round === search.round).map((item) => item.id);
+        const provenance = await this.provenance();
+        for (const file of added.filter((item) => path.posix.dirname(item) === this.shared.checks)) {
+          await this.writeOwned(file, stampSearchRecord(await this.files.readFile(file), { mode: search.mode, round: search.round, directions: search.slots.map((item) => item.direction), candidates }, digest, provenance));
+        }
+        return this.afterSearchRound(assetId, finish);
       }
       case 'verify_counterexample': {
         await validated();
@@ -1575,6 +2078,12 @@ export class ResearchLoopCore {
         }
         if (report.outcome !== 'rejected') throw new Error('verify_counterexample outcome must be confirmed, rejected, or question.');
         if (example.data.status !== 'archived') throw new Error(`Set ${exampleId} status to archived when rejecting it.`);
+        const candidateId = state.current.search?.candidateId;
+        if (candidateId) {
+          // The survivor stays on the board as a near-miss, and the search goes on.
+          await this.archiveCandidate(candidateId, sectionContent(example.content, 'Verdict') || report.summary);
+          return this.afterSearchRound(assetId, finish);
+        }
         await this.writeCheck(assetId, 'counterexample_rejected', `Candidate ${exampleId} was checked independently and rejected:\n\n${sectionContent(example.content, 'Verdict') || report.summary}`, 'Only this candidate family was examined; no systematic search beyond it is recorded here.');
         return finish(`Candidate rejected. Next: plan for ${assetId}.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
       }
@@ -1610,7 +2119,6 @@ export class ResearchLoopCore {
           // What the proof stands on, so auto mode can tell when a statement it relied on changed.
           plan.data.statement_digest = statementDigest(assetRaw);
           plan.data.dependency_digests = await this.dependencyDigests(asset.data) ?? {};
-          await this.clearHold('asset', assetId);
           await this.writeOwned(`${this.paths.plans}/${planId}.md`, stringifyMarkdown(plan.content, plan.data));
           await this.enqueueApproval('asset', assetId, `Proof from ${planId}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
           for (const definition of report.assumedDefinitions ?? []) if (await this.files.exists(`${this.paths.definitions}/${definition}.md`)) await this.enqueueApproval('definition', definition, `Used by the proof of ${assetId}.`);
@@ -1625,8 +2133,8 @@ export class ResearchLoopCore {
         delete state.current.statementDigest;
         if (failures >= limit) {
           await this.setStage('plan', { planId: undefined });
-          await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId });
-          return { stage: 'plan', message: `${failures} approaches failed for ${assetId} (limit ${limit}). Ask the researcher with ask_researcher(kind: "blocked"); on timeout park the asset.` };
+          await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
+          return { stage: 'plan', message: `${failures} approaches failed for ${assetId} (limit ${limit}). Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.` };
         }
         return finish(`Plan ${planId} failed (${failures}/${limit}). Next: a different plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
       }
@@ -1711,7 +2219,7 @@ export class ResearchLoopCore {
     problems.push(...libraryProblems([...assets.values(), ...definitions.values()], this.paths));
     const nodeInputs = async (folder: string) => Promise.all((await this.files.listFiles(folder)).map(async (file) => ({ filePath: file, raw: await this.files.readFile(file) })));
     problems.push(...ideaPlanProblems(await nodeInputs(folders.assets), [...await nodeInputs(folders.ideas), ...await nodeInputs(folders.plans)]));
-    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, folders.checks, folders.decisions, folders.handoffs, ...library]) {
+    for (const folder of [folders.assets, folders.definitions, folders.ideas, folders.plans, folders.checks, folders.candidates, folders.decisions, folders.handoffs, ...library]) {
       for (const file of await this.files.listFiles(folder)) {
         const raw = await this.files.readFile(file);
         if (/^<{7} |^>{7} |^={7}$/m.test(raw)) { problems.push(`${file}: unresolved merge conflict markers.`); continue; }
@@ -1723,9 +2231,10 @@ export class ResearchLoopCore {
         }
         for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (!definitions.has(String(definition))) problems.push(`${file}: unknown definition ${String(definition)}.`);
         if (typeof data.refutes === 'string' && !assets.has(data.refutes)) problems.push(`${file}: refutes unknown asset ${data.refutes}.`);
-        if ((folder === folders.plans || folder === folders.checks) && typeof data.target_asset === 'string' && !assets.has(data.target_asset)) problems.push(`${file}: targets unknown asset ${data.target_asset}.`);
+        if ((folder === folders.plans || folder === folders.checks || folder === folders.candidates) && typeof data.target_asset === 'string' && !assets.has(data.target_asset)) problems.push(`${file}: targets unknown asset ${data.target_asset}.`);
       }
     }
+    problems.push(...(await layoutReport(this.files, this.paths)).problems);
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);
     const { cycle } = assetClosure([...assets.keys()], assets);
@@ -1840,7 +2349,9 @@ export class ResearchLoopCore {
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
     const auto = this.lastSettings?.autoApprove;
-    if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${(['proofs', 'supporting', 'citations', 'definitions', 'counterexamples', 'project'] as const).filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
+    if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${AUTO_APPROVE_RULES.filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
+    const rigor = this.lastSettings?.rigor;
+    if (rigor) lines.push(`How careful (set by the researcher): counterexample search ${rigor.refuteSearch === 'all' ? 'for every result' : rigor.refuteSearch === 'main' ? 'for main results only' : 'off'}; definitions ${rigor.agreeDefinitions === 'main' ? 'used by main results are agreed before proving' : 'checked at the end'}; when stuck without a direction, ${rigor.whenStuck === 'retry' ? 'try one new approach of your own' : 'the result is set aside'}; unanswered questions ${rigor.unansweredQuestions === 'wait' ? 'wait for the researcher' : 'proceed with your stated default'}.`);
     if (state.stage === 'ready') lines.push(`If the researcher's message asks for a new result or goal, run: ${LOOP_COMMAND} extend --goal "<their goal>"`);
     lines.push(state.status === 'running' && !state.pendingQuestion ? `Continue with: ${LOOP_COMMAND} next` : 'Approval is a researcher action; never set status: approved.');
     return lines.join('\n');

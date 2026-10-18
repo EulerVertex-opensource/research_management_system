@@ -59,7 +59,12 @@ export async function summarizeResearchChanges(changes: NameStatus[], context: S
     } else if (folder === paths.ideas) {
       if (change.status === 'A') lines.push(`New idea ${name}: ${String(now?.data.title ?? '')}.`);
     } else if (folder === shared.checks) {
-      if (change.status === 'A') lines.push(`Falsification check on ${String(now?.data.target_asset ?? '?')} by ${String(now?.data.performed_by ?? 'unknown')}: ${String(now?.data.outcome ?? '')}.`);
+      if (change.status !== 'A') continue;
+      if (now?.data.type === 'search_round') lines.push(`Search round ${String(now.data.round ?? '?')} on ${String(now.data.target_asset ?? '?')} by ${String(now.data.performed_by ?? 'unknown')}: ${firstLine(sectionContent(now.content, 'Obstructions')) || 'no obstructions recorded'}`);
+      else lines.push(`Falsification check on ${String(now?.data.target_asset ?? '?')} by ${String(now?.data.performed_by ?? 'unknown')}: ${String(now?.data.outcome ?? '')}.`);
+    } else if (folder === shared.candidates) {
+      if (change.status === 'A') lines.push(`Search candidate ${name} for ${String(now?.data.target_asset ?? '?')}: ${String(now?.data.status ?? '')}${sectionContent(now?.content ?? '', 'Failure') ? ` — ${firstLine(sectionContent(now!.content, 'Failure'))}` : ''}.`);
+      else if (now?.data.status === 'archived' && old?.data.status !== 'archived') lines.push(`Search candidate ${name} rejected by independent verification.`);
     } else if (folder === shared.decisions) {
       if (change.status === 'A') lines.push(`Decision (${String(now?.data.kind ?? '?')}) on ${String(now?.data.target ?? '?')} by ${String(now?.data.performed_by ?? 'unknown')}: ${firstLine(now?.content ?? '')}`);
     } else if (folder === shared.handoffs) {

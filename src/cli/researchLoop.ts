@@ -2,14 +2,16 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
-import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { HookInput, contextOutput, denyOutput, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { hasContextPack } from '../services/ResearchContext';
 import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths, loadSyncConfig } from './nodeFiles';
-import { openGit, runShell } from './nodeGit';
+import { NodeGitRunner, openGit, runShell } from './nodeGit';
+import { applyInterlinks } from '../services/ResearchInterlinks';
+import { locateNodeFile } from '../domain/registry';
 import { toIdeaKind } from '../domain/nodeKinds';
 
 declare const __EXTENSION_VERSION__: string | undefined;
@@ -40,7 +42,9 @@ const USAGE = `Usage: research-loop <command> [options]
   next [--json]
   context [--json] [--budget N]   (compile the current stage's context pack; next does this too)
   show <id|paper_slug|project> [--section Heading]... [--full]   (one node or paper part on request)
-  report <complete|none|candidate|confirmed|rejected|proved|failed|question> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
+  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
+  search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
+  search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
@@ -176,6 +180,25 @@ async function runSync(sub: string | undefined, args: Args, root: string, core: 
   }
 }
 
+/**
+ * Link prose mentions in the asset and definition files the agent changed: the
+ * current stage's files while the loop runs (so no file outside the stage is
+ * touched), otherwise the uncommitted ones.
+ */
+async function linkChangedNodes(root: string, core: ResearchLoopCore, running: boolean): Promise<string[]> {
+  const paths = await loadProjectPaths(root);
+  let changed: string[];
+  if (running) {
+    const { added, modified } = await core.changedFiles();
+    changed = [...added, ...modified];
+  } else {
+    const status = await new NodeGitRunner(root).run(['status', '--porcelain', '--untracked-files=all', '--', paths.assets, paths.definitions, paths.library]);
+    if (status.code !== 0) return [];
+    changed = status.stdout.split('\n').filter(Boolean).map((line) => line.slice(3).split(' -> ').pop()!.replace(/^"|"$/g, ''));
+  }
+  return applyInterlinks(new NodeLoopFiles(root), paths, changed.filter((file) => file.endsWith('.md') && locateNodeFile(file, paths)));
+}
+
 async function runHook(event: string, args: Args): Promise<void> {
   let input: HookInput = {};
   try { input = JSON.parse((await readStdin()) || '{}'); } catch { input = {}; }
@@ -221,11 +244,13 @@ async function runHook(event: string, args: Args): Promise<void> {
     }
     case 'PreToolUse': {
       const paths = await loadProjectPaths(root);
-      const decision = preToolUseDecision(paths, input, root);
+      const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
       if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
       return;
     }
     case 'Stop': {
+      // Best effort: a malformed node is skipped here and reported by validate.
+      try { await linkChangedNodes(root, core, state?.status === 'running'); } catch { /* keep the Stop decision independent of linking */ }
       if (!state || state.status !== 'running') return;
       if (session && !core.heartbeat(session)) return;
       await core.validateWorkspace({ fix: true });
@@ -323,7 +348,7 @@ async function main(): Promise<void> {
     }
     case 'report': {
       const outcome = sub as ReportOutcome;
-      if (!['complete', 'none', 'candidate', 'confirmed', 'rejected', 'proved', 'failed', 'question'].includes(outcome)) throw new Error('report needs an outcome: complete|none|candidate|confirmed|rejected|proved|failed|question');
+      if (!REPORT_OUTCOMES.includes(outcome)) throw new Error(`report needs an outcome: ${REPORT_OUTCOMES.join('|')}`);
       const report: StageReport = {
         outcome, summary: typeof args.flags.summary === 'string' ? args.flags.summary : '',
         planId: typeof args.flags.plan === 'string' ? args.flags.plan : undefined,
@@ -401,6 +426,20 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('library search|list|promote');
+    }
+    case 'search': {
+      if (sub === 'status') {
+        const assetId = text(third, 'asset');
+        out(json ? await core.searchProgressFor(assetId) : await core.searchBoard(assetId));
+        return;
+      }
+      if (sub === 'request') {
+        const rounds = typeof args.flags.rounds === 'string' ? Number(args.flags.rounds) : undefined;
+        out(await core.requestSearch(text(third, 'asset'), rounds));
+        await core.touch(session);
+        return;
+      }
+      throw new Error('search status|request <asset>');
     }
     case 'handoff': {
       const file = await core.writeHandoff(typeof args.flags.note === 'string' ? args.flags.note : undefined);

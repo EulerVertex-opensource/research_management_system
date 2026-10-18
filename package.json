@@ -25,6 +25,10 @@
         "title": "Research Assistant: Open Dashboard"
       },
       {
+        "command": "research-assistant.openOverview",
+        "title": "Research Assistant: Show Loop Status (Overview)"
+      },
+      {
         "command": "research-assistant.refreshAgentSetup",
         "title": "Research Assistant: Refresh Project Setup"
       },

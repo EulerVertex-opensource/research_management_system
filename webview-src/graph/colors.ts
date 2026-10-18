@@ -1,4 +1,4 @@
-import type { GraphFlag, GraphNodeView } from '../../src/models/graph';
+import type { GraphNodeView, LoopTone, NodeProgress } from '../../src/models/graph';
 
 /** Theme-aware colors: VS Code theme variables with fallbacks, so light and dark themes both read. */
 export const COLOR = {
@@ -6,7 +6,7 @@ export const COLOR = {
   draft: 'var(--vscode-descriptionForeground, #8b949e)',
   inactive: 'var(--vscode-disabledForeground, #6e7681)',
   waiting: 'var(--vscode-editorWarning-foreground, #d29922)',
-  active: 'var(--vscode-focusBorder, #2f81f7)',
+  active: 'var(--vscode-charts-blue, var(--vscode-focusBorder, #2f81f7))',
   error: 'var(--vscode-errorForeground, #f85149)',
   link: 'var(--vscode-textLink-foreground, #3794ff)',
   card: 'var(--vscode-editorWidget-background, var(--vscode-editor-background))',
@@ -14,32 +14,54 @@ export const COLOR = {
   muted: 'var(--vscode-descriptionForeground, #8b949e)',
 } as const;
 
-export const FLAG_META: Record<GraphFlag, { symbol: string; label: string; color: string }> = {
-  awaiting_approval: { symbol: '◷', label: 'Waiting for your approval', color: COLOR.waiting },
-  question: { symbol: '?', label: 'The loop asked you a question', color: COLOR.waiting },
-  counterexample: { symbol: '⚠', label: 'A candidate counterexample waits for you', color: COLOR.error },
-  refuted: { symbol: '✕', label: 'Refuted by an approved counterexample', color: COLOR.error },
-  parked: { symbol: '⏸', label: 'Parked', color: COLOR.waiting },
-  active: { symbol: '●', label: 'The loop is working on it', color: COLOR.active },
-  uncovered: { symbol: '○', label: 'Approved but not in the manuscript', color: COLOR.link },
-  manuscript_stale: { symbol: '△', label: 'A locked manuscript section is stale because of it', color: COLOR.waiting },
-  manuscript_invalid: { symbol: '✕', label: 'A locked manuscript section presents it but it no longer holds', color: COLOR.error },
+/** A light wash of `color` over the editor background, for fills that work in both themes. */
+export function tint(color: string, percent = 14): string {
+  return `color-mix(in srgb, ${color} ${percent}%, var(--vscode-editor-background, #1e1e1e))`;
+}
+
+/** One color per graph state; `dashed` marks results that cannot move yet. */
+export const PROGRESS_STYLE: Record<NodeProgress, { color: string; dashed: boolean }> = {
+  done: { color: COLOR.approved, dashed: false },
+  working: { color: COLOR.active, dashed: false },
+  needs_you: { color: COLOR.waiting, dashed: false },
+  stuck: { color: COLOR.error, dashed: false },
+  waiting: { color: COLOR.muted, dashed: true },
+  stalled: { color: COLOR.waiting, dashed: true },
+  inactive: { color: COLOR.inactive, dashed: true },
 };
 
-export function statusColor(status: string): string {
-  if (status === 'approved') return COLOR.approved;
-  if (status === 'deprecated' || status === 'archived') return COLOR.inactive;
-  return COLOR.draft;
+/** Definitions, so they read apart from results in both the list and the graph. */
+export const DEFINITION_COLOR = 'var(--vscode-terminal-ansiCyan, #11a8cd)';
+
+/** Results taken from the literature (cited from a paper or textbook, or a library result). */
+export const CITED_COLOR = 'var(--vscode-charts-purple, #b180d7)';
+
+/**
+ * A node's color and border: its state, except that a checked cited result
+ * shows in the cited color, so what the project proves and what it quotes are
+ * told apart at a glance. An unchecked citation stays grey ("Not checked").
+ */
+export function nodeStyle(node: Pick<GraphNodeView, 'progress' | 'cited'> & { kind?: GraphNodeView['kind'] }): { color: string; dashed: boolean } {
+  const state = PROGRESS_STYLE[node.progress] ?? PROGRESS_STYLE.waiting;
+  // A definition that is agreed, or not yet, shows in the definition color; one that needs the researcher keeps that state's color.
+  if (node.kind === 'definition' && (node.progress === 'done' || node.progress === 'waiting')) return { color: DEFINITION_COLOR, dashed: node.progress === 'waiting' };
+  if (node.cited && node.progress === 'done') return { color: CITED_COLOR, dashed: false };
+  return state;
 }
 
-/** The one color a node's border takes: the most urgent flag, else its status. */
-export function nodeColor(node: GraphNodeView): string {
-  for (const flag of ['counterexample', 'refuted', 'manuscript_invalid', 'question', 'awaiting_approval', 'parked', 'active', 'manuscript_stale', 'uncovered'] as GraphFlag[]) {
-    if (node.flags.includes(flag)) return FLAG_META[flag].color;
-  }
-  return statusColor(node.status);
+export function nodeColor(node: Pick<GraphNodeView, 'progress' | 'cited'> & { kind?: GraphNodeView['kind'] }): string {
+  return nodeStyle(node).color;
 }
+
+export const TONE_COLOR: Record<LoopTone, string> = {
+  neutral: COLOR.muted, info: COLOR.active, warning: COLOR.waiting, error: COLOR.error, success: COLOR.approved,
+};
 
 export const SECTION_STATE_COLOR: Record<string, string> = {
   current: COLOR.approved, stale: COLOR.waiting, invalid: COLOR.error, unlocked: COLOR.muted, planned: COLOR.muted, dependency: COLOR.muted,
+};
+
+/** Section and paper states in words. */
+export const SECTION_STATE_LABEL: Record<string, string> = {
+  current: 'up to date', stale: 'out of date', invalid: 'shows results that no longer hold', unlocked: 'not reviewed yet', planned: 'planned', dependency: 'needed by a presented result',
 };

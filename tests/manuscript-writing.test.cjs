@@ -205,6 +205,113 @@ test('required definitions must be approved and included in section context', as
   } finally { p.cleanup(); }
 });
 
+const OVERLEAF_MAIN = [
+  '\\documentclass{amsart}',
+  '\\newtheorem{theorem}{Theorem}[section]',
+  '\\begin{document}',
+  '\\title{Rigidity}',
+  '\\begin{abstract}',
+  'We prove things.',
+  '\\end{abstract}',
+  '\\maketitle',
+  '',
+  '% ---------- Introduction ----------',
+  '\\section{Introduction}\\label{sec:intro}',
+  'We study $X$; see Section~\\ref{sec:results}.',
+  '% \\section{Old draft}',
+  '',
+  '\\section[Results]{Main results on $L^p$ [spaces]}',
+  '\\label{sec:results}',
+  '\\begin{theorem}\\label{thm:main} Every $X$ is rigid. \\end{theorem}',
+  '\\begin{verbatim}',
+  '\\section{not a heading}',
+  '\\end{verbatim}',
+  '',
+  '\\appendix',
+  '',
+  '\\section{Proof of the lemma}',
+  'Details.',
+  '',
+  '\\bibliographystyle{amsplain}',
+  '\\bibliography{references}',
+  '\\end{document}',
+  '',
+].join('\n');
+
+test('adopt splits inline sections into files without changing the TeX, then sync and a second adopt agree', async () => {
+  const p = fixture();
+  try {
+    p.write(p.paths.mainTex, OVERLEAF_MAIN);
+    await p.fileService.ensureProjectStructure(p.config, p.paths, false, []);
+    const preview = p.run('adopt', '--preview');
+    assert.equal(preview.status, 0, preview.stderr);
+    assert.match(preview.stdout, /split lines 10-26 at 3 \\section heading/);
+    assert.match(preview.stdout, /detaches Overleaf comments/);
+    assert.equal(p.read(p.paths.mainTex), OVERLEAF_MAIN);
+    assert.equal(fs.existsSync(p.at('sections/intro.tex')), false);
+
+    const applied = p.run('adopt', '--apply');
+    assert.equal(applied.status, 0, applied.stderr);
+    const ids = ['intro', 'results', 'proof_of_the_lemma'];
+    const main = p.read(p.paths.mainTex);
+    const moved = ids.map((id) => p.read(`sections/${id}.tex`)).join('');
+    assert.equal(main.replace(/% research-assistant:sections:start\n(?:\\input\{[^}]+\}\n)*% research-assistant:sections:end\n/, moved), OVERLEAF_MAIN);
+    assert.match(main, /\\maketitle\n\n% research-assistant:sections:start\n\\input\{sections\/intro\}\n\\input\{sections\/results\}\n\\input\{sections\/proof_of_the_lemma\}\n% research-assistant:sections:end\n\\bibliographystyle/);
+    assert.match(p.read('sections/intro.tex'), /^% ---------- Introduction/);
+    assert.match(p.read('sections/proof_of_the_lemma.tex'), /^\\appendix\n\n\\section/);
+    assert.match(p.read('sections/results.tex'), /\\section\{not a heading\}/);
+
+    const outline = p.read(p.paths.writingOutline);
+    assert.match(outline, /## Sections\n\n1\. \[Introduction\]\(sections\/intro\.md\)\n2\. \[Main results on \$L\^p\$ \(spaces\)\]\(sections\/results\.md\)\n3\. \[Proof of the lemma\]/);
+    assert.match(p.read(path.join(p.paths.writingSections, 'results.md')), /^---\ntitle: "Main results on \$L\^p\$ \(spaces\)"\nassets: \[\]\n---/);
+    const sync = p.run('sync', '--preview');
+    assert.equal(sync.status, 0, sync.stderr);
+    assert.match(sync.stdout, /already match/);
+    assert.match(p.run('adopt', '--preview').stderr, /already lists sections/);
+  } finally { p.cleanup(); }
+});
+
+test('adopt avoids existing section IDs, keeps CRLF, and leaves sections after the bibliography in main', async () => {
+  const p = fixture();
+  try {
+    const main = '\\documentclass{amsart}\r\n\\begin{document}\r\n\\section{Intro}\r\nA.\r\n\\bibliography{references}\r\n\\section{Late appendix}\r\nB.\r\n\\end{document}\r\n';
+    p.write(p.paths.mainTex, main);
+    p.write('sections/intro.tex', 'unrelated file\n');
+    await p.fileService.ensureProjectStructure(p.config, p.paths, false, []);
+    const applied = p.run('adopt', '--apply');
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.match(applied.stdout, /Not split: "Late appendix" at line 6/);
+    assert.equal(p.read('sections/intro.tex'), 'unrelated file\n');
+    assert.equal(p.read('sections/intro_2.tex'), '\\section{Intro}\r\nA.\r\n');
+    assert.equal(p.read(p.paths.mainTex), '\\documentclass{amsart}\r\n\\begin{document}\r\n% research-assistant:sections:start\r\n\\input{sections/intro_2}\r\n% research-assistant:sections:end\r\n\\bibliography{references}\r\n\\section{Late appendix}\r\nB.\r\n\\end{document}\r\n');
+  } finally { p.cleanup(); }
+});
+
+test('adopt marks existing section inputs and refuses what it cannot place', async () => {
+  const p = fixture();
+  try {
+    const main = '\\documentclass{amsart}\n\\begin{document}\n\\maketitle\n\\input{sections/intro}\n\n\\input{./sections/proofs.tex}\n\\bibliography{references}\n\\end{document}\n';
+    p.write(p.paths.mainTex, main.replace('\n\n\\input{./', '\n\\vspace{1em}\n\\input{./'));
+    p.write('sections/intro.tex', '\\section{Introduction}\nText.\n');
+    p.write('sections/proofs.tex', '\\section{Proofs}\nText.\n');
+    await p.fileService.ensureProjectStructure(p.config, p.paths, false, []);
+    assert.match(p.run('adopt', '--apply').stderr, /Line 5 sits between the section inputs/);
+    p.write(p.paths.mainTex, main);
+    const applied = p.run('adopt', '--apply');
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(p.read(p.paths.mainTex), main.replace('\\input{sections/intro}', '% research-assistant:sections:start\n\\input{sections/intro}').replace('proofs.tex}\n', 'proofs.tex}\n% research-assistant:sections:end\n'));
+    assert.equal(p.read('sections/intro.tex'), '\\section{Introduction}\nText.\n');
+    assert.match(p.read(p.paths.writingOutline), /1\. \[Introduction\]\(sections\/intro\.md\)\n2\. \[Proofs\]\(sections\/proofs\.md\)/);
+    assert.equal(p.run('sync', '--apply').status, 0);
+    assert.match(p.read(p.paths.mainTex), /start\n\\input\{sections\/intro\}\n\\input\{sections\/proofs\}\n% research-assistant:sections:end/);
+
+    p.write(p.paths.writingOutline, '# Manuscript outline\n\n## Sections\n\n');
+    fs.rmSync(p.at(p.paths.writingSections), { recursive: true });
+    p.write(p.paths.mainTex, '\\documentclass{amsart}\n\\begin{document}\nJust prose.\n\\end{document}\n');
+    assert.match(p.run('adopt', '--preview').stderr, /no \\section heading and no \\input/);
+  } finally { p.cleanup(); }
+});
+
 const hasLatexmk = spawnSync('latexmk', ['-v'], { encoding: 'utf8' }).status === 0;
 test('generated section and synced main compile with local TeX', { skip: !hasLatexmk }, async () => {
   const p = fixture();
@@ -221,5 +328,23 @@ test('generated section and synced main compile with local TeX', { skip: !hasLat
     });
     assert.equal(compile.status, 0, compile.stdout + compile.stderr);
     assert.ok(fs.existsSync(path.join(latexRoot, '.latex-out', 'main.pdf')));
+  } finally { p.cleanup(); }
+});
+
+test('an adopted manuscript compiles to the same labels and numbering', { skip: !hasLatexmk }, async () => {
+  const p = fixture();
+  try {
+    p.write(p.paths.mainTex, OVERLEAF_MAIN);
+    p.write(p.paths.bibliography, '');
+    await p.fileService.ensureProjectStructure(p.config, p.paths, false, []);
+    const compile = (dir) => {
+      const result = spawnSync('latexmk', ['-pdf', '-halt-on-error', '-interaction=nonstopmode', '-outdir=.latex-out', 'main.tex'], { cwd: dir, encoding: 'utf8', timeout: 60000 });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      return fs.readFileSync(path.join(dir, '.latex-out', 'main.aux'), 'utf8');
+    };
+    const before = compile(p.root);
+    fs.rmSync(p.at('.latex-out'), { recursive: true, force: true });
+    assert.equal(p.run('adopt', '--apply').status, 0);
+    assert.equal(compile(p.root), before);
   } finally { p.cleanup(); }
 });

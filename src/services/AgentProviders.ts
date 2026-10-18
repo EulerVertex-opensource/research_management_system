@@ -99,4 +99,6 @@ export const RETIRED_SKILLS = [
   // Merged into research-maintenance, extract-research-nodes, explore-research, plan-manuscript, and draft-latex.
   'order-assets', 'order-definitions', 'link-research-nodes', 'convert-proof-ideas',
   'extract-theorems', 'extract-definitions', 'find-relevant', 'summarize', 'plan-section', 'manuscript-writing',
+  // Replaced by search-object when falsification became an object search.
+  'falsify-asset',
 ];

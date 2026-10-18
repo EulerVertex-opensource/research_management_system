@@ -11,7 +11,16 @@ export const MAX_VISIBLE = 150;
 
 export type AttentionFilter = 'all' | 'attention' | GraphFlag | 'draft' | 'approved';
 
+/** The graph's three views: one main result's tree, only what needs the researcher, or everything with filters. */
+export type GraphMode = 'goal' | 'needs' | 'all';
+
 export interface ViewOptions {
+  /** Results as an ordered list of boxes, or as the graph. */
+  display: 'list' | 'graph';
+  /** Unset until the researcher picks one: "goal" while a main result is unfinished, else "all". */
+  mode?: GraphMode;
+  /** The main result the "goal" view shows; defaults to the one the loop's status points at. */
+  goal?: string;
   scope: 'required' | 'all';
   showDefinitions: boolean;
   showInactive: boolean;
@@ -20,7 +29,7 @@ export interface ViewOptions {
   focus?: { id: string; depth: number };
 }
 
-export const DEFAULT_OPTIONS: ViewOptions = { scope: 'required', showDefinitions: false, showInactive: false, search: '', filter: 'all' };
+export const DEFAULT_OPTIONS: ViewOptions = { display: 'list', scope: 'required', showDefinitions: false, showInactive: false, search: '', filter: 'all' };
 
 export interface VisibleGraph {
   nodes: GraphNodeView[];
@@ -147,4 +156,92 @@ export function impactOf(payload: GraphPayload, id: string): ImpactResult {
     else unaffected.push(section);
   }
   return { node, upstream, downstream, graph: { nodes: graphNodes, edges: graphEdges }, sections: affected, unaffected };
+}
+
+/** A finished branch folded into one chip under the result that rests on it. */
+export interface FoldView { id: string; parent: string; members: string[]; title: string }
+
+export interface FocusedGraph { nodes: GraphNodeView[]; edges: GraphEdgeView[]; folds: FoldView[] }
+
+const PREREQUISITE = (edge: GraphEdgeView) => edge.type !== 'refutes';
+
+/**
+ * "Why isn't it done?": everything `goal` rests on that is not finished, with
+ * each fully finished branch folded into a chip under the result that uses it.
+ */
+export function goalGraph(payload: GraphPayload, goal: string): FocusedGraph {
+  const byId = new Map(payload.nodes.map((node) => [node.id, node]));
+  const { deps } = adjacency(payload.edges.filter(PREREQUISITE));
+  const done = new Map<string, boolean>();
+  const finished = (id: string, seen = new Set<string>()): boolean => {
+    if (done.has(id)) return done.get(id)!;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const value = byId.get(id)?.progress === 'done' && (deps.get(id) ?? []).every((dep) => finished(dep, seen));
+    done.set(id, value);
+    return value;
+  };
+  const nodes = new Map<string, GraphNodeView>();
+  const folds: FoldView[] = [];
+  const edges: GraphEdgeView[] = [];
+  const visit = (id: string) => {
+    if (nodes.has(id) || !byId.has(id)) return;
+    nodes.set(id, byId.get(id)!);
+    const prerequisites = (deps.get(id) ?? []).filter((dep) => byId.has(dep));
+    const finishedOnes = prerequisites.filter((dep) => finished(dep));
+    for (const dep of prerequisites.filter((item) => !finished(item))) { visit(dep); edges.push(payload.edges.find((edge) => edge.from === id && edge.to === dep && PREREQUISITE(edge))!); }
+    if (finishedOnes.length) {
+      const members = [...reach(finishedOnes, deps)].filter((member) => byId.has(member));
+      const fold: FoldView = { id: `fold:${id}`, parent: id, members, title: byId.get(finishedOnes[0])!.title };
+      folds.push(fold);
+      edges.push({ from: id, to: fold.id, type: 'depends_on' });
+    }
+  };
+  visit(goal);
+  return { nodes: [...nodes.values()], edges, folds };
+}
+
+/** "Only what needs me": results that need the researcher or are stuck, and the main results they hold up. */
+export function needsGraph(payload: GraphPayload): FocusedGraph {
+  const edges = payload.edges.filter(PREREQUISITE);
+  const { dependants } = adjacency(edges);
+  const roots = payload.nodes.filter((node) => ['needs_you', 'stuck', 'stalled'].includes(node.progress)).map((node) => node.id);
+  const keep = reach(roots, dependants);
+  const nodes = payload.nodes.filter((node) => keep.has(node.id));
+  return { nodes, edges: transitiveReduction(edges.filter((edge) => keep.has(edge.from) && keep.has(edge.to))).edges, folds: [] };
+}
+
+/**
+ * The color of what holds a result up: its own state when it needs the
+ * researcher or is stuck, else that of its first unfinished prerequisite that
+ * does. Undefined when nothing on its path is blocked.
+ */
+export function blockingStates(payload: GraphPayload): Map<string, 'stuck' | 'needs_you'> {
+  const byId = new Map(payload.nodes.map((node) => [node.id, node]));
+  const { deps } = adjacency(payload.edges.filter(PREREQUISITE));
+  const result = new Map<string, 'stuck' | 'needs_you' | undefined>();
+  const visit = (id: string): 'stuck' | 'needs_you' | undefined => {
+    if (result.has(id)) return result.get(id);
+    result.set(id, undefined);
+    const progress = byId.get(id)?.progress;
+    let value: 'stuck' | 'needs_you' | undefined;
+    if (progress === 'stuck') value = 'stuck';
+    else if (progress === 'needs_you' || progress === 'stalled') value = 'needs_you';
+    else if (progress === 'waiting' || progress === 'inactive') {
+      const found = (deps.get(id) ?? []).map(visit).filter(Boolean);
+      value = found.includes('stuck') ? 'stuck' : found[0];
+    }
+    result.set(id, value);
+    return value;
+  };
+  for (const node of payload.nodes) visit(node.id);
+  return new Map([...result].filter((entry): entry is [string, 'stuck' | 'needs_you'] => entry[1] !== undefined));
+}
+
+/** The main result to show first: the one the loop's status points at, else the first not yet done. */
+export function defaultGoal(payload: GraphPayload): string | undefined {
+  const chainEnd = payload.health.chain[payload.health.chain.length - 1];
+  if (chainEnd && payload.required.includes(chainEnd)) return chainEnd;
+  const present = payload.required.filter((id) => payload.nodes.some((node) => node.id === id));
+  return present.find((id) => payload.nodes.find((node) => node.id === id)?.progress !== 'done') ?? present[0];
 }

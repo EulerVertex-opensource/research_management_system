@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { searchNothing } = require('./search-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -80,7 +81,7 @@ test('the loop approves library results once and never falsifies or proves them'
   await f.core.report({ outcome: 'none', summary: 'No sources' });
 
   // The library lemma is settled by an approval request; the loop moves on to the project result.
-  assert.equal((await f.core.next()).stage, 'falsify');
+  assert.equal((await f.core.next()).stage, 'search');
   assert.equal(f.core.current.current.assetId, 'main_theorem');
   const request = f.core.current.approvalQueue.find((item) => item.target === 'lib_known');
   assert.equal(request.kind, 'asset');
@@ -115,10 +116,9 @@ test('library files can be added and edited during a stage, and still follow the
   // A later stage may also touch the library, e.g. adding links or fixing a typo.
   f.map.set(`${LIB}/lib_known.md`, node('lemma', 'Known lemma, typo fixed'));
   await f.core.report({ outcome: 'none', summary: 'No sources' });
-  assert.equal((await f.core.next()).stage, 'falsify');
+  assert.equal((await f.core.next()).stage, 'search');
   f.map.set(`${LIB}/lib_new.md`, node('lemma', 'New known lemma, linked'));
-  f.map.set('research/checks/check_main_theorem_small.md', matter.stringify('\n## Cases checked\n\n- small n\n\n## Limitations\n\nOnly small cases.\n', { type: 'falsification_check', title: 'Check', target_asset: 'main_theorem', outcome: 'no_counterexample_found' }));
-  await f.core.report({ outcome: 'none', summary: 'No counterexample' });
+  await searchNothing(f);
   assert.equal(f.core.current.stage, 'plan');
 
   f.map.set(`${LIB}/lib_bad.md`, node('lemma', 'Depends on project', { depends_on: ['main_theorem'] }));
@@ -226,6 +226,9 @@ test('the dashboard lists library results in their own view, with a batch approv
   assert.doesNotMatch(library, /Main theorem/);
   assert.match(library, /Library lemma A/);
   assert.match(library, /Library lemma B/);
-  assert.match(library, /Approve 1 draft</);
+  assert.match(library, /Mark 1 as checked</);
+  assert.match(library, /✓ KNOWN RESULT</, 'a checked known result shows one purple badge');
+  assert.match(library, /NOT CHECKED · KNOWN RESULT</, 'an unchecked one shows the grey badge');
+  assert.doesNotMatch(library, /<span[^>]*>approved<\/span>/i, 'no separate status badge next to it');
   assert.match(library, /<option value="thesis">thesis<\/option>/);
 });

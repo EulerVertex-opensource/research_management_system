@@ -10,10 +10,11 @@ import { NodeKind } from '../domain/nodeKinds';
 import { duplicateIds, nodeProblems } from '../domain/schema';
 import { ProjectPaths } from '../models/types';
 import { RegistryNode, libraryProblems, nodeFolders } from '../domain/registry';
+import { layoutReport } from '../domain/layout';
 
 const USAGE = `Usage: research-maintenance <command> [--preview | --apply] [--project ROOT]
 
-  validate [--assets | --definitions]  Check node schema, global IDs, and dependencies; print dependency order. Read-only.
+  validate [--assets | --definitions]  Check node schema, global IDs, dependencies, and the research folder layout; print dependency order. Read-only.
   links [--file NODE_PATH]             Link verified prose mentions of dependencies and definitions in asset and definition bodies.
   migrate [--force]                    Upgrade an older project to the current schema (definitions, plans, project.md, titles, link blocks, source kinds).
 
@@ -92,6 +93,9 @@ async function validate(files: NodeLoopFiles, paths: ProjectPaths, only?: 'asset
       order.forEach((id, position) => out(`  ${String(position + 1).padStart(width, '0')} ${id} — ${titles.get(id)}`));
     } catch (error) { problems.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
   }
+  const layout = await layoutReport(files, paths);
+  problems.push(...layout.problems);
+  for (const file of layout.legacy) out(`NOTE ${file} is left from an older version; review it and remove it or move its content into the research folders.`);
   const reasons = await migrationReasons(files, paths);
   if (reasons.length) out(`NOTE this project uses an older schema (${reasons.join('; ')}); run \`research-maintenance migrate --preview\`.`);
   for (const problem of problems) out(`PROBLEM ${problem}`);

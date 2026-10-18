@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { AutoApproveRule, AutoPullMode, ProviderSetting, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
-import { LIMITS, validateSettingsPatch } from '../../src/domain/loopSettings';
+import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS, RIGOR_KEYS } from '../../src/models/settings';
+import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, RigorPolicy, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
+import { LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, rigorPreset, validateSettingsPatch } from '../../src/domain/loopSettings';
 import { COLOR } from '../graph/colors';
 
 type SectionId = 'agent' | 'loop' | 'sync' | 'budgets';
@@ -13,14 +14,18 @@ interface Props {
   onNavigate: (id: string) => void;
 }
 
-const RULES: { id: AutoApproveRule; label: string; hint: string; warning?: string }[] = [
-  { id: 'proofs', label: 'Proofs', hint: 'a proof a succeeded plan produced, over approved dependencies' },
-  { id: 'supporting', label: 'Supporting assets', hint: 'remarks and examples a required result uses' },
-  { id: 'citations', label: 'Citations & library', hint: 'results citing an indexed paper with a location, and library results' },
-  { id: 'definitions', label: 'Definitions', hint: 'definitions the results use' },
-  { id: 'counterexamples', label: 'Counterexamples', hint: 'verified counterexamples', warning: 'Confirming a counterexample deprecates the result it refutes.' },
-  { id: 'project', label: 'Project goals', hint: 'project.md and its required results', warning: 'The loop will pursue goals you have not reviewed.' },
-];
+/** One entry per auto-approve rule; a Record so a new rule without a checkbox does not compile. */
+const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?: string }> = {
+  proofs: { label: 'Proofs', hint: 'a proof a succeeded plan produced, over approved dependencies' },
+  supporting: { label: 'Supporting assets', hint: 'remarks and examples a required result uses' },
+  citations: { label: 'Citations & library', hint: 'results citing an indexed paper with a location, and library results' },
+  definitions: { label: 'Definitions', hint: 'definitions the results use' },
+  counterexamples: { label: 'Counterexamples', hint: 'verified counterexamples', warning: 'Confirming a counterexample deprecates the result it refutes.' },
+  specifications: { label: 'Construction specifications', hint: 'the required properties P1…Pn a construction search looks for', warning: 'The loop will search against a specification you have not reviewed.' },
+  project: { label: 'Project goals', hint: 'project.md and its required results', warning: 'The loop will pursue goals you have not reviewed.' },
+};
+const RULES = AUTO_APPROVE_RULES.map((id) => ({ id, ...RULE_TEXT[id] }));
+const FIELD_GROUPS = Object.keys(LOOP_FIELD_GROUPS) as LoopFieldGroup[];
 
 // ---------- drafts: what the form holds, as the inputs show it ----------
 
@@ -29,7 +34,7 @@ const toNumber = (text: string) => text.trim() === '' ? NaN : Number(text);
 
 function agentDraft(s: SettingsPayload) { return { provider: s.agent.provider, useDefaultOnStart: s.agent.useDefaultOnStart }; }
 function loopDraft(s: SettingsPayload) {
-  return { autoApprove: { ...s.loop.autoApprove }, maxFailedPlans: num(s.loop.maxFailedPlans), iterationCap: num(s.loop.iterationCap), questionTimeoutSeconds: num(s.loop.questionTimeoutSeconds) };
+  return { autoApprove: { ...s.loop.autoApprove }, rigor: { ...s.loop.rigor }, ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, num(s.loop[key])])) as Record<LoopNumberKey, string> };
 }
 function syncDraft(s: SettingsPayload) {
   const sync = s.sync;
@@ -49,8 +54,8 @@ function patchFor(section: SectionId, draft: Drafts, saved: Drafts): SettingsPat
   const changed = <T extends Record<string, unknown>>(next: T, old: T) => Object.fromEntries(Object.entries(next).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(old[key])));
   if (section === 'agent') return { agent: changed(draft.agent, saved.agent) };
   if (section === 'loop') {
-    const { autoApprove, ...numbers } = changed(draft.loop, saved.loop) as Partial<Drafts['loop']>;
-    return { loop: { ...(autoApprove ? { autoApprove } : {}), ...Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, toNumber(value as string)])) } };
+    const { autoApprove, rigor, ...numbers } = changed(draft.loop, saved.loop) as Partial<Drafts['loop']>;
+    return { loop: { ...(autoApprove ? { autoApprove } : {}), ...(rigor ? { rigor } : {}), ...Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, toNumber(value as string)])) } };
   }
   if (section === 'sync') {
     const sync = changed(draft.sync, saved.sync) as Record<string, unknown>;
@@ -138,6 +143,31 @@ export function SettingsView({ settings, result, onSave, onNavigate }: Props) {
         </Section>
 
         <Section title="Research loop" scope="this machine" note={settings.loop.file}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 320px' }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>How careful</div>
+                <div style={{ fontSize: 12, color: COLOR.muted }}>Careful checks more before the loop builds on something; Fast moves on and leaves more for you to check later.</div>
+              </div>
+              <Segmented value={rigorPreset(loop.rigor)}
+                options={[['careful', 'Careful'], ['fast', 'Fast'], ...(rigorPreset(loop.rigor) === 'custom' ? [['custom', 'Custom'] as [string, string]] : [])]}
+                onChange={(value) => { if (value === 'careful' || value === 'fast') update('loop', { rigor: { ...RIGOR_PRESETS[value] } }); }} />
+            </div>
+            <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '8px 12px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '10px 16px' }}>
+              {RIGOR_KEYS.map((key) => {
+                const field = RIGOR_FIELDS[key];
+                return (
+                  <Field key={key} label={field.label} hint={field.hint}>
+                    <select value={loop.rigor[key]} aria-label={field.label} style={inputStyle}
+                      onChange={(event) => update('loop', { rigor: { ...loop.rigor, [key]: event.target.value } as RigorPolicy })}>
+                      {Object.entries(field.options).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                    <FieldError text={error('loop', `loop.rigor.${key}`)} />
+                  </Field>
+                );
+              })}
+            </div>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Switch on={autoOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, enabled: value } })} label="Auto mode" />
             <div>
@@ -159,12 +189,16 @@ export function SettingsView({ settings, result, onSave, onNavigate }: Props) {
             A result whose approval was revoked by a change (its dependency changed, say) always comes back to you.
             {!saved.loop.autoApprove.enabled && autoOn && settings.loop.queued > 0 && <> Saving approves the eligible ones of the {settings.loop.queued} request(s) now waiting.</>}
           </div>
-          <NumberField label="Proof attempts per asset" hint="Failed plans before the loop asks you for a new direction." value={loop.maxFailedPlans} range={LIMITS.maxFailedPlans}
-            onChange={(value) => update('loop', { maxFailedPlans: value })} error={error('loop', 'loop.maxFailedPlans')} />
-          <NumberField label="Autopilot continuations" hint="Times the Stop hook sends the agent on per chat session; applies to the running loop too." value={loop.iterationCap} range={LIMITS.iterationCap}
-            onChange={(value) => update('loop', { iterationCap: value })} error={error('loop', 'loop.iterationCap')} />
-          <NumberField label="Question timeout" unit="seconds" hint="How long a question or approval popup waits before the agent continues without you." value={loop.questionTimeoutSeconds} range={LIMITS.questionTimeoutSeconds}
-            onChange={(value) => update('loop', { questionTimeoutSeconds: value })} error={error('loop', 'loop.questionTimeoutSeconds')} />
+          {FIELD_GROUPS.map((group) => (
+            <React.Fragment key={group}>
+              {LOOP_FIELD_GROUPS[group] && <Divider label={LOOP_FIELD_GROUPS[group]} />}
+              {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === group).map((key) => {
+                const field = LOOP_NUMBER_FIELDS[key];
+                return <NumberField key={key} label={field.label} hint={field.hint} unit={field.unit} value={loop[key]} range={field.range}
+                  onChange={(value) => update('loop', { [key]: value } as Partial<Drafts['loop']>)} error={error('loop', `loop.${key}`)} />;
+              })}
+            </React.Fragment>
+          ))}
           {settings.loop.problems.map((problem) => <Warning key={problem} text={problem} />)}
           {settings.recentAutoApprovals.length > 0 && (
             <div style={{ fontSize: 12 }}>

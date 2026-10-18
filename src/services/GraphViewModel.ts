@@ -4,8 +4,13 @@ import { buildGraph, nodeKey } from '../domain/graph';
 import { nodeKindOf } from '../domain/nodeKinds';
 import { requiredAssetIds } from '../domain/project';
 import { computeAttention } from '../domain/attention';
+import { computeLoopHealth } from '../domain/loopHealth';
+import { buildHistory } from '../domain/history';
+import { NodeProgress, isProvable, needsLabel, parkLabel } from '../domain/copy';
 import { sectionReasons } from '../domain/manuscriptImpact';
 import { parseTexBlocks } from '../domain/texBlocks';
+import { statementPart, stripManagedBlocks } from '../domain/sections';
+import { isCited } from '../domain/schema';
 import { LoopFiles, LoopState, isApproved } from './ResearchLoopModel';
 import { readApprovals } from './ApprovalStore';
 import { ManuscriptModel, loadManuscriptModel } from './ManuscriptImpactLoader';
@@ -24,6 +29,10 @@ export interface GraphInputs {
   manuscript?: ManuscriptModel;
   sectionsDir: string;
   now: string;
+  /** Recent loop events (events.jsonl), oldest first, for the timeline. */
+  events?: Array<Record<string, unknown>>;
+  /** Results marked for re-check: node ID → the changed node it rests on. */
+  recheck?: Record<string, string>;
 }
 
 const RESEARCH_KINDS = new Set(['asset', 'definition']);
@@ -69,6 +78,9 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
   const refutedBy = new Map<string, ResearchNode[]>();
   for (const { node } of research) if (typeof node.refutes === 'string' && node.refutes) refutedBy.set(node.refutes, [...(refutedBy.get(node.refutes) ?? []), node]);
   const awaiting = new Set((state?.approvalQueue ?? []).filter((item) => item.kind !== 'project').map((item) => item.target));
+  const approvalKinds = new Map((state?.approvalQueue ?? []).filter((item) => item.kind !== 'project').map((item) => [item.target, item.kind as string]));
+  const statusOf = new Map(research.map(({ node }) => [node.id, node.status ?? 'draft']));
+  const titleOf = new Map(research.map(({ node }) => [node.id, node.title || node.id]));
 
   const nodes: GraphNodeView[] = research.map(({ node, kind }) => {
     const served = blocks.get(node.id) ?? [];
@@ -80,10 +92,12 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     if ((refutedBy.get(node.id) ?? []).some((example) => example.status === 'approved')) flags.push('refuted');
     if (state?.parked[node.id]) flags.push('parked');
     if (state?.status === 'running' && state.current.assetId === node.id) flags.push('active');
+    if (state?.status === 'running' && state.current.assetId === node.id && state.current.search) flags.push('searching');
     if (uncovered.some((item) => item.id === node.id && !item.pending)) flags.push('uncovered');
     if (staleBecause.has(node.id)) flags.push('manuscript_stale');
     if (invalidBecause.has(node.id)) flags.push('manuscript_invalid');
     const targeting = plans.filter((plan) => plan.target_asset === node.id);
+    const failedPlans = targeting.filter((plan) => plan.status === 'failed').length;
     return {
       id: node.id, kind: kind as 'asset' | 'definition', type: node.type, title: node.title || node.id, status: node.status ?? 'draft',
       required: isRequired, inScope: served.length > 0,
@@ -92,7 +106,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       definitions: (node.uses_definitions ?? []).filter((id) => ids.has(id)),
       counts: {
         plans: targeting.length,
-        failedPlans: targeting.filter((plan) => plan.status === 'failed').length,
+        failedPlans,
         pendingPlans: targeting.filter((plan) => plan.status === 'pending').length,
         ideas: ideas.filter((idea) => (idea.related_assets ?? []).includes(node.id)).length,
       },
@@ -101,8 +115,53 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       ...(typeof node.refutes === 'string' && node.refutes ? { refutes: node.refutes } : {}),
       ...(node.origin ? { origin: node.origin, collection: node.collection } : {}),
       filePath: node.filePath,
+      statement: statementOf(node.body ?? ''),
+      ...(input.recheck?.[node.id] ? { recheck: input.recheck[node.id] } : {}),
+      ...citedOf(node),
+      ...progressOf(node, flags, failedPlans, kind),
     };
   });
+
+  /** The graph state of one node: the most urgent fact about it wins. */
+  function progressOf(node: ResearchNode, flags: GraphFlag[], failedPlans: number, kind: string): { progress: NodeProgress; progressLabel: string; progressDetail: string } {
+    const result = (progress: NodeProgress, progressLabel: string, progressDetail = '') => ({ progress, progressLabel, progressDetail });
+    const status = node.status ?? 'draft';
+    if (['deprecated', 'archived'].includes(status)) return result('inactive', 'Retired', status === 'deprecated' ? 'Deprecated' : 'Archived');
+    if (flags.includes('refuted')) return result('stuck', 'Disproved', 'An accepted counterexample refutes it');
+    const parked = state?.parked[node.id];
+    if (flags.includes('counterexample') || parked?.reason === 'counterexample_pending') return result('needs_you', needsLabel('counterexample'), 'A possible counterexample waits for you');
+    if (parked) {
+      const detail = parked.reason === 'three_failures' ? `${failedPlans || 'Several'} proof attempt${failedPlans === 1 ? '' : 's'} failed`
+        : parked.reason === 'search_exhausted' ? 'No match found' : parked.reason === 'researcher' ? 'You set it aside' : '';
+      return result('stuck', parkLabel(parked.reason), detail);
+    }
+    if (flags.includes('question')) return result('needs_you', needsLabel('question'), 'The agent asked you something');
+    const changed = input.recheck?.[node.id];
+    if (changed) return result('needs_you', 'Needs re-check', `${titleOf.get(changed) ?? changed} changed after it was proved`);
+    // Taken from the literature but not checked yet: nothing waits on the check, so it reads as not done, not as a call for action.
+    const cited = citedOf(node).cited;
+    if (cited && status === 'draft') return result('waiting', 'Not checked', cited.kind === 'library' ? 'Known result · check before you finish' : `${citationText(cited)} · check before you finish`);
+    if (flags.includes('awaiting_approval')) {
+      const kind = approvalKinds.get(node.id);
+      const detail = kind === 'definition' ? 'Definition written' : kind === 'citation' ? 'Quoted from a paper' : kind === 'specification' ? 'Properties written'
+        : node.origin ? 'Known result to accept' : isProvable(node.type) ? 'Proof written' : 'Waiting for you';
+      return result('needs_you', needsLabel(kind), detail);
+    }
+    if (status === 'approved') {
+      if (kind === 'definition') return result('done', cited ? 'Cited' : 'Agreed', cited ? citationText(cited) : '');
+      if (node.origin) return result('done', 'Known result', 'From the literature');
+      return cited ? result('done', 'Cited', citationText(cited)) : result('done', 'Done');
+    }
+    if (flags.includes('active')) {
+      const stage = state?.stage ?? '';
+      const label = flags.includes('searching') ? 'Agent searching' : stage === 'plan' ? 'Agent planning' : stage === 'execute' ? 'Agent proving' : stage.startsWith('verify') ? 'Agent checking' : 'Agent working';
+      return result('working', label, state?.current.search ? `Search round ${state.current.search.round}` : '');
+    }
+    const unfinished = [...(node.depends_on ?? []), ...(node.uses_definitions ?? [])].filter((id) => ids.has(id) && statusOf.get(id) !== 'approved');
+    if (unfinished.length) return result('waiting', 'Waiting', unfinished.length === 1 ? `Needs ${titleOf.get(unfinished[0]) ?? unfinished[0]} first` : `Needs ${unfinished.length} results first`);
+    if (kind === 'definition') return result('waiting', 'Not agreed yet', 'Agree on it before you finish');
+    return result('waiting', 'Not started', 'Ready to start');
+  }
 
   const edges: GraphEdgeView[] = [];
   for (const { node } of research) {
@@ -156,7 +215,35 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       return { id: node.id, title: node.title, required: node.required, uncovered: node.required && !node.sections.length, cells };
     });
 
-  const attention = computeAttention({ state, nodes: byId, sections, uncovered, required });
+  // Main results: how much of what they rest on is done.
+  const prerequisites = new Map<string, string[]>();
+  for (const edge of edges) if (edge.type !== 'refutes') prerequisites.set(edge.from, [...(prerequisites.get(edge.from) ?? []), edge.to]);
+  for (const id of required) {
+    const main = byId.get(id);
+    if (!main) continue;
+    const seen = new Set([id]);
+    const queue = [id];
+    while (queue.length) for (const next of prerequisites.get(queue.shift()!) ?? []) if (!seen.has(next)) { seen.add(next); queue.push(next); }
+    main.closure = { done: [...seen].filter((item) => byId.get(item)?.progress === 'done').length, total: seen.size };
+  }
+
+  const health = computeLoopHealth({ state, nodes: byId, edges, required, now: input.now });
+  if (health.key === 'stalled' && state?.current.assetId) {
+    const current = byId.get(state.current.assetId);
+    if (current && current.progress === 'working') Object.assign(current, { progress: 'stalled', progressLabel: 'Agent stopped', progressDetail: 'No activity from the agent' });
+  }
+  const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, recheck: input.recheck, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
+  // The loop itself can be what waits on the researcher: an agent gone quiet, a pause, or a stopped loop's reasons that are not nodes.
+  if (health.key === 'stalled' || health.key === 'paused') {
+    attention.unshift({ key: `loop:${health.key}`, priority: 0, category: 'loop', title: health.headline.replace(/\.$/, ''), reason: health.body, why: health.key === 'stalled' ? 'No agent is working on the research.' : 'The loop does not move while it is paused.', ifIgnored: health.ifIgnored, blocks: [], sections: [], buttons: health.buttons });
+  }
+  if (health.key === 'stopped') {
+    for (const [index, blocker] of health.blockers.entries()) {
+      if (blocker.target && attention.some((item) => item.target === blocker.target)) continue;
+      attention.unshift({ key: `loop:blocker:${index}`, priority: 0, category: 'loop', title: blocker.title, reason: '', why: blocker.detail, ifIgnored: 'The loop stays stopped.', ...(blocker.target ? { target: blocker.target } : {}), blocks: [], sections: [], buttons: blocker.buttons });
+    }
+  }
+  const history = buildHistory(input.events ?? [], (id) => byId.get(id)?.title ?? id, (id) => byId.get(id)?.type ?? '');
 
   return {
     generatedAt: input.now,
@@ -165,18 +252,38 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     projectApproved: input.projectApproved,
     ...(state ? { loop: { status: state.status, stage: state.stage, ...(state.current.assetId ? { assetId: state.current.assetId } : {}) } } : {}),
     ...(manuscript ? { manuscriptState: manuscript.impact.state } : {}),
-    nodes, edges, attention, sections, coverage,
+    nodes, edges, attention, sections, coverage, health, history,
   };
 }
 
+const STATEMENT_LIMIT = 4000;
+
+function citedOf(node: ResearchNode): { cited?: GraphNodeView['cited'] } {
+  if (isCited(node.source)) return { cited: { kind: node.source!.kind, ...(node.source!.paper_id ? { paper: node.source!.paper_id } : {}), ...(node.source!.location ? { location: node.source!.location } : {}) } };
+  return node.origin === 'library' ? { cited: { kind: 'library' } } : {};
+}
+
+/** "From smith2021, Thm 3.2" */
+function citationText(cited: NonNullable<GraphNodeView['cited']>): string {
+  if (cited.kind === 'library') return 'From the literature';
+  return `From ${cited.paper ?? `a ${cited.kind}`}${cited.location ? `, ${cited.location}` : ''}`;
+}
+
+
+/** The statement as written above the proof, without its heading or managed blocks. */
+function statementOf(body: string): string {
+  const text = stripManagedBlocks(statementPart(body)).replace(/^## (?:Statement|Definition)[ \t]*\r?\n/m, '').trim();
+  return text.length > STATEMENT_LIMIT ? `${text.slice(0, STATEMENT_LIMIT)}…` : text;
+}
+
 /** Read everything the Graph tab needs through the loop file interface. */
-export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths, nodes: ResearchNode[], state: LoopState | undefined): Promise<GraphPayload> {
+export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths, nodes: ResearchNode[], state: LoopState | undefined, events: Array<Record<string, unknown>> = [], recheck: Record<string, string> = {}): Promise<GraphPayload> {
   const project = await files.readFile(paths.projectMd).catch(() => '');
   const approvals = (await readApprovals(files, paths.researchRoot).catch(() => ({ records: [] }))).records;
   const manuscript = await loadManuscriptModel(files, paths).catch(() => undefined);
   return buildGraphPayload({
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
-    state, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(),
+    state, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck,
   });
 }
 

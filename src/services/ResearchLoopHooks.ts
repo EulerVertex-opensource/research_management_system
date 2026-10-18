@@ -2,6 +2,7 @@ import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
 import { LOOP_COMMAND } from './AgentProviders';
+import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/layout';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
 export interface HookInput {
@@ -74,7 +75,7 @@ export function researchReads(paths: ProjectPaths, input: HookInput, root?: stri
   const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
   if (command) for (const match of command.matchAll(/[\w./-]+/g)) raw.push(match[0]);
   const shared = sharedFolders(paths.researchRoot);
-  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks, ...(paths.library ? [paths.library] : [])];
+  const folders = [paths.assets, paths.definitions, paths.plans, paths.ideas, paths.papers, shared.checks, shared.candidates, ...(paths.library ? [paths.library] : [])];
   const result = new Set<string>();
   for (const value of raw) {
     let relative = value.replace(/\\/g, '/');
@@ -88,12 +89,46 @@ export function researchReads(paths: ProjectPaths, input: HookInput, root?: stri
   return [...result];
 }
 
+/** A path a write creates, with the full content when the tool supplies it. */
+interface Creation { target: string; isDir?: boolean; content?: string; fromShell?: boolean }
+
 /**
- * Deny agent writes that would forge an approval or touch loop-internal files.
- * Library files may be added and edited like any research file (git keeps the
- * history); only setting them approved is the researcher's.
+ * Paths a write-type call would create. Edits and deletes of existing files
+ * are not creations: moving content out of a misplaced file stays possible.
  */
-export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
+function creationsOf(input: HookInput, isShell: boolean): Creation[] {
+  const tool = input.tool_input ?? {};
+  const created: Creation[] = [];
+  const name = (input.tool_name ?? '').toLowerCase();
+  if (/^(write|notebookedit)$/.test(name)) {
+    const target = typeof tool.file_path === 'string' ? tool.file_path : typeof tool.notebook_path === 'string' ? tool.notebook_path : undefined;
+    if (target) created.push({ target, content: name === 'write' && typeof tool.content === 'string' ? tool.content : undefined });
+  }
+  const patch = typeof tool.patch === 'string' ? tool.patch : typeof tool.input === 'string' ? tool.input : !isShell && typeof tool.command === 'string' ? tool.command : '';
+  for (const block of patch.split(/^(?=\*\*\* )/m)) {
+    const add = /^\*\*\* Add File: (.+)$/m.exec(block);
+    if (add) created.push({ target: add[1].trim(), content: block.split('\n').slice(1).filter((line) => line.startsWith('+')).map((line) => line.slice(1)).join('\n') });
+    const move = /^\*\*\* Move to: (.+)$/m.exec(block);
+    if (move) created.push({ target: move[1].trim() });
+  }
+  if (isShell) {
+    const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
+    for (const match of command.matchAll(/[\w./-]+\.[A-Za-z][A-Za-z0-9]*\b/g)) created.push({ target: match[0], fromShell: true });
+    for (const match of command.matchAll(/\bmkdir\s+([^;&|<>\n]+)/g)) {
+      for (const arg of match[1].trim().split(/\s+/)) if (arg && !arg.startsWith('-')) created.push({ target: arg.replace(/^['"]|['"]$/g, ''), isDir: true, fromShell: true });
+    }
+  }
+  return created;
+}
+
+/**
+ * Deny agent writes that would forge an approval or touch loop-internal files,
+ * and writes that would put a file outside the research layout. Library files
+ * may be added and edited like any research file (git keeps the history);
+ * only setting them approved is the researcher's. `exists` (project-relative)
+ * lets a shell command still read, move, or delete a misplaced file.
+ */
+export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?: string, exists: (relative: string) => boolean = () => false): ToolDecision {
   const tool = (input.tool_name ?? '').toLowerCase();
   const writes = /write|edit|patch|shell|bash|notebook/.test(tool);
   if (!writes) return { deny: false };
@@ -126,6 +161,12 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   }
   if (isShell && shellWrites && /status:\s*['"]?approved/.test(text) && (text.includes(paths.assets) || text.includes(paths.definitions))) {
     return { deny: true, reason: 'Research loop: shell commands may not set status: approved on assets or definitions.' };
+  }
+  for (const creation of isShell && !shellWrites && !/\bmkdir\b/.test(text) ? [] : creationsOf(input, isShell)) {
+    const relative = projectRelative(creation.target, root);
+    if (!relative || (creation.fromShell && exists(relative))) continue;
+    const problem = layoutProblem(paths, relative, creation.isDir) ?? (creation.content !== undefined ? folderNoteProblem(paths, relative, creation.content) : undefined);
+    if (problem) return { deny: true, reason: `Research layout: ${problem}` };
   }
   return { deny: false };
 }
