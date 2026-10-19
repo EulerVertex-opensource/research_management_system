@@ -64,9 +64,10 @@ export function StatusCard({ payload, onAction, onNavigate, onShow }: Props) {
           <ActionRow buttons={health.buttons} onAction={onAction} onNavigate={onNavigate} large />
         </div>
       )}
-      {health.last && (
-        <div style={{ flex: '1 1 100%', borderTop: `1px solid ${tint(color, 40)}`, paddingTop: 8, fontSize: 12, color: COLOR.muted }}>
-          Last step{when(health.last.at) ? ` · ${when(health.last.at)}` : ''} — <span style={{ color: 'var(--vscode-foreground)' }}>{health.last.text}</span>
+      {(health.last || health.agentAt) && (
+        <div style={{ flex: '1 1 100%', borderTop: `1px solid ${tint(color, 40)}`, paddingTop: 8, fontSize: 12, color: COLOR.muted, display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
+          {health.last && <span style={{ flex: '999 1 320px', minWidth: 0 }}>Last step{when(health.last.at) ? ` · ${when(health.last.at)}` : ''} — <span style={{ color: 'var(--vscode-foreground)' }}>{health.last.text}</span></span>}
+          {health.agentAt && when(health.agentAt) && <span title="The agent's last tool call, command, or turn end">Agent last active · {when(health.agentAt)}</span>}
         </div>
       )}
     </section>

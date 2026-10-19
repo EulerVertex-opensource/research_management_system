@@ -397,6 +397,57 @@ test('loop health: an agent quiet for 20 minutes is reported as stopped, with a 
   assert.match(result.buttons[0].action.prompt, /research-loop next/);
 });
 
+test('loop health: only the agent’s own record says it is working; the extension’s saves do not', () => {
+  const at = (time) => `2026-10-12T${time}:00Z`;
+  const run = (agent, patch = {}, now = at('10:31')) => computeLoopHealth({ state: loopState({ stage: 'execute', current: { assetId: 'reduction', stageStartedAt: at('10:00') }, updatedAt: at('10:30'), ...patch }), agent, nodes: healthNodes, edges: healthEdges, required: ['main', 'sharp'], now });
+  // Without a record (an older driver) a fresh save still reads as work, as before.
+  assert.equal(run(undefined).key, 'working');
+  // The agent handed back at 10:29; the researcher's edit saved the state at 10:30.
+  const ended = run({ turn: 'ended', at: at('10:29'), endedBy: 'stop' });
+  assert.equal(ended.key, 'agent_idle');
+  assert.equal(ended.tone, 'warning');
+  assert.equal(ended.headline, 'No agent is working on the loop right now.');
+  assert.match(ended.body, /^The agent ended its turn while proving Reduction\./);
+  assert.equal(ended.agentAt, at('10:29'));
+  assert.deepEqual(ended.chain, ['reduction', 'main']);
+  assert.match(ended.buttons[0].action.prompt, /research-loop next/);
+  assert.match(run({ turn: 'ended', at: at('10:29'), endedBy: 'session_end' }).body, /^The agent chat session ended/);
+  // In a turn and recently active: working, and the card says when.
+  const working = run({ turn: 'open', at: at('10:29') });
+  assert.equal(working.key, 'working');
+  assert.equal(working.agentAt, at('10:29'));
+  // Quiet past the threshold, nothing in flight: it may have stopped (an interrupt leaves no signal).
+  const quiet = run({ turn: 'open', at: at('10:24') });
+  assert.equal(quiet.key, 'agent_idle');
+  assert.equal(quiet.signature, 'agent_idle:quiet');
+  // A long command in flight is work, until it is as old as a stall.
+  assert.equal(run({ turn: 'open', at: at('10:24'), tool: { name: 'Bash', startedAt: at('10:24') } }).key, 'working');
+  // Silent for 20 minutes despite the extension's save at 10:30: stalled.
+  assert.equal(run({ turn: 'open', at: at('10:05'), tool: { name: 'Bash', startedAt: at('10:05') } }).key, 'stalled');
+});
+
+test('loop health: started or resumed from the dashboard, no agent has picked the loop up', () => {
+  const at = (time) => `2026-10-12T${time}:00Z`;
+  const run = (agent) => computeLoopHealth({ state: loopState({ runningSince: at('10:20'), updatedAt: at('10:20') }), agent, nodes: healthNodes, edges: healthEdges, required: ['main', 'sharp'], now: at('10:21') });
+  const waiting = run(undefined);
+  assert.equal(waiting.key, 'agent_idle');
+  assert.equal(waiting.headline, 'The loop is on, but no agent has picked it up yet.');
+  assert.match(waiting.body, /^Next: searching for Sharpness example\./);
+  assert.equal(run({ turn: 'open', at: at('09:00') }).key, 'agent_idle', 'activity from before the resume does not count');
+  assert.equal(run({ turn: 'open', at: at('10:20') }).key, 'working');
+});
+
+test('no agent working: the current result is not drawn as in progress and the loop leads the attention list', () => {
+  const files = memoryFiles({ 'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft' }), 'research/assets/second.md': node('theorem', { title: 'Second', status: 'draft' }) });
+  const state = { status: 'running', stage: 'search', current: { assetId: 'main', stageStartedAt: '2026-10-12T10:00:00Z', search: { mode: 'refute', round: 1, slots: [] } }, parked: {}, approvalQueue: [], answers: [], updatedAt: '2026-10-12T10:00:00Z' };
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state, agent: { turn: 'ended', at: '2026-10-12T10:01:00Z', endedBy: 'stop' }, manuscript: undefined, sectionsDir: 'sections', now: '2026-10-12T10:02:00Z' });
+  assert.equal(payload.health.key, 'agent_idle');
+  const main = payload.nodes.find((item) => item.id === 'main');
+  assert.deepEqual(main.flags, []);
+  assert.equal(main.progressLabel, 'No agent working');
+  assert.equal(payload.attention[0].key, 'loop:agent_idle');
+});
+
 test('loop health: a review on the main path, a pause at the continuation limit, and plain work', () => {
   const review = health(loopState({ approvalQueue: [{ id: 'r1', kind: 'asset', target: 'key', digest: 'd', reason: '', requestedAt: '1' }] }));
   assert.equal(review.key, 'needs_you');

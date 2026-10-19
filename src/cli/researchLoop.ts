@@ -5,6 +5,8 @@ import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { HookInput, contextOutput, denyOutput, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { hasContextPack } from '../services/ResearchContext';
+import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
+import { AGENT_PROVIDERS } from '../services/AgentProviders';
 import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
@@ -59,7 +61,7 @@ const USAGE = `Usage: research-loop <command> [options]
   sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
   migrate-approvals   (split research/approvals.json into one file per approved target)
   restore-approvals   (re-apply status: approved where the researcher's approval record still matches the content)
-  hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop>   (reads hook JSON on stdin)
+  hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd>   (reads hook JSON on stdin)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
 async function readStdin(): Promise<string> {
@@ -214,6 +216,10 @@ async function runHook(event: string, args: Args): Promise<void> {
   try { core = await openCore(root); } catch { return; }
   const state = core.current;
   const session = input.session_id;
+  // Liveness for the dashboard: only a running loop's agent, and never a stale driver.
+  const note = (signal: AgentSignal) => (state?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), signal) : Promise.resolve());
+  const shellTool = state ? AGENT_PROVIDERS[state.provider]?.shellTool : undefined;
+  const toolPhase = (phase: 'start' | 'end') => (shellTool && input.tool_name === shellTool ? { name: shellTool, phase } : undefined);
   switch (event) {
     case 'SessionStart':
     case 'UserPromptSubmit': {
@@ -233,9 +239,12 @@ async function runHook(event: string, args: Args): Promise<void> {
       process.stdout.write(contextOutput(event, brief) + '\n');
       await core.consumeAnswers();
       await core.touch(session);
+      // A prompt starts a turn; opening a chat does not.
+      if (event === 'UserPromptSubmit') await note({ kind: 'active', sessionId: session });
       return;
     }
     case 'PostToolUse': {
+      await note({ kind: 'active', sessionId: session, tool: toolPhase('end'), throttle: true });
       // Audit only: note research files read outside the current context pack.
       if (!state || state.status !== 'running') return;
       const paths = await loadProjectPaths(root);
@@ -243,6 +252,7 @@ async function runHook(event: string, args: Args): Promise<void> {
       return;
     }
     case 'PreToolUse': {
+      await note({ kind: 'active', sessionId: session, tool: toolPhase('start'), throttle: true });
       const paths = await loadProjectPaths(root);
       const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
       if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
@@ -258,16 +268,23 @@ async function runHook(event: string, args: Args): Promise<void> {
       try { const next = await core.next(); instruction = next.blocked ? undefined : next.instruction; } catch { instruction = undefined; }
       const decision = stopDecision(core.current, input, instruction);
       if (decision.capReached) {
+        await note({ kind: 'ended', by: 'stop', sessionId: session });
         await core.pause(`Autopilot stopped after ${state.autopilot.iterationCap} automatic continuations in this session. To shed accumulated context, resume in a fresh chat (Claude Code: /clear; Codex: a new thread) with the research-loop skill; the loop rebuilds from the files.`);
         return;
       }
-      if (!decision.block) { await core.touch(session); return; }
+      // The agent hands control back: say so, rather than counting its last breath as activity.
+      if (!decision.block) { await core.touch(session); await note({ kind: 'ended', by: 'stop', sessionId: session }); return; }
       const key = session ?? 'unknown';
       const record = state.autopilot.sessions[key] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
       record.blocks += 1; record.lastSignature = stageSignature(state); record.lastBlockAt = new Date().toISOString();
       state.autopilot.sessions[key] = record;
       await core.touch(session);
+      await note({ kind: 'active', sessionId: session });
       process.stdout.write(stopBlockOutput(decision.reason ?? 'Continue the research loop.') + '\n');
+      return;
+    }
+    case 'SessionEnd': {
+      await note({ kind: 'ended', by: 'session_end', sessionId: session });
       return;
     }
     default:
@@ -295,6 +312,9 @@ async function main(): Promise<void> {
   const core = await openCore(root, cap, git);
   const session = typeof args.flags.session === 'string' ? args.flags.session : undefined;
   const out = (value: unknown) => process.stdout.write((typeof value === 'string' ? value : JSON.stringify(value, null, 2)) + '\n');
+  // The agent drives the loop through these commands: each is a sign of life (status is also what a researcher runs in a terminal).
+  const alive = () => (command !== 'status' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
+  await alive();
   switch (command) {
     case 'status': {
       if (json) out(core.statusSummary());
@@ -311,6 +331,7 @@ async function main(): Promise<void> {
     case 'start': {
       const provider = args.flags.provider === 'codex' ? 'codex' : 'claude';
       await core.start(provider, { goal: typeof args.flags.goal === 'string' ? args.flags.goal : undefined, sessionId: session, force: args.flags.force === true });
+      await alive();
       const next = await core.next();
       out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Started (${provider}). ${next.instruction}`);
       return;
@@ -318,11 +339,12 @@ async function main(): Promise<void> {
     case 'extend': {
       const provider = args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined;
       await core.extend(text(args.flags.goal, 'goal'), { provider, sessionId: session, force: args.flags.force === true });
+      await alive();
       const next = await core.next();
       out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Extending the project. ${next.instruction}`);
       return;
     }
-    case 'resume': { await core.resume({ sessionId: session, provider: args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined, force: args.flags.force === true }); const next = await core.next(); out(json ? { ...core.statusSummary(), instruction: next.instruction } : next.instruction); return; }
+    case 'resume': { await core.resume({ sessionId: session, provider: args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined, force: args.flags.force === true }); await alive(); const next = await core.next(); out(json ? { ...core.statusSummary(), instruction: next.instruction } : next.instruction); return; }
     case 'pause': { await core.pause(); out('Paused.'); return; }
     case 'stop': { await core.stop(); out('Stopped.'); return; }
     case 'next': {

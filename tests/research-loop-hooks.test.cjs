@@ -15,6 +15,7 @@ function load(file) {
 
 const { stopDecision, preToolUseDecision } = load('../src/services/ResearchLoopHooks.ts');
 const { newState, stageSignature } = load('../src/services/ResearchLoopModel.ts');
+const { nextAgentActivity } = load('../src/services/AgentActivity.ts');
 const paths = { researchRoot: 'research', projectMd: 'research/project.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans' };
 
 function running(patch = {}) {
@@ -74,6 +75,22 @@ test('PreToolUse protects split approvals, shared decision records, and raw git 
   assert.equal(deny({ tool_name: 'Bash', tool_input: { command: 'node .agents/skills/research-loop/scripts/research-loop.cjs sync pull' } }), false);
 });
 
+test('agent activity: turns open and end, a command in flight is tracked, tool hooks are throttled', () => {
+  const t = (seconds) => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
+  const open = nextAgentActivity(undefined, { kind: 'active', sessionId: 's' }, t(0));
+  assert.deepEqual(open, { turn: 'open', at: t(0), sessionId: 's' });
+  assert.equal(nextAgentActivity(open, { kind: 'active', sessionId: 's', throttle: true }, t(10)), undefined);
+  assert.equal(nextAgentActivity(open, { kind: 'active', sessionId: 's', throttle: true }, t(40)).at, t(40));
+  const shell = nextAgentActivity(open, { kind: 'active', sessionId: 's', tool: { name: 'Bash', phase: 'start' }, throttle: true }, t(5));
+  assert.deepEqual(shell.tool, { name: 'Bash', startedAt: t(5) });
+  assert.deepEqual(nextAgentActivity(shell, { kind: 'active', throttle: false }, t(6)).tool, shell.tool, 'other activity keeps the command in flight');
+  assert.equal(nextAgentActivity(shell, { kind: 'active', sessionId: 's', tool: { name: 'Bash', phase: 'end' }, throttle: true }, t(7)).tool, undefined);
+  const ended = nextAgentActivity(shell, { kind: 'ended', by: 'stop', sessionId: 's' }, t(8));
+  assert.deepEqual(ended, { turn: 'ended', at: t(8), endedBy: 'stop', sessionId: 's' });
+  assert.equal(nextAgentActivity(open, { kind: 'ended', by: 'session_end', sessionId: 'other' }, t(9)), undefined, 'another chat closing is not the driver ending');
+  assert.equal(nextAgentActivity(open, { kind: 'ended', by: 'session_end', sessionId: 's' }, t(9)).endedBy, 'session_end');
+});
+
 const cli = path.resolve(__dirname, '../out/research-loop.cjs');
 test('hook entry point blocks Stop while running and stays silent otherwise', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-hook-'));
@@ -94,8 +111,22 @@ test('hook entry point blocks Stop while running and stays silent otherwise', ()
     assert.equal(context.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
     assert.match(context.hookSpecificOutput.additionalContext, /stage draft_project/);
     assert.equal(JSON.parse(hook('SessionStart', {}).stdout).hookSpecificOutput.hookEventName, 'SessionStart');
+    const agent = () => JSON.parse(fs.readFileSync(path.join(root, '.research-assistant-loop/agent.json'), 'utf8'));
+    assert.equal(agent().turn, 'open');
     assert.equal(hook('Stop', { stop_hook_active: true }).stdout, ''); // no progress since the last block
+    assert.deepEqual([agent().turn, agent().endedBy], ['ended', 'stop'], 'handing back is recorded, not counted as activity');
+    hook('UserPromptSubmit', {});
+    assert.equal(agent().turn, 'open');
+    hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'sleep 1' } });
+    assert.equal(agent().tool.name, 'Bash');
+    hook('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'sleep 1' } });
+    assert.equal(agent().tool, undefined);
+    hook('SessionEnd', { session_id: 'someone-else' });
+    assert.equal(agent().turn, 'open');
+    hook('SessionEnd', {});
+    assert.deepEqual([agent().turn, agent().endedBy], ['ended', 'session_end']);
     assert.ok(blocked(hook('Stop', {})));
+    assert.equal(agent().turn, 'open', 'a Stop that sends the agent on keeps the turn open');
     assert.equal(hook('Stop', {}).stdout, ''); // cap reached -> paused
     assert.match(fs.readFileSync(path.join(root, '.research-assistant-loop/state.json'), 'utf8'), /"status": "paused"/);
     const deny = hook('PreToolUse', { tool_name: 'Write', tool_input: { file_path: path.join(root, 'research/assets/a.md'), content: 'status: approved' } });

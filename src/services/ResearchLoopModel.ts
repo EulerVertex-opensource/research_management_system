@@ -42,6 +42,8 @@ export const SYNC_PATH = `${STATE_DIR}/sync.json`;
  * because an older engine misreads newer files (e.g. split approvals).
  */
 export const DRIVER_PATH = `${STATE_DIR}/driver.json`;
+/** Whether an agent is in a turn right now; written only from the agent's side (see AgentActivity). */
+export const AGENT_PATH = `${STATE_DIR}/agent.json`;
 /** Local loop policy (auto mode, limits) the researcher sets in the dashboard; the agent may not write it. */
 export const LOOP_SETTINGS_PATH = `${STATE_DIR}/settings.json`;
 /** Results auto mode must leave to the researcher, e.g. after a dependency changed under an approval. */
@@ -118,6 +120,8 @@ export interface LoopState {
   /** Set with stage `waiting`: what the researcher must resolve; `lastError` holds the same as text for the agent. */
   waitingOn?: WaitingReason[];
   startedAt: string;
+  /** When status last became running (start, resume, or an extension of a stopped loop); an agent silent since then has not picked it up. */
+  runningSince?: string;
   updatedAt: string;
 }
 
@@ -213,6 +217,6 @@ export function newState(provider: AgentProvider, runId: string, now: string, it
   return {
     version: 2, runId, provider, status: 'running', stage: 'select',
     current: { stageStartedAt: now }, progress: {}, parked: {}, answers: [], approvalQueue: [],
-    autopilot: { iterationCap, sessions: {} }, lastError: null, startedAt: now, updatedAt: now,
+    autopilot: { iterationCap, sessions: {} }, lastError: null, startedAt: now, runningSince: now, updatedAt: now,
   };
 }

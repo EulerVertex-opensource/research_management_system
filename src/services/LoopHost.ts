@@ -9,7 +9,8 @@ import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
 import { ResearchLoopCore } from './ResearchLoopCore';
 import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
-import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { AGENT_PATH, AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { readAgentActivity } from './AgentActivity';
 import { LoopSettings } from '../models/settings';
 import { normalizeLoopSettings } from '../domain/loopSettings';
 import { readLoopSettings, writeLoopSettings } from './LoopSettingsStore';
@@ -58,7 +59,7 @@ const AUTO_SYNC_MIN_GAP_MS = 60_000;
 /** How often the loop's health is re-derived, so an agent that went quiet shows up without any file change. */
 const HEALTH_CHECK_MS = 60_000;
 const HEALTH_ICON: Record<LoopHealth['key'], string> = {
-  idle: '$(beaker)', goals: '$(bell)', working: '$(sync~spin)', needs_you: '$(bell)', set_aside: '$(warning)', stopped: '$(error)', stalled: '$(debug-disconnect)', paused: '$(debug-pause)', done: '$(check)',
+  idle: '$(beaker)', goals: '$(bell)', working: '$(sync~spin)', needs_you: '$(bell)', set_aside: '$(warning)', stopped: '$(error)', stalled: '$(debug-disconnect)', agent_idle: '$(debug-disconnect)', paused: '$(debug-pause)', done: '$(check)',
 };
 
 /**
@@ -74,6 +75,7 @@ export class LoopHost implements vscode.Disposable {
   private readonly statusBar: vscode.StatusBarItem;
   private watcher: vscode.FileSystemWatcher | undefined;
   private settingsWatcher: vscode.FileSystemWatcher | undefined;
+  private agentWatcher: vscode.FileSystemWatcher | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
   private busy: Promise<unknown> = Promise.resolve();
   private readonly interactions = new Map<string, Promise<ToolResult>>();
@@ -132,6 +134,11 @@ export class LoopHost implements vscode.Disposable {
     this.settingsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, LOOP_SETTINGS_PATH));
     const settingsRefresh = () => { void this.guardLoopSettings().then(() => { this.settingsChanged.fire(); this.stateChanged.fire(); }); };
     this.settingsWatcher.onDidChange(settingsRefresh); this.settingsWatcher.onDidCreate(settingsRefresh); this.settingsWatcher.onDidDelete(settingsRefresh);
+    // The agent writes this on its tool calls: redraw only when the health it implies changes.
+    this.agentWatcher?.dispose();
+    this.agentWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, AGENT_PATH));
+    const agentRefresh = () => { void this.refreshStatusBar(); };
+    this.agentWatcher.onDidChange(agentRefresh); this.agentWatcher.onDidCreate(agentRefresh); this.agentWatcher.onDidDelete(agentRefresh);
     if (first) void this.migrateLoopSettings().then(() => this.guardLoopSettings());
     void this.startBridge();
     void this.refreshStatusBar();
@@ -155,6 +162,7 @@ export class LoopHost implements vscode.Disposable {
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.watcher?.dispose();
     this.settingsWatcher?.dispose();
+    this.agentWatcher?.dispose();
     this.settingsChanged.dispose();
     this.synced.dispose();
     this.statusBar.dispose();
@@ -573,7 +581,8 @@ export class LoopHost implements vscode.Disposable {
     const nodes = new Map<string, HealthNode>(all.map((node) => [node.id, { title: node.title || node.id, type: node.type, ...(typeof node.refutes === 'string' ? { refutes: node.refutes } : {}), counts: { failedPlans: failed.get(node.id) ?? 0 }, ...(node.origin === 'library' || isCited(node.source) ? { cited: true } : {}) }]));
     const edges = all.flatMap((node) => [...(node.depends_on ?? []), ...(node.uses_definitions ?? [])].map((to) => ({ from: node.id, to })));
     const project = this.paths ? await this.files.readFile(this.paths.projectMd).catch(() => '') : '';
-    return computeLoopHealth({ state, nodes, edges, required: requiredAssetIds(project), now: new Date().toISOString() });
+    const agent = await readAgentActivity(this.files);
+    return computeLoopHealth({ state, agent, nodes, edges, required: requiredAssetIds(project), now: new Date().toISOString() });
   }
 
   private async refreshStatusBar(): Promise<void> {

@@ -134,8 +134,10 @@ export interface SectionView {
 /**
  * What the loop is doing and whose turn it is, for the status card on top of
  * the Overview, the status bar, and the popups. Derived, never stored.
+ * `agent_idle`: the loop runs but no agent is in a turn (none picked it up,
+ * it handed back, or it went quiet); `stalled`: quiet for far longer.
  */
-export type LoopHealthKey = 'idle' | 'goals' | 'working' | 'needs_you' | 'set_aside' | 'stopped' | 'stalled' | 'paused' | 'done';
+export type LoopHealthKey = 'idle' | 'goals' | 'working' | 'needs_you' | 'set_aside' | 'stopped' | 'stalled' | 'agent_idle' | 'paused' | 'done';
 export type LoopTone = 'neutral' | 'info' | 'warning' | 'error' | 'success';
 
 /** One numbered reason the loop cannot continue. */
@@ -156,6 +158,8 @@ export interface LoopHealth {
   buttons: AttentionButton[];
   /** The agent's last reported step. */
   last?: { at: string; text: string };
+  /** The agent's last sign of life while the loop runs (its own hooks, commands, and tool calls). */
+  agentAt?: string;
   statusBar: { text: string; level: 'normal' | 'warning' | 'error' };
   /** Stable while the situation is the same; a change in it may deserve a popup. */
   signature: string;

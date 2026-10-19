@@ -1,4 +1,5 @@
 import type { LoopState } from '../services/ResearchLoopModel';
+import type { AgentActivity } from '../services/AgentActivity';
 import type { AttentionButton, LoopBlocker, LoopHealth } from '../models/graph';
 import {
   CONTINUE_PROMPT, acceptLabel, approvalTitle, capitalize, elapsed, listTitles, parkClause, plural, stageText,
@@ -8,8 +9,9 @@ import {
  * Whose turn it is and why, derived from the loop state and the research graph;
  * never stored, so it cannot drift. One answer per situation, checked in this
  * order: not running, paused, a question, the goals, stopped (nothing
- * actionable), done, the agent gone quiet, a result set aside on a main
- * result's path, a review a main result waits on, and plain work.
+ * actionable), done, no agent in a turn (none picked the loop up, it handed
+ * back, or it went quiet), a result set aside on a main result's path, a
+ * review a main result waits on, and plain work.
  */
 
 /** `cited`: taken from the literature (a cited source or a library result); checking it never holds up the research. */
@@ -24,9 +26,14 @@ export interface HealthInput {
   now: string;
   /** No loop activity for this long while a stage runs means the agent has stopped. */
   stallMinutes?: number;
+  /** The agent's own liveness record. Without one (an older driver), any save of the loop state counts as activity. */
+  agent?: AgentActivity;
+  /** No sign of the agent for this long, with no command in flight, means it may have stopped. */
+  quietMinutes?: number;
 }
 
 export const STALL_MINUTES = 20;
+export const QUIET_MINUTES = 5;
 
 const openNode = (id: string, label = 'Open'): AttentionButton => ({ label, action: { action: 'openNode', id }, kind: 'secondary' });
 
@@ -76,7 +83,11 @@ export function computeLoopHealth(input: HealthInput): LoopHealth {
   const mainTitles = (id: string) => mainsOf(id).map(title);
   const verb = (subjects: string[], singular: string, many: string) => (subjects.length === 1 ? singular : many);
 
-  const base = { chain: [] as string[], blockers: [] as LoopBlocker[], buttons: [] as AttentionButton[], body: '', ...(state?.lastSummary ? { last: { at: state.lastSummary.at, text: state.lastSummary.summary } } : {}) };
+  const base = {
+    chain: [] as string[], blockers: [] as LoopBlocker[], buttons: [] as AttentionButton[], body: '',
+    ...(state?.lastSummary ? { last: { at: state.lastSummary.at, text: state.lastSummary.summary } } : {}),
+    ...(state?.status === 'running' && input.agent ? { agentAt: input.agent.at } : {}),
+  };
 
   if (!state || state.status === 'idle' || state.status === 'stopped') {
     return { ...base, key: 'idle', turn: 'nobody', tone: 'neutral', eyebrow: 'Research loop', headline: 'The research loop is not running.',
@@ -182,17 +193,45 @@ export function computeLoopHealth(input: HealthInput): LoopHealth {
       ifIgnored: 'Nothing else happens.', statusBar: { text: 'Research: all main results done — add a goal?', level: 'normal' }, signature: 'ready' };
   }
 
+  // Whether an agent is in a turn. Only the agent's own record counts (its hooks, commands, and tool calls):
+  // the extension saves the loop state too (a researcher's edit, a setting), and that is not the agent working.
   const now = Date.parse(input.now);
-  const activity = Math.max(...[state.updatedAt, state.lock?.heartbeatAt, state.lastSummary?.at].map((value) => (value ? Date.parse(value) : NaN)).filter(Number.isFinite));
-  if (Number.isFinite(now) && Number.isFinite(activity) && now - activity >= (input.stallMinutes ?? STALL_MINUTES) * 60000) {
+  const agent = input.agent;
+  const chain = state.current.assetId ? pathToMain(state.current.assetId) : [];
+  const continueButton: AttentionButton = { label: 'Copy “continue” and open chat', action: { action: 'agent', prompt: CONTINUE_PROMPT }, kind: 'primary' };
+  const agentIdle = (variant: string, eyebrow: string, headline: string, body: string, ifIgnored: string): LoopHealth => ({
+    ...base, key: 'agent_idle', turn: 'nobody', tone: 'warning', eyebrow, headline, body, chain, buttons: [continueButton], ifIgnored,
+    statusBar: { text: 'Research: no agent is working — continue in chat', level: 'normal' }, signature: `agent_idle:${variant}` });
+  const runningSince = state.runningSince ? Date.parse(state.runningSince) : NaN;
+  const agentAt = agent ? Date.parse(agent.at) : NaN;
+  // Started or resumed from the dashboard: running, but nobody has continued it in a chat yet.
+  if (Number.isFinite(runningSince) && !(agentAt >= runningSince)) {
+    return agentIdle('waiting', 'Loop on · no agent yet', 'The loop is on, but no agent has picked it up yet.',
+      `Next: ${doing}. Continue in the agent chat; the agent picks up from the research files.`, 'Nothing moves until an agent continues the loop.');
+  }
+  if (agent?.turn === 'ended') {
+    return agentIdle('ended', 'Loop on · no agent working', 'No agent is working on the loop right now.',
+      `The agent ${agent.endedBy === 'session_end' ? 'chat session ended' : 'ended its turn'} while ${doing}. Nothing is lost: continue in the agent chat and it picks up from there.`,
+      'Nothing moves until an agent continues the loop.');
+  }
+  const activity = Math.max(...(agent ? [agent.at, state.lastSummary?.at] : [state.updatedAt, state.lock?.heartbeatAt, state.lastSummary?.at])
+    .map((value) => (value ? Date.parse(value) : NaN)).filter(Number.isFinite));
+  const quietFor = Number.isFinite(now) && Number.isFinite(activity) ? now - activity : 0;
+  if (quietFor >= (input.stallMinutes ?? STALL_MINUTES) * 60000) {
     const since = elapsed(activity, now);
     return { ...base, key: 'stalled', turn: 'nobody', tone: 'error', eyebrow: 'Nobody is working right now',
       headline: `The agent stopped responding ${since} ago.`,
       body: `It was ${doing}. The loop is fine and nothing is lost; the agent’s chat session most likely ended or reached its turn limit.`,
-      chain: state.current.assetId ? pathToMain(state.current.assetId) : [],
-      buttons: [{ label: 'Copy “continue” and open chat', action: { action: 'agent', prompt: CONTINUE_PROMPT }, kind: 'primary' }],
+      chain, buttons: [continueButton],
       ifIgnored: 'Nothing moves. The research stays where it is.',
       statusBar: { text: `Research: the agent stopped ${since} ago`, level: 'error' }, signature: `stalled:${state.current.stageStartedAt}` };
+  }
+  // An interrupted turn or a closed chat leaves no signal; a command in flight is work, not silence.
+  const quietMinutes = input.quietMinutes ?? QUIET_MINUTES;
+  if (agent && !agent.tool && quietFor >= quietMinutes * 60000) {
+    return agentIdle('quiet', 'The agent may have stopped', `The agent has been quiet for over ${quietMinutes} minutes.`,
+      `It was ${doing}. If you interrupted it or closed its chat, continue there; a long computation looks the same.`,
+      'If the agent is still working, it carries on; otherwise nothing moves.');
   }
 
   const setAside = Object.entries(state.parked)

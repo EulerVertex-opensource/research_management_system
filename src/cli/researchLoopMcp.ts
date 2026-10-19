@@ -3,8 +3,9 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import * as os from 'os';
-import { BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry } from '../services/ResearchLoopModel';
+import { BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, STATE_PATH } from '../services/ResearchLoopModel';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths } from './nodeFiles';
+import { noteAgentActivity } from '../services/AgentActivity';
 import { IDEA_KIND_LIST, toIdeaKind } from '../domain/nodeKinds';
 
 /**
@@ -70,9 +71,13 @@ async function forward(root: string, name: string, args: Record<string, unknown>
 async function callTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const root = await projectRoot();
   if (!root) return { ok: false, answered: false, reason: 'no .research-assistant.json found and no running Research Assistant extension' };
+  // Only an agent calls these tools: a sign of life for the dashboard while the loop runs.
+  const files = new NodeLoopFiles(root);
+  const running = await files.readFile(STATE_PATH).then((text) => (JSON.parse(text) as { status?: string }).status === 'running').catch(() => false);
+  if (running) await noteAgentActivity(files, { kind: 'active', throttle: true });
   if (name === 'ask_researcher' || name === 'request_approval' || name === 'await_answer') return forward(root, name, args);
   const paths = await loadProjectPaths(root);
-  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths);
+  const core = new ResearchLoopCore(files, paths);
   await core.load();
   if (name === 'record_idea') {
     const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];

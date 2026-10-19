@@ -234,6 +234,7 @@ export class ResearchLoopCore {
     }
     if (options.provider) state.provider = options.provider;
     if (options.sessionId && !this.heartbeat(options.sessionId, options.force)) throw new Error(`Another session (${state.lock?.sessionId}) is driving this loop. Pass --force to take over.`);
+    if (state.status !== 'running') state.runningSince = this.now();
     state.status = 'running';
     state.lastError = null;
     state.researcherInput = { kind: 'goals', text: goal.trim(), at: this.now() };
@@ -290,6 +291,7 @@ export class ResearchLoopCore {
     const state = this.require();
     if (options.provider) state.provider = options.provider;
     if (options.sessionId && !this.heartbeat(options.sessionId, options.force)) throw new Error(`Another session (${state.lock?.sessionId}) is driving this loop. Pass --force to take over.`);
+    if (state.status !== 'running') state.runningSince = this.now();
     state.status = 'running';
     state.lastError = null;
     await this.save();
