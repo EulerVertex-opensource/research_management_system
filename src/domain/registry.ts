@@ -111,26 +111,64 @@ export function libraryProblems(nodes: RegistryNode[], layout: NodeLayout): stri
 export interface LibraryHit { id: string; kind: ResultKind; collection?: string; type: string; status: string; title: string; summary: string; score: number }
 export interface SearchableNode { id: string; file: string; data: Record<string, any>; body: string }
 
-const words = (text: string) => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-const firstParagraph = (body: string) => body.replace(/^#+ .*$/gm, '').trim().split(/\n\s*\n/)[0]?.replace(/\s+/g, ' ').slice(0, 200) ?? '';
+/** Words that match nearly every statement and so rank nothing. */
+const STOP_WORDS = new Set('a an and are as at be by every for from if in is it its let of on or that the then there this to under we with'.split(' '));
 
 /**
- * Rank library nodes against free-text words: title words count most, then
- * tags, then the statement. With no words, every node matches (a listing).
+ * One search word: lowercased, plural dropped, British spelling folded into
+ * American (neighbourhoods → neighborhood, normalised → normalized, centre →
+ * center), so a paper's spelling does not hide it from the project's.
+ */
+export function searchWord(word: string): string {
+  let w = word.toLowerCase();
+  if (w.length > 4 && w.endsWith('ies')) w = `${w.slice(0, -3)}y`;
+  else if (w.length > 4 && /(s|x|z|ch|sh)es$/.test(w)) w = w.slice(0, -2);
+  else if (w.length > 3 && w.endsWith('s') && !/(ss|us|is)$/.test(w)) w = w.slice(0, -1);
+  return w.replace(/([^aeiou])our/g, '$1or').replace(/is(e|ed|es|ing|ation|ations)$/, 'iz$1').replace(/([bt])re$/, '$1er');
+}
+
+/** Normalized search words of a text, without stop words. */
+export const searchWords = (text: string): string[] => (text.match(/[\p{L}\p{N}]+/gu) ?? []).map(searchWord).filter((word) => !STOP_WORDS.has(word));
+const firstParagraph = (body: string) => body.replace(/^#+ .*$/gm, '').trim().split(/\n\s*\n/)[0]?.replace(/\s+/g, ' ').slice(0, 200) ?? '';
+
+/** The normalized words of a node, by where they occur. */
+export function searchFields(node: SearchableNode): { title: Set<string>; tags: Set<string>; statement: Set<string>; id: Set<string> } {
+  return {
+    title: new Set(searchWords(String(node.data.title ?? ''))),
+    tags: new Set(list(node.data.tags).flatMap(searchWords)),
+    statement: new Set(searchWords(node.body.split(/^## Proof\b/m)[0])),
+    id: new Set(searchWords(node.id.replace(/_/g, ' '))),
+  };
+}
+
+/**
+ * How well a node matches normalized terms: title words count most, then
+ * tags, then the statement and the ID. `weight` scales each term (rare terms
+ * up, common ones down); without it every term counts once.
+ */
+export function searchScore(node: SearchableNode, terms: string[], weight: (term: string) => number = () => 1): number {
+  const fields = searchFields(node);
+  let score = 0;
+  for (const term of terms) score += weight(term) * ((fields.title.has(term) ? 3 : 0) + (fields.tags.has(term) ? 2 : 0) + (fields.statement.has(term) ? 1 : 0) + (fields.id.has(term) ? 1 : 0));
+  return score;
+}
+
+/** The summary a search hit shows: the first paragraph of the body, cut short. */
+export const searchSummary = (body: string): string => firstParagraph(body);
+
+/**
+ * Rank library nodes against free-text words. With no words, every node
+ * matches (a listing).
  */
 export function searchLibrary(nodes: SearchableNode[], layout: NodeLayout, query: string, options: { type?: string; collection?: string; limit?: number } = {}): LibraryHit[] {
-  const terms = [...new Set(words(query))];
+  const terms = [...new Set(searchWords(query))];
   const hits: LibraryHit[] = [];
   for (const node of nodes) {
     const location = locateNodeFile(node.file, layout);
     if (location?.origin !== 'library') continue;
     if (options.collection && location.collection !== options.collection) continue;
     if (options.type && node.data.type !== options.type) continue;
-    const title = new Set(words(String(node.data.title ?? '')));
-    const tags = new Set(list(node.data.tags).flatMap(words));
-    const statement = new Set(words(node.body.split(/^## Proof\b/m)[0]));
-    let score = 0;
-    for (const term of terms) score += (title.has(term) ? 3 : 0) + (tags.has(term) ? 2 : 0) + (statement.has(term) ? 1 : 0) + (node.id.includes(term) ? 1 : 0);
+    const score = searchScore(node, terms);
     if (terms.length && !score) continue;
     hits.push({ id: node.id, kind: location.kind, collection: location.collection, type: String(node.data.type ?? '?'), status: String(node.data.status ?? '-'), title: String(node.data.title ?? node.id), summary: firstParagraph(node.body), score });
   }

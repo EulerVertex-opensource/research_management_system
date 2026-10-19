@@ -206,6 +206,54 @@ test('library search ranks by title, tags, and statement, and promote copies a r
   assert.deepEqual(await f.core.validateAll(), []);
 });
 
+test('library search folds plurals and British spelling and ignores stop words', async () => {
+  const f = fixture({
+    [`${LIB}/lib_neighbourhoods.md`]: node('theorem', 'Canonical neighbourhoods through surgeries', {}, '## Statement\n\nHigh curvature points have canonical neighbourhoods.\n'),
+    [`${LIB}/lib_other.md`]: node('lemma', 'A lemma on the flow and the metric', {}, '## Statement\n\nThe metric is smooth.\n'),
+  });
+  assert.deepEqual((await f.core.librarySearch('canonical neighborhood surgery')).map((hit) => hit.id), ['lib_neighbourhoods']);
+  assert.deepEqual((await f.core.librarySearch('the surgery')).map((hit) => hit.id), ['lib_neighbourhoods'], '"the" no longer matches every title');
+});
+
+test('the plan pack lists library analogues; an adapting plan must say what transfers, and execute reads the adapted proof', async () => {
+  const f = fixture({
+    [`${LIB}/lib_known.md`]: node('lemma', 'Known lemma', {}, '## Statement\n\nGadgets exist.\n'),
+    [`${LIB}/lib_analogue.md`]: node('theorem', 'Blue widget theorem for gadgets', {}, '## Statement\n\nEvery gadget widget is blue.\n\n## Proof\n\nANALOGUE PROOF.\n'),
+    [`${LIB}/lib_unrelated.md`]: node('lemma', 'Trace lemma', {}, '## Statement\n\nTraces exist.\n'),
+  });
+  await f.core.start('claude', { goal: 'Prove the main theorem.' });
+  f.map.set(paths.projectMd, project);
+  await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  await f.core.resolveApproval(f.core.current.approvalQueue.find((item) => item.kind === 'project').id, 'approved', '', 'test');
+  assert.equal((await f.core.next()).stage, 'scaffold');
+  f.map.set('research/assets/main_theorem.md', node('theorem', 'Blue widget theorem', { depends_on: ['lib_known'], tags: ['colour'] }, '## Statement\n\nEvery widget is blue.\n'));
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await f.core.next()).stage, 'search');
+  await searchNothing(f);
+  assert.equal(f.core.current.stage, 'plan');
+
+  const planPack = (await f.core.contextPack()).text;
+  assert.match(planPack, /### Library analogues \(not in depends_on\)/);
+  assert.match(planPack, /- lib_analogue \(thesis, draft\): Blue widget theorem for gadgets — Every gadget widget is blue\./);
+  assert.doesNotMatch(planPack, /- lib_known /, 'a dependency is already in the pack, not an analogue');
+  assert.doesNotMatch(planPack, /lib_unrelated/);
+  assert.doesNotMatch(planPack, /ANALOGUE PROOF/, 'the plan stage reads an analogue proof on request');
+
+  const planFile = (adapted = '') => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [ ] As in lib_analogue, with widgets for gadgets.\n\n## Verification\n\nThe one step is the statement.\n\n## Assumed definitions\n\nNone.\n${adapted}`, { type: 'plan', title: 'Adapt', status: 'pending', target_asset: 'main_theorem', inspired_by: [], adapts: ['lib_analogue'], tags: [] });
+  f.map.set('research/plans/attempt_1.md', planFile());
+  await assert.rejects(f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' }), /## Adapted from must name lib_analogue/);
+  f.map.set('research/plans/attempt_1.md', matter.stringify(matter(planFile()).content, { ...matter(planFile()).data, adapts: ['lib_missing'] }));
+  await assert.rejects(f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' }), /adapts unknown result lib_missing/);
+  f.map.set('research/plans/attempt_1.md', planFile('\n## Adapted from\n\n- lib_analogue: its hypotheses hold for widgets; no step changes.\n'));
+  await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_1' });
+  assert.equal(f.core.current.stage, 'execute');
+
+  const executePack = (await f.core.contextPack()).text;
+  assert.match(executePack, /### asset lib_analogue — .*\n[^]*ANALOGUE PROOF/, 'execute reads the full proof it adapts');
+  assert.doesNotMatch(executePack, /Library analogues/);
+});
+
 test('the dashboard lists library results in their own view, with a batch approve for drafts', () => {
   const React = require('react');
   const { renderToStaticMarkup } = require('react-dom/server');

@@ -26,6 +26,8 @@ export interface IdeaNodeData extends NodeBase {
 }
 export interface PlanNodeData extends NodeBase {
   type: 'plan'; status: PlanStatus; target_asset: string; inspired_by?: string[];
+  /** Results (often library ones) whose proof the plan follows with changes; not dependencies, since their statements are not used. */
+  adapts?: string[];
   /** Stamped by the loop on success: digest of the target's `## Proof` this plan produced. */
   proof_digest?: string;
 }
@@ -35,14 +37,14 @@ export type NodeData = ResultNodeData | DefinitionNodeData | IdeaNodeData | Plan
  * Relation fields each kind may carry. Only forward relations are stored;
  * reverse ones (used in, plans of, refuted by) are derived by `reverseRelations`.
  */
-export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'refutes', 'derived_from'] as const;
+export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'adapts', 'refutes', 'derived_from'] as const;
 /** Relations that hold one node ID rather than a list. */
 const SINGLE_RELATIONS = new Set(['target_asset', 'refutes', 'derived_from']);
 export const NODE_RELATIONS: Record<NodeKind, readonly string[]> = {
   asset: ['depends_on', 'uses_definitions', 'refutes', 'derived_from'],
   definition: ['depends_on', 'derived_from'],
   idea: ['related_assets'],
-  plan: ['target_asset', 'inspired_by'],
+  plan: ['target_asset', 'inspired_by', 'adapts'],
 };
 /** Fields older schemas stored that v2 derives or dropped. */
 export const RETIRED_FIELDS = ['used_in', 'kind'] as const;

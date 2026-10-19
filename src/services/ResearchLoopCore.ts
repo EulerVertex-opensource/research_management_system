@@ -1753,10 +1753,10 @@ export class ResearchLoopCore {
         return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
         const requested = state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined;
-        return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID).`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report('complete --plan <id>|question')}`;
+        return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `First check the pack's library analogues: a known result proving a version of this statement can be adapted (list it under adapts) instead of proving from scratch. Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with an adapted result also ## Adapted from; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID).`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report('complete --plan <id>|question')}`;
       }
       case 'execute':
-        return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft), then set the plan status succeeded and add ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
+        return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. A result the plan adapts comes with its proof in the pack: follow it and check each changed step, rather than proving the step anew. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft), then set the plan status succeeded and add ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
       case 'waiting':
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
@@ -1878,6 +1878,12 @@ export class ResearchLoopCore {
           const section = sectionContent(parseMarkdown(raw).content, 'Difference from failed plans');
           const missing = failed.filter((id) => !section.includes(id));
           if (missing.length) problems.push(`${file}: ## Difference from failed plans must mention ${missing.join(', ')}.`);
+        }
+        const adapted = sectionContent(parseMarkdown(raw).content, 'Adapted from');
+        for (const id of Array.isArray(data.adapts) ? data.adapts : []) {
+          if (typeof id !== 'string' || !knownAssets.has(id)) problems.push(`${file}: adapts unknown result ${String(id)}.`);
+          else if (id === data.target_asset) problems.push(`${file}: a plan cannot adapt its own target.`);
+          else if (data.status === 'pending' && !adapted.includes(id)) problems.push(`${file}: ## Adapted from must name ${id}, with the hypotheses that transfer and the steps that change.`);
         }
       }
       const isDefinition = locateNodeFile(file, this.paths)?.kind === 'definition';

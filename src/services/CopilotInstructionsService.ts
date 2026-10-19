@@ -55,7 +55,7 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 ## Research rules
 
 - Ideas use \`type: idea\`, \`status: ${alternatives(IDEA_STATUS_LIST)}\`, \`idea_kind: ${alternatives(IDEA_KIND_LIST)}\`, optional \`related_assets\`, and freeform prose; they need no target or checklist.
-- Plans use \`type: plan\`, \`status: ${alternatives(PLAN_STATUS_LIST)}\`, one \`target_asset\`, optional \`inspired_by\` idea IDs, and Goal, Plan checkboxes, and Verification. Failed means a documented mathematical obstruction under \`## Failure\`, not that the asset is false. Succeeded means the proof is in the asset and \`## Outcome\` says where.
+- Plans use \`type: plan\`, \`status: ${alternatives(PLAN_STATUS_LIST)}\`, one \`target_asset\`, optional \`inspired_by\` idea IDs, optional \`adapts\` result IDs whose proof the plan follows with changes (named under \`## Adapted from\`), and Goal, Plan checkboxes, and Verification. Failed means a documented mathematical obstruction under \`## Failure\`, not that the asset is false. Succeeded means the proof is in the asset and \`## Outcome\` says where.
 - Create a new plan inspired by an idea instead of replacing that idea.
 - When asked to prove an asset, read its pending linked plans, follow and update one plan's checkboxes, and record any mathematical obstruction under Failure. Put a successful proof in the asset, then set the plan status to succeeded with an Outcome.
 - New or materially edited assets and definitions must have \`status: draft\`. Only a researcher promotes them. New ideas start \`draft\`; new plans start \`pending\`.
@@ -100,6 +100,7 @@ status: ${alternatives(NODE_STATUS_LIST)} (assets/definitions); ${alternatives(I
 idea_kind: ${alternatives(IDEA_KIND_LIST)} (ideas)
 target_asset: asset_id (plans)
 inspired_by: [idea_id, ...] (plans)
+adapts: [asset_or_lib_id, ...] (plans)
 tags: [string, ...]
 source:
   kind: ${alternatives(SOURCE_KIND_LIST)}
