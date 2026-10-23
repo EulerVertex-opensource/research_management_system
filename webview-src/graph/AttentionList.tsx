@@ -1,16 +1,16 @@
 import React, { useState } from 'react';
-import type { AttentionButton, AttentionItem, AttentionPriority, GraphAction, HistoryEntry } from '../../src/models/graph';
-import { CHAT_BUTTON_HINT, URGENCY_HINT, URGENCY_LABEL } from '../../src/domain/copy';
+import type { AttentionButton, AttentionPriority, GraphAction, HistoryEntry } from '../../src/models/graph';
+import { CHAT_BUTTON_HINT } from '../../src/domain/copy';
 import { CITED_COLOR, COLOR, TONE_COLOR } from './colors';
 
-const GROUP_COLOR: Record<AttentionPriority, string> = { 0: COLOR.error, 1: COLOR.waiting, 2: COLOR.link, 3: CITED_COLOR, 4: COLOR.muted };
+export const GROUP_COLOR: Record<AttentionPriority, string> = { 0: COLOR.error, 1: COLOR.waiting, 2: COLOR.link, 3: CITED_COLOR, 4: COLOR.muted };
 
 export function buttonStyle(kind: AttentionButton['kind']): React.CSSProperties {
   const primary = kind === 'primary';
   return {
-    padding: '3px 10px', fontSize: 12, borderRadius: 3, cursor: 'pointer', border: primary ? '1px solid transparent' : '1px solid var(--vscode-panel-border)',
-    background: primary ? 'var(--vscode-button-background)' : 'var(--vscode-button-secondaryBackground)',
-    color: primary ? 'var(--vscode-button-foreground)' : 'var(--vscode-button-secondaryForeground)',
+    padding: '3px 10px', fontSize: 12, borderRadius: 4, cursor: 'pointer', border: primary ? '1px solid transparent' : `1px solid ${COLOR.border}`,
+    background: primary ? COLOR.solid : COLOR.card,
+    color: primary ? '#ffffff' : 'var(--vscode-foreground)',
   };
 }
 
@@ -39,7 +39,7 @@ export function ActionRow({ buttons, onAction, onNavigate, extra, large }: { but
     <>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: large ? 'stretch' : 'center', flexDirection: large ? 'column' : 'row' }}>
         {buttons.map((button) => (
-          <button key={button.label} style={{ ...buttonStyle(button.kind), ...(large ? { padding: '5px 12px', fontSize: 13 } : {}) }} title={button.action.action === 'agent' ? CHAT_BUTTON_HINT : undefined}
+          <button key={button.label} style={{ ...buttonStyle(button.kind), ...(large ? { padding: '5px 12px', fontSize: 13 } : {}) }} title={button.hint ?? (button.action.action === 'agent' ? CHAT_BUTTON_HINT : undefined)}
             onClick={() => {
               if (button.needsText) { setAsking(button); setText(''); }
               else if (button.action.action === 'openNode') onNavigate(button.action.id);
@@ -65,55 +65,7 @@ export function ActionRow({ buttons, onAction, onNavigate, extra, large }: { but
 
 const linkButton: React.CSSProperties = { padding: '3px 4px', border: 'none', background: 'transparent', color: COLOR.link, fontSize: 12, cursor: 'pointer' };
 
-interface Props {
-  items: AttentionItem[];
-  onAction: (action: GraphAction) => void;
-  /** Point at a node on the graph. */
-  onShow: (id: string) => void;
-  onSection: (id: string) => void;
-  /** Show a node in the dashboard's own detail view (preview and metadata) rather than a text editor. */
-  onNavigate: (id: string) => void;
-}
-
-function Item({ item, onAction, onShow, onSection, onNavigate }: { item: AttentionItem } & Omit<Props, 'items'>) {
-  return (
-    <article style={{ border: `1px solid ${COLOR.border}`, padding: '9px 12px', borderRadius: 6, background: 'var(--vscode-editorWidget-background, transparent)', display: 'flex', flexDirection: 'column', gap: 5 }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>{item.title}</span>
-        {item.since && <span style={{ fontSize: 11, color: COLOR.muted, whiteSpace: 'nowrap' }}>{when(item.since)}</span>}
-      </div>
-      {item.reason && <div style={{ fontSize: 12, whiteSpace: 'pre-wrap', color: COLOR.muted }}>{item.reason}</div>}
-      {item.why && <div style={{ fontSize: 12 }}><span style={{ color: COLOR.muted }}>Why it matters: </span>{item.why}</div>}
-      {item.ifIgnored && <div style={{ fontSize: 12 }}><span style={{ color: COLOR.muted }}>If you do nothing: </span>{item.ifIgnored}</div>}
-      <div style={{ marginTop: 3 }}>
-        <ActionRow buttons={item.buttons} onAction={onAction} onNavigate={onNavigate} extra={<>
-          {item.target && <button style={linkButton} onClick={() => onShow(item.target!)}>Show on graph</button>}
-          {!item.target && item.sections.length > 0 && <button style={linkButton} onClick={() => onSection(item.sections[0])}>Show in paper coverage</button>}
-        </>} />
-      </div>
-    </article>
-  );
-}
-
-/** The Needs you list, in urgency groups. */
-export function AttentionList({ items, onAction, onShow, onSection, onNavigate }: Props) {
-  if (!items.length) return <div style={{ padding: '8px 0', opacity: 0.7, fontSize: 13 }}>Nothing needs you right now.</div>;
-  const groups = ([0, 1, 2, 3, 4] as AttentionPriority[]).map((priority) => ({ priority, entries: items.filter((item) => item.priority === priority) })).filter((group) => group.entries.length);
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {groups.map(({ priority, entries }) => (
-        <section key={priority} style={{ display: 'flex', flexDirection: 'column', gap: 8 }} aria-label={URGENCY_LABEL[priority]}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: COLOR.muted }} title={URGENCY_HINT[priority]}>
-            <span style={{ width: 8, height: 8, borderRadius: 4, background: GROUP_COLOR[priority] }} />{URGENCY_LABEL[priority]}
-          </div>
-          {entries.map((item) => <Item key={item.key} item={item} onAction={onAction} onShow={onShow} onSection={onSection} onNavigate={onNavigate} />)}
-        </section>
-      ))}
-    </div>
-  );
-}
-
-/** The "What happened" timeline, newest first. */
+/** The activity timeline, newest first. */
 export function HistoryList({ entries, onShow }: { entries: HistoryEntry[]; onShow: (id: string) => void }) {
   if (!entries.length) return <div style={{ fontSize: 12, color: COLOR.muted }}>Nothing has happened in this run yet.</div>;
   return (
@@ -129,5 +81,19 @@ export function HistoryList({ entries, onShow }: { entries: HistoryEntry[]; onSh
         </li>
       ))}
     </ol>
+  );
+}
+
+/** The Activity tab: what the agent and the researcher did, newest first. */
+export function ActivityPage({ entries, onShow }: { entries: HistoryEntry[] | undefined; onShow: (id: string) => void }) {
+  return (
+    <div style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '16px 18px 24px', background: COLOR.canvas }}>
+      <div style={{ maxWidth: 820, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Activity</h2>
+        <section style={{ border: `1px solid ${COLOR.border}`, borderRadius: 8, background: COLOR.card, padding: '12px 16px' }}>
+          {entries ? <HistoryList entries={entries} onShow={onShow} /> : <div style={{ fontSize: 13, opacity: 0.6 }}>Loading…</div>}
+        </section>
+      </div>
+    </div>
   );
 }

@@ -303,18 +303,22 @@ Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everythin
 
 | Panel | Purpose |
 |---|---|
-| **Overview** | A status card (whose turn it is, what holds the research up, what happens if you do nothing); the dependency graph read top to bottom, prerequisites above and main results below, with three views (*Why isn't it done?* per main result with finished branches folded, *Only what needs me*, *Everything*); the *Needs you* list grouped by consequence; a *What happened* timeline; paper coverage; and what a change affects |
-| **Project** | Edit the project contract, with derived status (required results, open questions, manuscript sections) above it; initialize or refresh shared setup |
+| **Overview** | What is happening now and whether you are needed: what the agent is doing, the most urgent item that waits for you (with its next two), progress on each main result, and the last few events. No graph here |
+| **Needs you** | Everything that waits for you, grouped by consequence; pick one to see why, what it holds up, and what you can do |
+| **Results** | The research structure as a list or a graph (one switch): *Still to do* per main result with finished branches folded, *Held up*, or *Everything*. A chosen result opens in a side panel, which can narrow the view to what it rests on or what rests on it, including the passages of the paper |
+| **Activity** | The full timeline of what the agent and you did |
+| **Project goals** | Edit the project contract, with derived status (required results, open questions, manuscript sections) above it; initialize or refresh shared setup |
 | **Definitions** | Browse and edit definitions and their notation, listed in dependency order |
 | **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and remark nodes |
 | **Library** | Browse known results from earlier work and papers (`lib_` IDs), and approve them in bulk |
 | **Plans** | Browse and edit proof plans, including failed and succeeded attempts |
 | **Ideas** | Browse and edit freeform research ideas |
 | **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
-| **Manuscript** | Compile the configured main TeX file and read the generated PDF inside Research Assistant |
+| **Manuscript** | Compile the configured main TeX file and read the generated PDF inside Research Assistant; *Which results it covers* shows which section presents each result and whether it is up to date |
+| **⚠ File problems** | Appears only when research files do not fit together (duplicate IDs, a dependency on a retired result); lists them and can ask the agent to fix them |
 | **⟳ Refresh** | Re-read the configuration and every research file from disk and update all panels |
 | **⇅ Sync** | Pull collaborators' changes and share yours (see [Collaboration practice](#collaboration-practice)) |
-| **⚙ Settings** | Agent, research loop (how careful, auto mode, search and effort), sync, and context-budget settings |
+| **⚙ Settings** | Display (*Show technical details*: node IDs, file paths, and the agent's raw last step; off by default), agent, research loop (how careful, auto mode, search and effort), sync, and context-budget settings |
 
 Node changes are reflected live; **Refresh** catches anything the file watchers missed. New or materially changed assets and definitions remain `draft`; only a researcher should promote them to `approved`. New directions start `draft`, and new proof plans start `pending`.
 

@@ -21,6 +21,8 @@ export type ExtensionMessage =
   | { type: 'syncState'; state: SyncBadge }
   /** Outcome of a dashboard sync that needs the researcher's attention. */
   | { type: 'notice'; notice: SyncNotice }
+  /** Problems in the research files themselves (duplicate IDs, dependency order); shown as a quiet note, not an error banner. */
+  | { type: 'problems'; problems: string[] }
   | { type: 'error'; message: string };
 
 // Messages sent from the webview to the extension

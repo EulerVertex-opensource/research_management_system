@@ -18,13 +18,13 @@ const { loadManuscriptModel, loadImpactNodes, readSectionBriefFile } = load('../
 const { lockBinding } = load('../src/domain/manuscriptImpact.ts');
 const { researchDigest } = load('../src/domain/digests.ts');
 const { computeAttention } = load('../src/domain/attention.ts');
-const { visibleGraph, transitiveReduction, impactOf, goalGraph, needsGraph, blockingStates, defaultGoal, DEFAULT_OPTIONS, MAX_VISIBLE } = load('../webview-src/graph/graphModel.ts');
+const { visibleGraph, transitiveReduction, impactOf, goalGraph, needsGraph, traceGraph, waitingItems, blockingStates, defaultGoal, DEFAULT_OPTIONS, MAX_VISIBLE } = load('../webview-src/graph/graphModel.ts');
 const { layout } = load('../webview-src/graph/layout.ts');
 const { computeLoopHealth } = load('../src/domain/loopHealth.ts');
 const { buildHistory } = load('../src/domain/history.ts');
-const views = load('../webview-src/graph/GraphTab.tsx', ['react']);
+const { OverviewPage } = load('../webview-src/graph/OverviewPage.tsx', ['react']);
+const { NeedsYouPage } = load('../webview-src/graph/NeedsYouPage.tsx', ['react']);
 const { CoverageMatrix } = load('../webview-src/graph/CoverageMatrix.tsx', ['react']);
-const { ImpactView } = load('../webview-src/graph/ImpactView.tsx', ['react']);
 const { ProgressView } = load('../webview-src/graph/ProgressView.tsx', ['react']);
 
 const paths = { researchRoot: 'research', projectMd: 'research/project.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', sections: 'sections', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections' };
@@ -239,66 +239,76 @@ test('the goal view folds finished branches; the needs view keeps only blockers 
 test('the graph views render', async () => {
   const { payload } = await fixture();
   const noop = () => {};
-  const tab = renderToStaticMarkup(React.createElement(views.GraphTab, { payload, onAction: noop, onNavigate: noop }));
-  assert.match(tab, /The agent has a question about Second/);
-  assert.match(tab, /Which norm\?/);
-  assert.match(tab, /Yes, it is a counterexample/);
-  assert.match(tab, /Update it in chat ↗/);
-  assert.match(tab, /Waiting on you now/);
-  assert.match(tab, /Holds up a main result/);
-  assert.match(tab, /If you do nothing:/);
-  assert.match(tab, /Paper:.*out of date/);
-  assert.match(tab, /Why isn’t it done\?/);
-  assert.match(renderToStaticMarkup(React.createElement(views.GraphTab, { payload: null, onAction: noop, onNavigate: noop })), /Loading/);
+  const pageProps = { onAction: noop, onNavigate: noop, onShowInResults: noop, onOpenNeeds: noop, onOpenActivity: noop, onOpenPaper: noop };
+  const overview = renderToStaticMarkup(React.createElement(OverviewPage, { payload, ...pageProps }));
+  assert.match(overview, /The agent is asking you/);
+  assert.match(overview, /The agent has a question about Second/);
+  assert.match(overview, /Which norm\?/);
+  assert.match(overview, /Waiting for you · \d+/);
+  assert.match(overview, /See all \d+ →/);
+  assert.match(overview, /The paper:.*out of date/);
+  assert.doesNotMatch(overview, /<svg/, 'the Overview draws no graph');
+  assert.doesNotMatch(overview, /If you do nothing:/, 'details stay on Needs you');
+  assert.equal((overview.match(/Answer…/g) ?? []).length, 1, 'the question’s buttons appear once');
+  assert.match(renderToStaticMarkup(React.createElement(OverviewPage, { payload: null, ...pageProps })), /Loading/);
+  const needs = renderToStaticMarkup(React.createElement(NeedsYouPage, { payload, onSelect: noop, onAction: noop, onNavigate: noop, onShowInResults: noop, onOpenPaper: noop }));
+  assert.match(needs, /Waiting on you now/);
+  assert.match(needs, /Holds up a main result/);
+  assert.match(needs, /If you do nothing/);
+  const counterexample = waitingItems(payload).find((item) => item.category === 'counterexample');
+  const chosen = renderToStaticMarkup(React.createElement(NeedsYouPage, { payload, selectedKey: counterexample.key, onSelect: noop, onAction: noop, onNavigate: noop, onShowInResults: noop, onOpenPaper: noop }));
+  assert.match(chosen, /Yes, it is a counterexample/);
+  assert.match(chosen, /Show in Results/);
   const coverage = renderToStaticMarkup(React.createElement(CoverageMatrix, { payload, onFocus: noop, onAction: noop }));
   assert.match(coverage, /Main result/);
   assert.match(coverage, /out of date/);
-  const impact = renderToStaticMarkup(React.createElement(ImpactView, { payload, selectedId: 'widget', onSelect: noop, onNavigate: noop, onAction: noop }));
-  assert.match(impact, /Passages in the paper/);
-  assert.match(impact, /main-proof/);
-  const list = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: DEFAULT_OPTIONS, onOptions: noop, selectedId: 'second', onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  const list = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: DEFAULT_OPTIONS, onOptions: noop, selectedId: 'second', onSelect: noop, onNavigate: noop, onAction: noop }));
   assert.doesNotMatch(list, /<svg/, 'results show as a list by default');
   assert.match(list, /data-result="second"/);
   assert.match(list, /2 finished results/);
-  assert.match(list, /A statement\./, 'the opened card shows the statement');
-  assert.match(list, /Show in graph/);
-  assert.match(list, />Details</);
-  const graph = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph' }, onOptions: noop, selectedId: 'second', onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  assert.match(list, /Still to do/);
+  assert.match(list, /☰ List/);
+  assert.match(list, /aria-label="Selected result"/, 'the chosen result opens in the panel next to the list');
+  assert.match(list, /A statement\./, 'the panel shows the statement');
+  assert.match(list, /What rests on it/);
+  assert.match(list, />Open</);
+  const graph = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph' }, onOptions: noop, selectedId: 'second', onSelect: noop, onNavigate: noop, onAction: noop }));
   assert.match(graph, /<svg/);
   assert.match(graph, /data-node="second"/);
   assert.match(graph, /\+ 1 more · all done/);
   assert.match(graph, /Prerequisites above, main results below/);
-  assert.match(graph, /data-card/, 'a clicked result opens its card on the graph');
-  assert.match(graph, /Show in list/);
+  assert.match(graph, /aria-label="Selected result"/, 'the graph uses the same panel');
   assert.doesNotMatch(graph, /Double-click/);
-  const everything = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph', mode: 'all' }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  const everything = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph', mode: 'all' }, onOptions: noop, onSelect: noop, onNavigate: noop, onAction: noop }));
   assert.match(everything, /data-node="helper"/);
   assert.match(everything, /4 shown/);
+});
+
+test('tracing a result narrows either display to what it rests on, or to what rests on it and the paper', async () => {
+  const { payload } = await fixture();
+  const noop = () => {};
+  assert.deepEqual(traceGraph(payload, 'widget', 'down').nodes.map((node) => node.id).sort(), impactOf(payload, 'widget').downstream.map((node) => node.id).concat('widget').sort());
+  assert.ok(traceGraph(payload, 'second', 'up').nodes.some((node) => node.id === 'widget'));
+  for (const display of ['graph', 'list']) {
+    const html = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display, trace: { id: 'widget', direction: 'down' } }, onOptions: noop, selectedId: 'widget', onSelect: noop, onNavigate: noop, onAction: noop }));
+    assert.match(html, /Showing only what rests on <b>[^<]+<\/b>/, display);
+    assert.match(html, /Show everything/, display);
+    assert.match(html, /In the paper/, display);
+    assert.match(html, /main-proof|lines \d/, display);
+  }
 });
 
 test('with many main results the goal picker stays one compact control, and an all-done project starts from everything', async () => {
   const { payload } = await fixture();
   const noop = () => {};
   const done = { ...payload, required: ['main', 'second', 'helper', 'widget'], nodes: payload.nodes.map((item) => ({ ...item, progress: 'done', inScope: true })) };
-  const start = renderToStaticMarkup(React.createElement(ProgressView, { payload: done, options: DEFAULT_OPTIONS, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  const start = renderToStaticMarkup(React.createElement(ProgressView, { payload: done, options: DEFAULT_OPTIONS, onOptions: noop, onSelect: noop, onNavigate: noop, onAction: noop }));
   assert.match(start, /aria-pressed="true"[^>]*>Everything</, 'nothing is unfinished: start from everything');
   assert.match(start, /data-result="main"/);
-  const goal = renderToStaticMarkup(React.createElement(ProgressView, { payload: done, options: { ...DEFAULT_OPTIONS, mode: 'goal' }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
+  const goal = renderToStaticMarkup(React.createElement(ProgressView, { payload: done, options: { ...DEFAULT_OPTIONS, mode: 'goal' }, onOptions: noop, onSelect: noop, onNavigate: noop, onAction: noop }));
   assert.match(goal, /<select/);
   assert.match(goal, /4 of 4 done/);
   assert.doesNotMatch(goal, /aria-pressed="false"[^>]*>[^<]*<span[^>]*><\/span><span[^>]*>★/, 'no row of goal buttons');
-});
-
-test('a neighborhood says so and always offers the way back to everything', async () => {
-  const { payload } = await fixture();
-  const noop = () => {};
-  for (const display of ['graph', 'list']) {
-    const html = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display, mode: 'all', focus: { id: 'main', depth: 1 } }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
-    assert.match(html, /Showing only the results around <b>Main<\/b>/, display);
-    assert.match(html, /Show everything/, display);
-  }
-  const goal = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, mode: 'goal', focus: { id: 'main', depth: 1 } }, onOptions: noop, onSelect: noop, onImpact: noop, onNavigate: noop, onAction: noop }));
-  assert.doesNotMatch(goal, /Showing only the results around/, 'a neighborhood narrows only the Everything view');
 });
 
 test('a result cited from a paper is marked as cited, with where it comes from', () => {
@@ -475,4 +485,14 @@ test('the timeline tells loop events in words, newest first', () => {
     ['Set Key bound aside after repeated failed proof attempts.', 'error'],
     ['Attempt 3 failed: the moment estimate loses a log factor.', 'warning'],
   ]);
+});
+
+test('text for the researcher: the loop’s vocabulary draws a reminder, mathematics does not', () => {
+  const { internalVocabulary, vocabularyReminder } = load('../src/domain/researcherText.ts');
+  assert.deepEqual(internalVocabulary('Slot 1 found no plausible counterexample; no candidates written.'), ['search slot numbers', 'loop internals (workers, packs, candidate files)']);
+  assert.deepEqual(internalVocabulary('It depends on lib_arf_surgery_construction_v4 in arf_cusp.md.'), ['file names', 'IDs (use the result’s title)']);
+  assert.deepEqual(internalVocabulary('No counterexample in this round: zero curvature violates (A2), and $x_1 \\le \\epsilon_{neck}$ fails.'), []);
+  assert.deepEqual(internalVocabulary('The estimate fails for x_1 near the cap.'), [], 'a subscript is not an ID');
+  assert.equal(vocabularyReminder('Proved the gradient bound.'), '');
+  assert.match(vocabularyReminder('Worker 2 wrote `cand_x.md`.'), /Writing for the researcher/);
 });

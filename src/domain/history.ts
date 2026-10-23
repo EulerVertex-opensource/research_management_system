@@ -2,7 +2,7 @@ import type { HistoryEntry, LoopTone } from '../models/graph';
 import { approvalTitle, parkClause, plural } from './copy';
 
 /**
- * The "What happened" timeline: loop events (events.jsonl) as sentences for
+ * The Activity timeline: loop events (events.jsonl) as sentences for
  * the researcher, newest first. Events with nothing to tell (stage `select`,
  * context bookkeeping) are left out.
  */
@@ -76,7 +76,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
 }
 
 /** Newest first, at most `limit` lines. */
-export function buildHistory(events: LoopEvent[], title: (id: string) => string, type?: (id: string) => string, limit = 12): HistoryEntry[] {
+export function buildHistory(events: LoopEvent[], title: (id: string) => string, type?: (id: string) => string, limit = 60): HistoryEntry[] {
   const lines: HistoryEntry[] = [];
   for (const event of [...events].reverse()) {
     const described = describeEvent(event, title, type);

@@ -1,22 +1,33 @@
 import type { GraphNodeView, LoopTone, NodeProgress } from '../../src/models/graph';
 
-/** Theme-aware colors: VS Code theme variables with fallbacks, so light and dark themes both read. */
+/**
+ * The design system's colors (src/webview/themeCss.ts defines the `--ra-*`
+ * tokens for light and dark), each with the VS Code theme color as fallback.
+ */
 export const COLOR = {
-  approved: 'var(--vscode-testing-iconPassed, #3fb950)',
-  draft: 'var(--vscode-descriptionForeground, #8b949e)',
-  inactive: 'var(--vscode-disabledForeground, #6e7681)',
-  waiting: 'var(--vscode-editorWarning-foreground, #d29922)',
-  active: 'var(--vscode-charts-blue, var(--vscode-focusBorder, #2f81f7))',
-  error: 'var(--vscode-errorForeground, #f85149)',
-  link: 'var(--vscode-textLink-foreground, #3794ff)',
-  card: 'var(--vscode-editorWidget-background, var(--vscode-editor-background))',
-  border: 'var(--vscode-panel-border, #444)',
-  muted: 'var(--vscode-descriptionForeground, #8b949e)',
+  approved: 'var(--ra-done, var(--vscode-testing-iconPassed, #3fb950))',
+  draft: 'var(--ra-muted, var(--vscode-descriptionForeground, #8b949e))',
+  inactive: 'var(--ra-inactive, var(--vscode-disabledForeground, #6e7681))',
+  waiting: 'var(--ra-needs, var(--vscode-editorWarning-foreground, #d29922))',
+  active: 'var(--ra-primary, var(--vscode-charts-blue, #2f81f7))',
+  error: 'var(--ra-danger, var(--vscode-errorForeground, #f85149))',
+  link: 'var(--ra-primary, var(--vscode-textLink-foreground, #3794ff))',
+  /** Page background behind the cards. */
+  canvas: 'var(--ra-canvas, var(--vscode-editor-background))',
+  /** Card surface. */
+  card: 'var(--ra-surface, var(--vscode-editorWidget-background, var(--vscode-editor-background)))',
+  /** A panel recessed within a card or beside the cards (side lists). */
+  sunken: 'var(--ra-surface-sunken, var(--vscode-sideBar-background, var(--vscode-editor-background)))',
+  border: 'var(--ra-surface-border, var(--vscode-panel-border, #444))',
+  muted: 'var(--ra-muted, var(--vscode-descriptionForeground, #8b949e))',
+  /** Solid fill behind white text (primary buttons, the selected toggle). */
+  solid: 'var(--ra-primary-solid, var(--vscode-button-background))',
+  solidHover: 'var(--ra-primary-solid-hover, var(--vscode-button-hoverBackground))',
 } as const;
 
-/** A light wash of `color` over the editor background, for fills that work in both themes. */
+/** A light wash of `color` over the card surface, for fills that work in both themes. */
 export function tint(color: string, percent = 14): string {
-  return `color-mix(in srgb, ${color} ${percent}%, var(--vscode-editor-background, #1e1e1e))`;
+  return `color-mix(in srgb, ${color} ${percent}%, ${COLOR.card})`;
 }
 
 /** One color per graph state; `dashed` marks results that cannot move yet. */
@@ -31,10 +42,10 @@ export const PROGRESS_STYLE: Record<NodeProgress, { color: string; dashed: boole
 };
 
 /** Definitions, so they read apart from results in both the list and the graph. */
-export const DEFINITION_COLOR = 'var(--vscode-terminal-ansiCyan, #11a8cd)';
+export const DEFINITION_COLOR = 'var(--ra-definition, var(--vscode-terminal-ansiCyan, #11a8cd))';
 
 /** Results taken from the literature (cited from a paper or textbook, or a library result). */
-export const CITED_COLOR = 'var(--vscode-charts-purple, #b180d7)';
+export const CITED_COLOR = 'var(--ra-cited, var(--vscode-charts-purple, #b180d7))';
 
 /**
  * A node's color and border: its state, except that a checked cited result

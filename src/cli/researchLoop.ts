@@ -15,6 +15,7 @@ import { NodeGitRunner, openGit, runShell } from './nodeGit';
 import { applyInterlinks } from '../services/ResearchInterlinks';
 import { locateNodeFile } from '../domain/registry';
 import { toIdeaKind } from '../domain/nodeKinds';
+import { vocabularyReminder } from '../domain/researcherText';
 
 declare const __EXTENSION_VERSION__: string | undefined;
 const EXTENSION_VERSION = typeof __EXTENSION_VERSION__ === 'string' ? __EXTENSION_VERSION__ : undefined;
@@ -381,7 +382,8 @@ async function main(): Promise<void> {
       if (outcome !== 'question' && !report.summary.trim()) throw new Error('--summary is required');
       const result = await core.report(report);
       await core.touch(session);
-      out(json ? { ...result, ...core.statusSummary() } : `${result.message}\nStage: ${result.stage}`);
+      const reminder = vocabularyReminder(report.summary);
+      out(json ? { ...result, ...core.statusSummary(), ...(reminder ? { reminder } : {}) } : [`${result.message}\nStage: ${result.stage}`, reminder].filter(Boolean).join('\n'));
       return;
     }
     case 'validate': {
@@ -391,7 +393,12 @@ async function main(): Promise<void> {
       if (result.problems.length && !args.flags.fix) process.exitCode = 1;
       return;
     }
-    case 'park': { await core.park(text(sub, 'asset'), text(args.flags.reason, 'reason'), typeof args.flags.note === 'string' ? args.flags.note : undefined); out(`Parked ${sub}.`); return; }
+    case 'park': {
+      const note = typeof args.flags.note === 'string' ? args.flags.note : undefined;
+      await core.park(text(sub, 'asset'), text(args.flags.reason, 'reason'), note);
+      out([`Parked ${sub}.`, vocabularyReminder(note ?? '')].filter(Boolean).join('\n'));
+      return;
+    }
     case 'unpark': { await core.unpark(text(sub, 'asset')); out(`Unparked ${sub}.`); return; }
     case 'idea': {
       if (sub === 'add') {

@@ -51,6 +51,7 @@ export interface UIState {
   splitRatio: number;     // fraction of width given to editor in split mode, 0.2–0.8
   nodeListWidth: number;  // pixel width of the node list column
   metadataHeight: number; // pixel height of the metadata pane in NodeDetail
+  showTechnical: boolean; // show IDs, file paths, and the agent's raw last step on the research pages
 }
 
 export const DEFAULT_UI_STATE: UIState = {
@@ -58,6 +59,7 @@ export const DEFAULT_UI_STATE: UIState = {
   splitRatio: 0.5,
   nodeListWidth: 240,
   metadataHeight: 220,
+  showTechnical: false,
 };
 
 export interface PaperEntry {

@@ -4,12 +4,13 @@ import { kindLabel } from '../../src/domain/copy';
 import { COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
 import type { FoldView } from './graphModel';
 import { Layout, NODE_H, NODE_W, layout } from './layout';
+import { useTechnical } from '../technical';
 
 interface Props {
   nodes: GraphNodeView[];
   edges: GraphEdgeView[];
   required: string[];
-  /** Finished branches folded into chips (the "Why isn't it done?" view). */
+  /** Finished branches folded into chips (the "Still to do" view). */
   folds?: FoldView[];
   /** What holds each result up; edges out of such a result are drawn thick in its color. */
   blocking?: Map<string, 'stuck' | 'needs_you'>;
@@ -43,6 +44,7 @@ type EdgeKind = keyof typeof EDGE;
  */
 export function GraphCanvas({ nodes, edges, required, folds = [], blocking, selectedId, highlight, onSelect, onBackground, renderCard, height = '100%' }: Props) {
   const requiredSet = useMemo(() => new Set(required), [required]);
+  const technical = useTechnical();
   const placed: Layout = useMemo(() => layout([...nodes.map((node) => ({ id: node.id, required: requiredSet.has(node.id) })), ...folds.map((fold) => ({ id: fold.id }))], edges.filter((edge) => edge.type !== 'refutes')), [nodes, folds, edges, requiredSet]);
   const box = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
@@ -184,13 +186,13 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
             return (
               <g key={node.id} data-node={node.id} transform={`translate(${at.x},${at.y})`} opacity={dim ? 0.3 : 1} style={{ cursor: 'pointer' }}
                 onClick={() => onSelect(node.id)}>
-                <title>{`${node.title}\n${node.progressLabel}${node.progressDetail ? ` · ${node.progressDetail}` : ''}\n${kindLabel(node.type)} · ${node.id}\nClick to open its card.`}</title>
+                <title>{`${node.title}\n${node.progressLabel}${node.progressDetail ? ` · ${node.progressDetail}` : ''}\n${kindLabel(node.type)} · ${node.id}\nClick to see it on the right.`}</title>
                 <foreignObject width={NODE_W} height={NODE_H}>
                   <div style={{
                     height: NODE_H, boxSizing: 'border-box', borderRadius: 6, padding: '7px 10px', display: 'flex', flexDirection: 'column', gap: 3, overflow: 'hidden',
                     background: tint(style.color, node.progress === 'waiting' || node.progress === 'inactive' ? 4 : 13),
                     border: `${isRequired ? 2 : 1.5}px ${style.dashed ? 'dashed' : 'solid'} ${style.color}`,
-                    boxShadow: selected ? '0 0 0 2px var(--vscode-focusBorder, #fff)' : undefined, color: 'var(--vscode-foreground)',
+                    boxShadow: selected ? `0 0 0 2px ${COLOR.active}` : undefined, color: 'var(--vscode-foreground)',
                   }}>
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ fontSize: 11, fontWeight: 600, padding: '0 7px', borderRadius: 9, background: tint(style.color, 30), color: 'var(--vscode-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.progressLabel}</span>
@@ -198,7 +200,7 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
                       {node.kind === 'definition' && <span style={{ fontSize: 10.5, fontWeight: 700, color: DEFINITION_COLOR, whiteSpace: 'nowrap', letterSpacing: 0.3 }}>DEFINITION</span>}
                     </span>
                     <span style={{ fontSize: detailed ? 12.5 : 14, fontWeight: 600, lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{node.title}</span>
-                    {detailed && <span style={{ fontSize: 10.5, color: COLOR.muted, fontFamily: 'var(--vscode-editor-font-family, monospace)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{kindLabel(node.type)}{node.origin === 'library' ? ' · known result' : node.cited ? ' · cited' : ''} · {node.id}</span>}
+                    {detailed && <span style={{ fontSize: 10.5, color: COLOR.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{kindLabel(node.type)}{node.origin === 'library' ? ' · known result' : node.cited ? ' · cited' : ''}{technical ? ` · ${node.id}` : ''}</span>}
                     {detailed && (node.progressDetail || closure) && (
                       <span style={{ fontSize: 11, color: node.progress === 'done' || node.progress === 'waiting' ? COLOR.muted : style.color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {node.progressDetail || (closure ? `${closure.done} of ${closure.total} parts done` : '')}
@@ -224,7 +226,7 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
         if (size.w) left = Math.max(8, Math.min(left, size.w - width - 8));
         const top = Math.max(8, size.h ? Math.min(view.y + at.y * view.k, size.h - 160) : view.y + at.y * view.k);
         return (
-          <div data-card="" style={{ position: 'absolute', left, top, width, maxHeight: size.h ? size.h - top - 8 : undefined, overflow: 'auto', zIndex: 2, borderRadius: 6, boxShadow: '0 4px 16px rgba(0,0,0,0.45)', background: 'var(--vscode-editor-background)', cursor: 'auto' }}>
+          <div data-card="" style={{ position: 'absolute', left, top, width, maxHeight: size.h ? size.h - top - 8 : undefined, overflow: 'auto', zIndex: 2, borderRadius: 6, boxShadow: '0 4px 16px rgba(0,0,0,0.25)', background: COLOR.card, cursor: 'auto' }}>
             {renderCard(selectedId)}
           </div>
         );
@@ -234,6 +236,6 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
 }
 
 export const miniButton: React.CSSProperties = {
-  padding: '2px 8px', fontSize: 12, border: '1px solid var(--vscode-panel-border)', borderRadius: 3, cursor: 'pointer',
-  background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)',
+  padding: '2px 8px', fontSize: 12, border: `1px solid ${COLOR.border}`, borderRadius: 4, cursor: 'pointer',
+  background: COLOR.card, color: 'var(--vscode-foreground)',
 };

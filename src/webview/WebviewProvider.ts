@@ -16,6 +16,7 @@ import { LoopHost } from '../services/LoopHost';
 import { SettingsService } from '../services/SettingsService';
 import { parseWritingOutline } from '../services/ManuscriptWriting';
 import { summarizeProject } from '../domain/project';
+import { THEME_CSS } from './themeCss';
 import { OverlayFiles, migrateProject, migrationReasons } from '../services/SchemaMigration';
 
 const UI_STATE_KEY = 'researchAssistant.uiState';
@@ -263,7 +264,7 @@ export class WebviewProvider {
     if (startLoop) this.loopHost.configure(paths);
   }
 
-  /** Refresh the node index and surface duplicate IDs or dependency errors once per change. */
+  /** Refresh the node index; duplicate IDs or dependency errors go to the output once per change and to the sidebar's file-problems note on every refresh. */
   private async refreshIndex(): Promise<ResearchNode[]> {
     const nodes = await this.nodeIndex!.refresh();
     const problems = this.nodeIndex!.getProblems();
@@ -271,8 +272,8 @@ export class WebviewProvider {
     if (signature !== this.reportedProblems) {
       this.reportedProblems = signature;
       for (const problem of problems) this.output.appendLine(`[nodes] ${problem}`);
-      if (problems.length) this.send({ type: 'error', message: problems.length === 1 ? problems[0] : `${problems[0]} (+${problems.length - 1} more; see the Research Assistant output)` });
     }
+    this.send({ type: 'problems', problems });
     return nodes;
   }
 
@@ -799,6 +800,7 @@ export class WebviewProvider {
   <link rel="stylesheet" href="${cssUri}" />
   <title>Research Assistant</title>
   <style>
+    ${THEME_CSS}
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #root { height: 100%; width: 100%; overflow: hidden; }
     body {
@@ -815,6 +817,8 @@ export class WebviewProvider {
     .md-preview h3 { font-size: 1.1em; font-weight: 600; margin: 0.7em 0 0.3em; }
     .md-preview h4, .md-preview h5, .md-preview h6 { font-size: 1em; font-weight: 600; margin: 0.6em 0 0.3em; }
     .md-preview p { margin: 0.5em 0; }
+    .compact-md .md-preview > :first-child { margin-top: 0; }
+    .compact-md .md-preview > :last-child { margin-bottom: 0; }
     .md-preview.md-inline { display: inline; font-size: inherit; line-height: 1.5; }
     .md-preview.md-inline p { display: inline; margin: 0; }
     .md-preview ul, .md-preview ol { padding-left: 1.6em; margin: 0.4em 0; }

@@ -85,7 +85,7 @@ export type GraphAction =
   /** The researcher read a result marked for re-check again, and it still holds. */
   | { action: 'confirmRecheck'; id: string };
 
-export interface AttentionButton { label: string; action: GraphAction; kind?: 'primary' | 'secondary'; needsText?: string }
+export interface AttentionButton { label: string; action: GraphAction; kind?: 'primary' | 'secondary'; needsText?: string; /** Tooltip saying what the button does. */ hint?: string }
 
 export interface AttentionItem {
   key: string;
@@ -165,7 +165,7 @@ export interface LoopHealth {
   signature: string;
 }
 
-/** One line of the "What happened" timeline. */
+/** One line of the Activity timeline. */
 export interface HistoryEntry { at: string; text: string; tone: LoopTone; target?: string }
 
 export interface GraphPayload {

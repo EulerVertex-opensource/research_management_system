@@ -1,4 +1,4 @@
-import type { GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView } from '../../src/models/graph';
+import type { AttentionItem, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView } from '../../src/models/graph';
 
 /**
  * Pure selection logic for the Graph tab: which nodes and edges to draw, so a
@@ -27,6 +27,8 @@ export interface ViewOptions {
   search: string;
   filter: AttentionFilter;
   focus?: { id: string; depth: number };
+  /** Only what one result rests on ("up") or what rests on it ("down"), in either display. */
+  trace?: { id: string; direction: 'up' | 'down' };
 }
 
 export const DEFAULT_OPTIONS: ViewOptions = { display: 'list', scope: 'required', showDefinitions: false, showInactive: false, search: '', filter: 'all' };
@@ -166,7 +168,7 @@ export interface FocusedGraph { nodes: GraphNodeView[]; edges: GraphEdgeView[]; 
 const PREREQUISITE = (edge: GraphEdgeView) => edge.type !== 'refutes';
 
 /**
- * "Why isn't it done?": everything `goal` rests on that is not finished, with
+ * "Still to do": everything `goal` rests on that is not finished, with
  * each fully finished branch folded into a chip under the result that uses it.
  */
 export function goalGraph(payload: GraphPayload, goal: string): FocusedGraph {
@@ -201,7 +203,16 @@ export function goalGraph(payload: GraphPayload, goal: string): FocusedGraph {
   return { nodes: [...nodes.values()], edges, folds };
 }
 
-/** "Only what needs me": results that need the researcher or are stuck, and the main results they hold up. */
+/** "What it rests on" / "What rests on it": the result and everything reachable from it in one direction, without folds. */
+export function traceGraph(payload: GraphPayload, id: string, direction: 'up' | 'down'): FocusedGraph {
+  const edges = payload.edges.filter(PREREQUISITE);
+  const { deps, dependants } = adjacency(edges);
+  const keep = reach([id], direction === 'up' ? deps : dependants);
+  const nodes = payload.nodes.filter((node) => keep.has(node.id));
+  return { nodes, edges: transitiveReduction(edges.filter((edge) => keep.has(edge.from) && keep.has(edge.to))).edges, folds: [] };
+}
+
+/** "Held up": results that need the researcher or are stuck, and the main results they hold up. */
 export function needsGraph(payload: GraphPayload): FocusedGraph {
   const edges = payload.edges.filter(PREREQUISITE);
   const { dependants } = adjacency(edges);
@@ -244,4 +255,20 @@ export function defaultGoal(payload: GraphPayload): string | undefined {
   if (chainEnd && payload.required.includes(chainEnd)) return chainEnd;
   const present = payload.required.filter((id) => payload.nodes.some((node) => node.id === id));
   return present.find((id) => payload.nodes.find((node) => node.id === id)?.progress !== 'done') ?? present[0];
+}
+
+/**
+ * Everything that waits for the researcher, most urgent first: the Needs you
+ * items, led by any reason the stopped loop gives that no item covers (a
+ * missing definition, a dependency cycle).
+ */
+export function waitingItems(payload: GraphPayload): AttentionItem[] {
+  const covered = new Set(payload.attention.map((item) => item.target).filter(Boolean));
+  const extra = payload.health.key !== 'stopped' ? [] : payload.health.blockers
+    .filter((blocker) => !blocker.target || !covered.has(blocker.target))
+    .map((blocker, index): AttentionItem => ({
+      key: `blocker:${index}:${blocker.target ?? blocker.title}`, priority: 0, category: 'loop', title: blocker.title, reason: blocker.detail,
+      why: '', ifIgnored: 'The loop stays stopped.', target: blocker.target, blocks: [], sections: [], buttons: blocker.buttons,
+    }));
+  return [...extra, ...payload.attention];
 }

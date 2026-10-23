@@ -149,3 +149,14 @@ export const CONTINUE_PROMPT = 'Continue the research loop: run research-loop ne
 
 /** Tooltip of every button that copies an instruction for the agent chat. */
 export const CHAT_BUTTON_HINT = 'Copies an instruction and opens the agent chat; paste it there.';
+
+/** The two ways on from a set-aside result: the researcher's own idea, or back to the agent unchanged (unpark). */
+export function newIdeaLabel(reason: string): string {
+  return reason === 'search_exhausted' ? 'Discuss a new direction' : 'Give the agent an idea';
+}
+
+export function keepTryingLabel(reason: string): string {
+  return reason === 'search_exhausted' ? 'Let the agent keep searching' : 'Let the agent keep trying';
+}
+
+export const KEEP_TRYING_HINT = 'No new idea from you: it goes back in the agent’s queue, and the agent tries again on its own, knowing what failed before.';

@@ -29,12 +29,28 @@ Claude Code has the identical copy under `.claude/skills/research-loop/scripts/`
 2. Do the stage. Heavy stages (`scaffold`, `sources`, `search`, `search_summary`, `verify_counterexample`, `plan`, `execute`) run in a subagent when the harness offers one: Claude Code uses the subagent `next` names (`research-worker-light` for scaffold, sources, and search_summary, `research-worker-deep` for the rest); Codex spawns an agent. Give the subagent only the stage, asset, plan, the stage skill, and the pack path, and require at most five lines back. Without a subagent, do the stage inline from the pack. Do not reread what the subagent read.
    - **`search`** is one round of an object search: `next` lists one worker pack per slot (`search-<slot>.md`, each with its own direction). Spawn one subagent per slot **in a single message** so they run in parallel, give each only its slot number and its own pack, and require at most three lines back. Do not read the packs or the candidates yourself. When every worker is done, report once for the round. Without subagents, work the slots one after another, each from its own pack.
    - A deeper counterexample search, or a wider one, is the researcher's call: the round sizes are their settings. When the researcher asks for more search on an asset (for example after proofs keep failing), run `search request <asset> [--rounds N]`; never on your own initiative. `search status <asset>` prints an asset's search board.
-3. `report <outcome> --summary "<= 5 lines" [--plan ID] [--counterexample ID]`. It validates every file written during the stage against the stage rules and advances the state. If it fails, fix exactly what it lists and report again; never work around it.
+3. `report <outcome> --summary "<= 5 lines" [--plan ID] [--counterexample ID]`, the summary written for the researcher (see [Writing for the researcher](#writing-for-the-researcher)). It validates every file written during the stage against the stage rules and advances the state. If it fails, fix exactly what it lists and report again; never work around it.
 4. Repeat until `next` says `waiting`, `ready`, or `paused`, or the autopilot cap pauses the loop. Then tell the researcher in three lines or fewer what is waiting on them. At `ready` after an extension, `next` names the new results; update the existing manuscript for those only.
 
 Stage skills: `search-object` for `search`, `search_summary`, `verify_counterexample`, and `verify_construction`; `plan-proof` for `plan`; `execute-proof` for `execute`; `extract-research-nodes`, `import-math-paper`, `research-maintenance`, and `check-notation` for `scaffold` and `sources`.
 
 The stage instruction from `next` states that stage's file rules, and `report` enforces them; this skill does not repeat them. What holds in every stage: only the files the stage names may change, new nodes stay `draft`, a proof never changes its statement, and nothing ever sets `status: approved` or touches `approvals/`, `decisions/`, or `handoffs/` (the loop writes decisions and handoffs itself).
+
+## Writing for the researcher
+
+The researcher reads, word for word on the dashboard and in popups, every `report --summary`, `request_approval` summary, `ask_researcher` question, and `park --note`. They are mathematicians, not engineers: write as to a coauthor. Subagents report to you; you rewrite their lines this way.
+
+- The first line stands alone, since the Overview and Activity show it by itself: the mathematical outcome in one sentence (what was proved, what failed and why, what is needed). At most four more lines: the reason, then what happens next.
+- Name results by title or a short description ("the a priori assumptions lemma"), never by ID or file name. Give an ID only when the researcher must type it, in parentheses after the title.
+- Leave out the loop's machinery: slots, workers, packs, stages, candidate files, outcome words, version suffixes such as `_v4`, code formatting. For a search round, say what the round as a whole found or ruled out, not what each slot did.
+- `$…$` math renders in approval summaries and park notes; report summaries and questions show as plain text, so write short formulas in words or plain symbols there. Never paste a whole statement; name the hypothesis or step that matters.
+- A set-aside result or a `blocked` question names the obstruction and the kind of idea that would get past it: a new definition, a weaker statement, a missing lemma, another approach.
+- An approval summary says what to check and where, e.g. "Check step 4, the gluing across the neck; it relies on the Hamilton–Ivey estimate."
+
+Not: `Slot 1 found no plausible boundary-degenerate counterexample; no candidates written. New round record only.`
+But: `No counterexample to cusp incompressibility in this round: zero curvature and bounded age violate the hypotheses, and threshold equality still forces the curvature scale to diverge.`
+
+`report` and `park` print a reminder when the text uses such terms. The stage still counts; write the next text better.
 
 ## Asking the researcher
 

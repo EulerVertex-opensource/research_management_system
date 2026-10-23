@@ -12,7 +12,6 @@ interface Props {
   onSelect: (id: string | undefined) => void;
   onAction: (action: GraphAction) => void;
   onDetails: (id: string) => void;
-  onShowInGraph: (id: string) => void;
 }
 
 /** Reading order of the graph: top to bottom, left to right, so prerequisites come first and main results last. */
@@ -24,31 +23,25 @@ export function readingOrder(ids: string[], edges: Array<{ from: string; to: str
   });
 }
 
-/** The graph as a vertical list of boxes; click one to open it. */
-export function ResultList({ graph, payload, selectedId, onSelect, onAction, onDetails, onShowInGraph }: Props) {
-  const [open, setOpen] = useState<Set<string>>(() => new Set(selectedId ? [selectedId] : []));
+/** The graph as a vertical list of boxes; click one to show it in the panel next to the list. */
+export function ResultList({ graph, payload, selectedId, onSelect, onAction, onDetails }: Props) {
   const [openFolds, setOpenFolds] = useState<Set<string>>(new Set());
   const refs = useRef(new Map<string, HTMLElement>());
   const byId = useMemo(() => new Map(payload.nodes.map((node) => [node.id, node])), [payload.nodes]);
   const order = useMemo(() => readingOrder([...graph.nodes.map((node) => node.id), ...graph.folds.map((fold) => fold.id)], graph.edges, payload.required), [graph, payload.required]);
 
-  // A result chosen elsewhere ("Show in list", a card's link) opens here and scrolls into view.
+  // A result chosen elsewhere ("Show in Results", the graph) scrolls into view, out of its fold if need be.
   useEffect(() => {
     if (!selectedId) return;
-    setOpen((current) => new Set([...current, selectedId]));
     const fold = graph.folds.find((item) => item.members.includes(selectedId));
     if (fold) setOpenFolds((current) => new Set([...current, fold.id]));
     const timer = setTimeout(() => refs.current.get(selectedId)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 50);
     return () => clearTimeout(timer);
   }, [selectedId]);
 
-  const toggle = (id: string) => {
-    setOpen((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-    onSelect(open.has(id) ? undefined : id);
-  };
   const card = (node: GraphNodeView) => (
-    <ResultCard key={node.id} node={node} payload={payload} expanded={open.has(node.id)} onToggle={() => toggle(node.id)} onAction={onAction} onDetails={onDetails}
-      elsewhere={{ label: 'Show in graph', onClick: () => onShowInGraph(node.id) }}
+    <ResultCard key={node.id} node={node} payload={payload} expanded={false} selected={node.id === selectedId} onToggle={() => onSelect(node.id === selectedId ? undefined : node.id)}
+      onAction={onAction} onDetails={onDetails}
       innerRef={(element: HTMLElement | null) => { if (element) refs.current.set(node.id, element); else refs.current.delete(node.id); }} />
   );
 

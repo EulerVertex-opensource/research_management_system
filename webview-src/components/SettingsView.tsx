@@ -12,6 +12,9 @@ interface Props {
   result: { requestId: string; errors: SettingsErrors } | null;
   onSave: (requestId: string, patch: SettingsPatch) => void;
   onNavigate: (id: string) => void;
+  /** Display preference, saved at once with the UI state rather than through a section's Save. */
+  showTechnical: boolean;
+  onShowTechnical: (value: boolean) => void;
 }
 
 /** One entry per auto-approve rule; a Record so a new rule without a checkbox does not compile. */
@@ -68,8 +71,8 @@ function patchFor(section: SectionId, draft: Drafts, saved: Drafts): SettingsPat
 
 // ---------- the view ----------
 
-/** Settings: which agent drives the loop, auto mode and limits, sync, and context budgets. */
-export function SettingsView({ settings, result, onSave, onNavigate }: Props) {
+/** Settings: how the dashboard shows the research, which agent drives the loop, auto mode and limits, sync, and context budgets. */
+export function SettingsView({ settings, result, onSave, onNavigate, showTechnical, onShowTechnical }: Props) {
   const [drafts, setDrafts] = useState<Drafts | null>(settings ? draftsOf(settings) : null);
   const [errors, setErrors] = useState<Partial<Record<SectionId, SettingsErrors>>>({});
   const [pending, setPending] = useState<{ requestId: string; section: SectionId } | null>(null);
@@ -124,6 +127,11 @@ export function SettingsView({ settings, result, onSave, onNavigate }: Props) {
     <div style={{ height: '100%', overflow: 'auto' }}>
       <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--vscode-panel-border)', fontSize: 13, fontWeight: 600 }}>Settings</div>
       <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 760 }}>
+
+        <Section title="Display" scope="this machine">
+          <Check checked={showTechnical} onChange={onShowTechnical}
+            label="Show technical details" hint="node IDs and file paths on results, and the agent’s own wording of its last step. Off keeps the pages in research terms." />
+        </Section>
 
         <Section title="Agent" scope="this machine">
           <Field label="Default agent" hint="The chat the status bar, commands, and dashboard open.">

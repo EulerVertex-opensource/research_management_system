@@ -1,4 +1,4 @@
-import React, { useReducer, useCallback, useEffect, useRef } from 'react';
+import React, { useReducer, useCallback, useEffect, useRef, useState } from 'react';
 import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from '../src/models/types';
 import { ExtensionMessage } from '../src/models/messages';
 import { useExtension } from './hooks/useExtension';
@@ -13,8 +13,14 @@ import { CreateNodeModal } from './components/CreateNodeModal';
 import { ManuscriptView } from './components/ManuscriptView';
 import { resolvePaperPdfLink, resolveResearchNodeLink } from './researchLinks';
 import { ASSET_TYPES, ASSET_TYPE_LIST } from '../src/domain/nodeKinds';
-import type { GraphPayload } from '../src/models/graph';
-import { GraphTab } from './graph/GraphTab';
+import type { GraphAction, GraphPayload } from '../src/models/graph';
+import { OverviewPage } from './graph/OverviewPage';
+import { NeedsYouPage } from './graph/NeedsYouPage';
+import { ProgressView } from './graph/ProgressView';
+import { ActivityPage, buttonStyle } from './graph/AttentionList';
+import { CoverageMatrix } from './graph/CoverageMatrix';
+import { DEFAULT_OPTIONS, ViewOptions, waitingItems } from './graph/graphModel';
+import { TechnicalDetails } from './technical';
 import { SettingsView } from './components/SettingsView';
 import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
 import type { SyncBadge, SyncNotice } from '../src/models/sync';
@@ -47,6 +53,7 @@ interface State {
   refreshing: boolean;
   sync: SyncBadge | null;
   notice: SyncNotice | null;
+  problems: string[];
 }
 
 type Action =
@@ -63,13 +70,15 @@ type Action =
   | { type: 'SET_REFRESHING'; refreshing: boolean }
   | { type: 'SYNC_STATE'; state: SyncBadge }
   | { type: 'SET_NOTICE'; notice: SyncNotice | null }
+  | { type: 'PROBLEMS'; problems: string[] }
   | { type: 'MANUSCRIPT_STATUS'; status: ManuscriptStatus }
   | { type: 'GRAPH_DATA'; payload: GraphPayload }
   | { type: 'SETTINGS_DATA'; settings: SettingsPayload; requestId?: string; errors?: SettingsErrors }
   | { type: 'SET_LAYOUT'; layoutMode: LayoutMode }
   | { type: 'SET_SPLIT_RATIO'; splitRatio: number }
   | { type: 'SET_NODE_LIST_WIDTH'; width: number }
-  | { type: 'SET_METADATA_HEIGHT'; height: number };
+  | { type: 'SET_METADATA_HEIGHT'; height: number }
+  | { type: 'SET_SHOW_TECHNICAL'; showTechnical: boolean };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
@@ -109,6 +118,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, sync: action.state };
     case 'SET_NOTICE':
       return { ...state, notice: action.notice };
+    case 'PROBLEMS':
+      return { ...state, problems: action.problems };
     case 'MANUSCRIPT_STATUS':
       return { ...state, manuscriptStatus: action.status };
     case 'SETTINGS_DATA':
@@ -123,6 +134,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, uiState: { ...state.uiState, nodeListWidth: action.width } };
     case 'SET_METADATA_HEIGHT':
       return { ...state, uiState: { ...state.uiState, metadataHeight: action.height } };
+    case 'SET_SHOW_TECHNICAL':
+      return { ...state, uiState: { ...state.uiState, showTechnical: action.showTechnical } };
     default:
       return state;
   }
@@ -151,10 +164,30 @@ const initialState: State = {
   refreshing: false,
   sync: null,
   notice: null,
+  problems: [],
 };
+
+/** Views drawn from the research overview payload. */
+const GRAPH_VIEWS: SidebarView[] = ['graph', 'needs', 'results', 'activity', 'manuscript'];
+
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button aria-pressed={active} onClick={onClick}
+      style={{ padding: '4px 12px', fontSize: 12, border: 'none', cursor: 'pointer', background: active ? 'var(--vscode-button-background)' : 'transparent', color: active ? 'var(--vscode-button-foreground)' : 'var(--vscode-foreground)' }}>
+      {children}
+    </button>
+  );
+}
 
 export function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  // Kept here so the Results view, the chosen Needs you item and the Manuscript tab survive switching pages.
+  const [resultsOptions, setResultsOptions] = useState<ViewOptions>(DEFAULT_OPTIONS);
+  const [resultsSelected, setResultsSelected] = useState<string | undefined>();
+  const [needsKey, setNeedsKey] = useState<string | undefined>();
+  const [manuscriptTab, setManuscriptTab] = useState<'paper' | 'coverage'>('paper');
+  const [coverageSection, setCoverageSection] = useState<string | undefined>();
+  const [showProblems, setShowProblems] = useState(false);
 
   const handleMessage = useCallback((msg: ExtensionMessage) => {
     switch (msg.type) {
@@ -194,6 +227,9 @@ export function App() {
       case 'notice':
         dispatch({ type: 'SET_NOTICE', notice: msg.notice });
         break;
+      case 'problems':
+        dispatch({ type: 'PROBLEMS', problems: msg.problems });
+        break;
       case 'error':
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
@@ -204,6 +240,8 @@ export function App() {
 
   useEffect(() => {
     send({ type: 'ready' });
+    // The sidebar's Needs you count comes from the overview payload.
+    send({ type: 'getGraph' });
   }, [send]);
 
   const handleSetView = (view: SidebarView) => {
@@ -217,13 +255,19 @@ export function App() {
     if (view === 'manuscript') {
       send({ type: 'getManuscriptStatus' });
     }
-    if (view === 'graph') {
+    if (GRAPH_VIEWS.includes(view)) {
       send({ type: 'getGraph' });
     }
     if (view === 'settings') {
       send({ type: 'getSettings' });
     }
   };
+
+  const showInResults = (id: string) => { setResultsSelected(id); handleSetView('results'); };
+  const openNeeds = (key?: string) => { setNeedsKey(key); handleSetView('needs'); };
+  const openPaper = (section?: string) => { setCoverageSection(section); setManuscriptTab('coverage'); handleSetView('manuscript'); };
+  const openNodeById = (id: string) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); };
+  const graphAction = (request: GraphAction) => send({ type: 'graphAction', request });
 
   const handleRefresh = () => {
     dispatch({ type: 'SET_REFRESHING', refreshing: true });
@@ -313,6 +357,11 @@ export function App() {
     send({ type: 'saveUIState', uiState: { ...state.uiState, splitRatio } });
   };
 
+  const handleShowTechnical = (showTechnical: boolean) => {
+    dispatch({ type: 'SET_SHOW_TECHNICAL', showTechnical });
+    send({ type: 'saveUIState', uiState: { ...state.uiState, showTechnical } });
+  };
+
   const uiStateRef = useRef(state.uiState);
   uiStateRef.current = state.uiState;
 
@@ -364,6 +413,7 @@ export function App() {
   const { layoutMode, splitRatio, nodeListWidth, metadataHeight } = state.uiState;
 
   return (
+    <TechnicalDetails.Provider value={state.uiState.showTechnical}>
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       <Sidebar
         active={state.activeView}
@@ -372,6 +422,9 @@ export function App() {
         onRefresh={handleRefresh}
         sync={state.sync}
         onSync={handleSync}
+        needsCount={state.graph ? waitingItems(state.graph).length : 0}
+        problems={state.problems.length}
+        onProblems={() => setShowProblems(!showProblems)}
       />
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
@@ -462,6 +515,20 @@ export function App() {
             </div>
           )}
 
+          {showProblems && state.problems.length > 0 && (
+            <div role="status" style={{ padding: '8px 14px', background: 'var(--vscode-inputValidation-infoBackground)', borderBottom: '1px solid var(--vscode-panel-border)', fontSize: 12, display: 'flex', gap: 10, alignItems: 'flex-start', flexShrink: 0, maxHeight: 220, overflowY: 'auto' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div>Some research files do not fit together. The research goes on, but these results may be ordered or linked wrongly until it is fixed.</div>
+                <ul style={{ margin: '4px 0 6px', paddingLeft: 18, opacity: 0.85 }}>{state.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>
+                <button style={buttonStyle('primary')} title="Copies an instruction and opens the agent chat; paste it there."
+                  onClick={() => graphAction({ action: 'agent', prompt: `The Research Assistant reports these problems in the research files:\n${state.problems.map((problem) => `- ${problem}`).join('\n')}\nExplain each in plain words and propose a fix; change nothing until I agree.` })}>
+                  Ask the agent to fix it ↗
+                </button>
+              </div>
+              <button onClick={() => setShowProblems(false)} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>✕</button>
+            </div>
+          )}
+
           {state.activeView === 'project' ? (
             <ProjectView
               content={state.projectMd}
@@ -523,20 +590,48 @@ export function App() {
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Select a node to view and edit</div>
             )
           ) : state.activeView === 'graph' ? (
-            <GraphTab
+            <OverviewPage
               payload={state.graph}
-              onAction={(request) => send({ type: 'graphAction', request })}
-              onNavigate={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
+              onAction={graphAction}
+              onNavigate={openNodeById}
+              onShowInResults={showInResults}
+              onOpenNeeds={openNeeds}
+              onOpenActivity={() => handleSetView('activity')}
+              onOpenPaper={openPaper}
               onOpenSettings={() => handleSetView('settings')}
             />
+          ) : state.activeView === 'needs' ? (
+            <NeedsYouPage payload={state.graph} selectedKey={needsKey} onSelect={setNeedsKey} onAction={graphAction} onNavigate={openNodeById} onShowInResults={showInResults} onOpenPaper={openPaper} />
+          ) : state.activeView === 'results' ? (
+            state.graph
+              ? <ProgressView payload={state.graph} options={resultsOptions} onOptions={setResultsOptions} selectedId={resultsSelected} onSelect={setResultsSelected} onNavigate={openNodeById} onAction={graphAction} />
+              : <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Loading the results…</div>
+          ) : state.activeView === 'activity' ? (
+            <ActivityPage entries={state.graph?.history} onShow={showInResults} />
           ) : state.activeView === 'settings' ? (
             <SettingsView
               settings={state.settings}
               result={state.settingsResult}
               onSave={(requestId, patch) => send({ type: 'updateSettings', requestId, patch })}
               onNavigate={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
+              showTechnical={state.uiState.showTechnical}
+              onShowTechnical={handleShowTechnical}
             />
           ) : state.activeView === 'manuscript' ? (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--vscode-panel-border)', flexShrink: 0 }}>
+              <div role="group" aria-label="Manuscript view" style={{ display: 'inline-flex', border: '1px solid var(--vscode-panel-border)', borderRadius: 4, overflow: 'hidden' }}>
+                <TabButton active={manuscriptTab === 'paper'} onClick={() => setManuscriptTab('paper')}>The paper</TabButton>
+                <TabButton active={manuscriptTab === 'coverage'} onClick={() => setManuscriptTab('coverage')}>Which results it covers</TabButton>
+              </div>
+            </div>
+            {manuscriptTab === 'coverage' ? (
+              <div style={{ flex: 1, minHeight: 0 }}>
+                {state.graph
+                  ? <CoverageMatrix payload={state.graph} highlightSection={coverageSection} onFocus={showInResults} onAction={graphAction} />
+                  : <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Loading…</div>}
+              </div>
+            ) : (
             <ManuscriptView
               status={state.manuscriptStatus}
               onBuild={() => send({ type: 'buildManuscript' })}
@@ -546,6 +641,8 @@ export function App() {
               onApplySettings={() => send({ type: 'applyLatexBuildSettings' })}
               onInstallLatexWorkshop={() => send({ type: 'installLatexWorkshop' })}
             />
+            )}
+            </div>
           ) : null}
         </div>
       </div>
@@ -567,5 +664,6 @@ export function App() {
         />
       )}
     </div>
+    </TechnicalDetails.Provider>
   );
 }

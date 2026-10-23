@@ -2,7 +2,7 @@ import type { LoopState } from '../services/ResearchLoopModel';
 import type { AgentActivity } from '../services/AgentActivity';
 import type { AttentionButton, LoopBlocker, LoopHealth } from '../models/graph';
 import {
-  CONTINUE_PROMPT, acceptLabel, approvalTitle, capitalize, elapsed, listTitles, parkClause, plural, stageText,
+  CONTINUE_PROMPT, KEEP_TRYING_HINT, acceptLabel, approvalTitle, capitalize, elapsed, keepTryingLabel, listTitles, newIdeaLabel, parkClause, plural, stageText,
 } from './copy';
 
 /**
@@ -46,8 +46,8 @@ export function newApproachPrompt(id: string, reason: string): string {
 
 export function setAsideButtons(id: string, reason: string): AttentionButton[] {
   return [
-    { label: reason === 'search_exhausted' ? 'Discuss a new direction in chat' : 'Suggest a new approach in chat', action: { action: 'agent', prompt: newApproachPrompt(id, reason) }, kind: 'primary' },
-    { label: 'Try again as is', action: { action: 'unpark', assetId: id }, kind: 'secondary' },
+    { label: newIdeaLabel(reason), action: { action: 'agent', prompt: newApproachPrompt(id, reason) }, kind: 'primary' },
+    { label: keepTryingLabel(reason), action: { action: 'unpark', assetId: id }, kind: 'secondary', hint: KEEP_TRYING_HINT },
   ];
 }
 
