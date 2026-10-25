@@ -1,0 +1,75 @@
+/* Styles for AgentConstellation.tsx, from the AI_teaching landing hero
+   (hero-constellation.css). The component sets the --hc-* colors inline from
+   the state it shows. `.hc-still` holds the mark still, fully drawn. */
+.hero-constellation {
+  position: relative;
+  display: inline-block;
+}
+
+.hero-constellation svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* Lines use pathLength="1", so a dash of 1 is the whole line whatever its
+   real length. Per-element timing comes in through --hc-delay, and each
+   route's length through --hc-cycle. */
+@keyframes hc-draw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes hc-pop {
+  0% { opacity: 0; transform: scale(0.6); }
+  100% { opacity: 1; transform: scale(1); }
+}
+/* Fades one route out at the end of its turn, before the next remounts. */
+@keyframes hc-route-fade {
+  0%, 82% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.hc-draw {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: hc-draw 0.45s ease-out var(--hc-delay, 0s) forwards;
+}
+.hc-pop {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: hc-pop 0.35s ease-out var(--hc-delay, 0s) forwards;
+}
+.hc-route-fade {
+  pointer-events: none;
+  animation: hc-route-fade var(--hc-cycle, 7s) ease-in forwards;
+}
+
+.hc-still .hc-route-fade {
+  animation: none;
+}
+.hc-still .hc-draw {
+  animation: none;
+  stroke-dashoffset: 0;
+}
+.hc-still .hc-pop {
+  animation: none;
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hc-route-fade {
+    animation: none;
+  }
+  .hc-draw {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+  .hc-pop {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

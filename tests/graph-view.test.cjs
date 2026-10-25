@@ -247,7 +247,8 @@ test('the graph views render', async () => {
   assert.match(overview, /Waiting for you · \d+/);
   assert.match(overview, /See all \d+ →/);
   assert.match(overview, /The paper:.*out of date/);
-  assert.doesNotMatch(overview, /<svg/, 'the Overview draws no graph');
+  assert.match(overview, /class="hero-constellation hc-still"/, 'the agent mark holds still while the agent asks');
+  assert.doesNotMatch(overview.replace(/<span class="hero-constellation[^"]*"[\s\S]*?<\/svg><\/span>/, ''), /<svg/, 'the Overview draws no graph beyond the agent mark');
   assert.doesNotMatch(overview, /If you do nothing:/, 'details stay on Needs you');
   assert.equal((overview.match(/Answer…/g) ?? []).length, 1, 'the question’s buttons appear once');
   assert.match(renderToStaticMarkup(React.createElement(OverviewPage, { payload: null, ...pageProps })), /Loading/);

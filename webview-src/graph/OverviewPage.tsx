@@ -5,6 +5,7 @@ import { ActionRow, GROUP_COLOR, HistoryList, when } from './AttentionList';
 import { blockingStates, waitingItems } from './graphModel';
 import { COLOR, SECTION_STATE_COLOR, SECTION_STATE_LABEL, TONE_COLOR, tint } from './colors';
 import { MarkdownPreview } from '../components/MarkdownPreview';
+import { AgentConstellation } from '../components/AgentConstellation';
 import { useTechnical } from '../technical';
 
 /**
@@ -84,7 +85,7 @@ function Now({ payload, onAction, onNavigate, onOpenSettings }: Pick<Props, 'onA
     <Block title="Now" tone={color} wash={health.tone === 'neutral' && !doing ? 4 : 9}
       aside={health.agentAt && when(health.agentAt) ? <span style={{ color: COLOR.muted }} title={health.last?.text}>Agent last active {when(health.agentAt)}</span> : undefined}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-        <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 5, marginTop: 5, flexShrink: 0, background: color, boxShadow: doing ? `0 0 0 3px ${tint(color, 25)}` : undefined }} />
+        <AgentConstellation active={Boolean(doing)} color={color} size={30} style={{ flexShrink: 0, marginTop: 2 }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
           <div style={{ fontSize: 11, color: COLOR.muted }}>{nowLabel(health)}</div>
           <div style={{ fontSize: 16, fontWeight: 600, lineHeight: 1.35 }}>{doing ?? health.headline}</div>
