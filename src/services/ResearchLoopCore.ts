@@ -176,14 +176,23 @@ export class ResearchLoopCore {
     return this.state;
   }
 
+  /**
+   * Several processes log here at once (the extension, each chat's MCP bridge,
+   * the CLI), so a line is appended, never written back with the file: a
+   * read-and-rewrite that read an empty or half-written file erased the history.
+   */
   async event(type: string, data: object = {}): Promise<void> {
+    const line = JSON.stringify({ at: this.now(), runId: this.state?.runId, type, ...data }) + '\n';
+    if (this.files.appendFile) { await this.files.appendFile(EVENTS_PATH, line); return; }
     const old = await this.files.readFile(EVENTS_PATH).catch(() => '');
-    await this.files.writeFile(EVENTS_PATH, old + JSON.stringify({ at: this.now(), runId: this.state?.runId, type, ...data }) + '\n');
+    await this.files.writeFile(EVENTS_PATH, old + line);
   }
 
-  async recentEvents(limit = 30): Promise<Array<Record<string, unknown>>> {
+  /** The last `limit` events, counting only those `keep` accepts, so bookkeeping bursts never crowd out the rest. */
+  async recentEvents(limit = 30, keep?: (event: Record<string, unknown>) => boolean): Promise<Array<Record<string, unknown>>> {
     const raw = await this.files.readFile(EVENTS_PATH).catch(() => '');
-    return raw.trim().split('\n').filter(Boolean).slice(-limit).map((line) => { try { return JSON.parse(line); } catch { return { raw: line }; } });
+    const events = raw.trim().split('\n').filter(Boolean).map((line): Record<string, unknown> => { try { return JSON.parse(line); } catch { return { raw: line }; } });
+    return (keep ? events.filter(keep) : events).slice(-limit);
   }
 
   private async setStage(stage: LoopStage, patch: Partial<LoopState['current']> = {}): Promise<void> {

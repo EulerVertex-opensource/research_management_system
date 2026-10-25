@@ -27,6 +27,8 @@ export const REPORT_OUTCOMES: readonly ReportOutcome[] = ['complete', 'none', 'c
 export const SEARCH_STAGES: ReadonlySet<LoopStage> = new Set<LoopStage>(['search', 'search_summary', 'verify_counterexample', 'verify_construction']);
 
 export const STATE_DIR = '.research-assistant-loop';
+/** Loop state is rewritten by several processes (extension, MCP bridges, CLI) while others read it, so it is replaced atomically. */
+export const isLoopStatePath = (relativePath: string) => relativePath.replace(/\\/g, '/').startsWith(`${STATE_DIR}/`);
 export const STATE_PATH = `${STATE_DIR}/state.json`;
 export const EVENTS_PATH = `${STATE_DIR}/events.jsonl`;
 export const SNAPSHOT_PATH = `${STATE_DIR}/snapshot.json`;
@@ -55,6 +57,8 @@ export interface BridgeEntry { root: string; port: number; token: string; pid: n
 export interface LoopFiles {
   readFile(relativePath: string): Promise<string>;
   writeFile(relativePath: string, content: string): Promise<void>;
+  /** Append without reading the file back, so writers in other processes never lose lines. */
+  appendFile?(relativePath: string, content: string): Promise<void>;
   exists(relativePath: string): Promise<boolean>;
   listFiles(relativeDir: string, extension?: string): Promise<string[]>;
   /** Immediate subfolders (paths relative to the project); used to discover library collections. */

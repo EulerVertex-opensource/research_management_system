@@ -25,6 +25,7 @@ import { ResearchNode } from '../models/types';
 import { GraphAction, GraphPayload, LoopHealth } from '../models/graph';
 import { collectGraphPayload } from './GraphViewModel';
 import { computeLoopHealth, HealthNode } from '../domain/loopHealth';
+import { isTimelineEvent } from '../domain/history';
 import { requiredAssetIds } from '../domain/project';
 import { acceptLabel, approvalTitle } from '../domain/copy';
 import { isCited } from '../domain/schema';
@@ -475,7 +476,8 @@ export class LoopHost implements vscode.Disposable {
     const paths = this.paths;
     let state: LoopState | undefined;
     try { state = await this.core?.load(); } catch { state = undefined; }
-    const events = this.core ? await this.core.recentEvents(80) : [];
+    // Filtered before the limit: a stage that reads many nodes logs a context_request each, which the timeline does not show.
+    const events = this.core ? await this.core.recentEvents(80, isTimelineEvent) : [];
     const recheck = this.core ? await this.core.recheckFlags() : {};
     const payload = await collectGraphPayload(this.files, paths, nodes, state, events, recheck);
     payload.autoMode = (await readLoopSettings(this.files)).settings.autoApprove.enabled;

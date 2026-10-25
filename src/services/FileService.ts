@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as crypto from 'crypto';
+import * as fsp from 'fs/promises';
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
 import { AGENT_PROVIDERS, PROVIDER_IDS } from './AgentProviders';
 import { migrateApprovals } from './ApprovalStore';
-import { sharedFolders } from './ResearchLoopModel';
+import { isLoopStatePath, sharedFolders } from './ResearchLoopModel';
 import { PROJECT_TEMPLATE } from '../domain/project';
 import { generatedAgentIgnores } from './AgentIntegrationCore';
 import { ASSET_TYPE_LIST } from '../domain/nodeKinds';
@@ -45,7 +47,23 @@ export class FileService {
   async writeFile(relativePath: string, content: string): Promise<void> {
     const uri = this.resolve(relativePath);
     await this.ensureParentDirectory(relativePath);
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+    if (!isLoopStatePath(relativePath)) { await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8')); return; }
+    // The MCP bridges and the CLI read loop state concurrently: replace it whole, never truncate it in place.
+    const temp = uri.with({ path: `${uri.path}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp` });
+    await vscode.workspace.fs.writeFile(temp, Buffer.from(content, 'utf8'));
+    try { await vscode.workspace.fs.rename(temp, uri, { overwrite: true }); } catch {
+      await vscode.workspace.fs.delete(temp).then(undefined, () => undefined);
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+    }
+  }
+
+  /** Append in one write; vscode.workspace.fs has no append, so local files use node's. */
+  async appendFile(relativePath: string, content: string): Promise<void> {
+    const uri = this.resolve(relativePath);
+    await this.ensureParentDirectory(relativePath);
+    if (uri.scheme === 'file') { await fsp.appendFile(uri.fsPath, content, 'utf8'); return; }
+    const old = await this.readFile(relativePath).catch(() => '');
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(old + content, 'utf8'));
   }
 
   async writeBinary(relativePath: string, data: Uint8Array): Promise<void> {

@@ -75,6 +75,11 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
   }
 }
 
+/** True for events the Activity timeline shows; context bookkeeping and the like are not. */
+export function isTimelineEvent(event: LoopEvent): boolean {
+  return describeEvent(event, (id) => id) !== undefined;
+}
+
 /** Newest first, at most `limit` lines. */
 export function buildHistory(events: LoopEvent[], title: (id: string) => string, type?: (id: string) => string, limit = 60): HistoryEntry[] {
   const lines: HistoryEntry[] = [];
