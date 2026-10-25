@@ -28,6 +28,29 @@ export function hookEntries(scriptPath: string, provider: AgentProvider): Record
   };
 }
 
+const PRE_COMMIT_MARK = '# research-assistant: managed pre-commit check';
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The git pre-commit hook that runs `research-loop precommit`, or undefined
+ * when the repository has a hook of its own (left alone). Paths are relative
+ * to the repository top, where git runs hooks; without node or the installed
+ * script the hook lets every commit through.
+ */
+export function buildPreCommitHook(existing: string, script: string, project: string): string | undefined {
+  if (existing.trim() && !existing.includes(PRE_COMMIT_MARK)) return undefined;
+  return [
+    '#!/bin/sh',
+    PRE_COMMIT_MARK,
+    '# Refuses commits that add research file problems (misplaced files, clashing IDs, broken references).',
+    '# Skip once with git commit --no-verify. Replace this file with a hook of your own and the extension leaves it alone.',
+    `script=${shellQuote(script)}`,
+    '[ -f "$script" ] && command -v node >/dev/null 2>&1 || exit 0',
+    `exec node "$script" precommit --project ${shellQuote(project)}`,
+    '',
+  ].join('\n');
+}
+
 function isManaged(entry: unknown): boolean {
   const hooks = (entry as HookEntry | undefined)?.hooks;
   return Array.isArray(hooks) && hooks.some((hook) => typeof hook?.command === 'string' && hook.command.includes(MANAGED_MARK));

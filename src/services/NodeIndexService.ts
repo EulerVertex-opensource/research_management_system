@@ -57,15 +57,32 @@ export class NodeIndexService {
   private nodes: Map<string, ResearchNode> = new Map();
   /** Duplicate IDs and dependency errors found by the last refresh. */
   private problems: string[] = [];
+  private scanning?: Promise<ResearchNode[]>;
+  private queued?: Promise<ResearchNode[]>;
 
   constructor(
     private readonly fileService: FileService,
     private readonly paths: ProjectPaths
   ) {}
 
-  async refresh(): Promise<ResearchNode[]> {
-    this.nodes.clear();
-    this.problems = [];
+  /**
+   * Rescan the research folders. File watchers fire in bursts, so scans never
+   * overlap: a call during a scan waits for one more scan after it (which sees
+   * the change that triggered the call), and later callers share that one.
+   */
+  refresh(): Promise<ResearchNode[]> {
+    if (!this.scanning) {
+      this.scanning = this.scan().finally(() => { this.scanning = undefined; });
+      return this.scanning;
+    }
+    this.queued ??= this.scanning.catch(() => undefined).then(() => { this.queued = undefined; return this.refresh(); });
+    return this.queued;
+  }
+
+  /** Build the index aside and swap it in whole, so readers never see a half-built one. */
+  private async scan(): Promise<ResearchNode[]> {
+    const nodes = new Map<string, ResearchNode>();
+    const problems: string[] = [];
 
     const folders = [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, ...await libraryFolders(this.fileService, this.paths)];
     const raws = new Map<string, string>();
@@ -77,12 +94,12 @@ export class NodeIndexService {
           if (!node) continue;
           const location = locateNodeFile(filePath, this.paths);
           if (location?.origin === 'library') { node.origin = 'library'; node.collection = location.collection; }
-          const existing = this.nodes.get(node.id);
+          const existing = nodes.get(node.id);
           if (existing) {
-            this.problems.push(`${filePath}: node ID ${node.id} is already used by ${existing.filePath}; IDs are global across research folders.`);
+            problems.push(`${filePath}: node ID ${node.id} is already used by ${existing.filePath}; IDs are global across research folders.`);
             continue;
           }
-          this.nodes.set(node.id, node);
+          nodes.set(node.id, node);
           raws.set(filePath, raw);
         } catch {
           // skip unreadable files
@@ -90,25 +107,27 @@ export class NodeIndexService {
       }
     }
     // A succeeded plan is outdated once its target's proof no longer matches the digest stamped on success.
-    for (const node of this.nodes.values()) {
+    for (const node of nodes.values()) {
       if (node.type !== 'plan' || node.status !== 'succeeded') continue;
       const stamped = parseMarkdown(raws.get(node.filePath)!).data.proof_digest;
-      const target = node.target_asset ? this.nodes.get(node.target_asset) : undefined;
+      const target = node.target_asset ? nodes.get(node.target_asset) : undefined;
       if (typeof stamped === 'string' && target) node.outdated = proofDigest(raws.get(target.filePath)!) !== stamped;
     }
-    this.problems.push(...(await layoutReport(this.fileService, this.paths)).problems);
-    this.problems.push(...libraryProblems([...this.nodes.values()].map((node) => ({ id: node.id, file: node.filePath, data: node })), this.paths));
+    problems.push(...(await layoutReport(this.fileService, this.paths)).problems);
+    problems.push(...libraryProblems([...nodes.values()].map((node) => ({ id: node.id, file: node.filePath, data: node })), this.paths));
     for (const kind of ['asset', 'definition'] as const) {
       // Project and library nodes are ordered together, so a project result may depend on a library one.
-      const inputs = [...this.nodes.values()].filter((node) => locateNodeFile(node.filePath, this.paths)?.kind === kind).map((node) => ({ id: node.id, raw: raws.get(node.filePath)! }));
+      const inputs = [...nodes.values()].filter((node) => locateNodeFile(node.filePath, this.paths)?.kind === kind).map((node) => ({ id: node.id, raw: raws.get(node.filePath)! }));
       try {
-        computeAssetOrder(inputs, kind).order.forEach((id, index) => { this.nodes.get(id)!.order = index + 1; });
+        computeAssetOrder(inputs, kind).order.forEach((id, index) => { nodes.get(id)!.order = index + 1; });
       } catch (error: unknown) {
-        this.problems.push(`${kind === 'asset' ? 'Asset' : 'Definition'} order: ${error instanceof Error ? error.message : String(error)}`);
+        problems.push(`${kind === 'asset' ? 'Asset' : 'Definition'} order: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    return Array.from(this.nodes.values());
+    this.nodes = nodes;
+    this.problems = problems;
+    return Array.from(nodes.values());
   }
 
   getAll(): ResearchNode[] {

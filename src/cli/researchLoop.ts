@@ -1,12 +1,15 @@
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
+import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
+import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { HookInput, contextOutput, denyOutput, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
+import { GUARD_PATH, GuardRecord, HookInput, contextOutput, denyOutput, guardDecision, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
-import { AGENT_PROVIDERS } from '../services/AgentProviders';
+import { AGENT_PROVIDERS, MAINTENANCE_COMMAND } from '../services/AgentProviders';
 import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
@@ -63,6 +66,7 @@ const USAGE = `Usage: research-loop <command> [options]
   migrate-approvals   (split research/approvals.json into one file per approved target)
   restore-approvals   (re-apply status: approved where the researcher's approval record still matches the content)
   hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd>   (reads hook JSON on stdin)
+  precommit   (git pre-commit hook: refuse commits that add research file problems)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
 async function readStdin(): Promise<string> {
@@ -202,6 +206,34 @@ async function linkChangedNodes(root: string, core: ResearchLoopCore, running: b
   return applyInterlinks(new NodeLoopFiles(root), paths, changed.filter((file) => file.endsWith('.md') && locateNodeFile(file, paths)));
 }
 
+/** Guard records by session; only the most recent sessions are kept. */
+async function readGuard(files: NodeLoopFiles): Promise<Record<string, GuardRecord>> {
+  try { const value = JSON.parse(await files.readFile(GUARD_PATH)); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; }
+}
+
+async function writeGuard(files: NodeLoopFiles, session: string, record: GuardRecord): Promise<void> {
+  const records = await readGuard(files);
+  delete records[session];
+  records[session] = record;
+  const kept = Object.fromEntries(Object.entries(records).slice(-20));
+  await files.writeFile(GUARD_PATH, JSON.stringify(kept) + '\n');
+}
+
+/** Note the research problems present as a turn begins; a resumed session keeps its record. */
+async function guardBaseline(root: string, core: ResearchLoopCore, session: string, fresh: boolean): Promise<void> {
+  const files = new NodeLoopFiles(root);
+  if (!fresh && (await readGuard(files))[session]) return;
+  await writeGuard(files, session, { baseline: await core.validateAll(), blocks: 0 });
+}
+
+/** The reason to send the agent back for problems this turn introduced, if any. */
+async function guardStop(root: string, core: ResearchLoopCore, session: string): Promise<string | undefined> {
+  const files = new NodeLoopFiles(root);
+  const decision = guardDecision((await readGuard(files))[session], await core.validateAll());
+  await writeGuard(files, session, decision.record);
+  return decision.block ? decision.reason : undefined;
+}
+
 async function runHook(event: string, args: Args): Promise<void> {
   let input: HookInput = {};
   try { input = JSON.parse((await readStdin()) || '{}'); } catch { input = {}; }
@@ -224,6 +256,8 @@ async function runHook(event: string, args: Args): Promise<void> {
   switch (event) {
     case 'SessionStart':
     case 'UserPromptSubmit': {
+      // Every turn, loop or not: what was wrong before the turn is not the agent's to fix at Stop.
+      try { await guardBaseline(root, core, session ?? 'unknown', event === 'UserPromptSubmit'); } catch { /* the guard never blocks a turn from starting */ }
       if (!state || (state.status !== 'running' && state.status !== 'paused' && !state.pendingQuestion)) return;
       if (session && !core.heartbeat(session)) {
         process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
@@ -262,6 +296,14 @@ async function runHook(event: string, args: Args): Promise<void> {
     case 'Stop': {
       // Best effort: a malformed node is skipped here and reported by validate.
       try { await linkChangedNodes(root, core, state?.status === 'running'); } catch { /* keep the Stop decision independent of linking */ }
+      // Checked on disk rather than per tool call, so files a script or a folder move wrote are caught too.
+      let guard: string | undefined;
+      try { guard = await guardStop(root, core, session ?? 'unknown'); } catch { guard = undefined; }
+      if (guard) {
+        await note({ kind: 'active', sessionId: session });
+        process.stdout.write(stopBlockOutput(guard) + '\n');
+        return;
+      }
       if (!state || state.status !== 'running') return;
       if (session && !core.heartbeat(session)) return;
       await core.validateWorkspace({ fix: true });
@@ -293,6 +335,69 @@ async function runHook(event: string, args: Args): Promise<void> {
   }
 }
 
+/** Run git with an optional index file and stdin; rejects on a non-zero exit. */
+function gitIn(cwd: string, args: string[], options: { index?: string; input?: string } = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', ...(options.index ? { GIT_INDEX_FILE: options.index } : {}) };
+    const child = execFile('git', args, { cwd, env, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => (error ? reject(new Error(String(stderr).trim() || error.message)) : resolve(String(stdout))));
+    // A git that exits before reading stdin must not crash the hook (EPIPE); its exit code is the answer.
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(options.input);
+  });
+}
+
+/** Export the research files of HEAD (or of the index) to `out` and validate that copy as a whole. */
+async function validateTree(root: string, top: string, prefix: string, scope: string[], out: string, index?: string): Promise<string[]> {
+  const pathspec = scope.map((item) => path.posix.join(prefix, item));
+  const files = await gitIn(top, ['ls-files', '-z', '--', ...pathspec], { index });
+  if (files) await gitIn(top, ['checkout-index', '-z', '--stdin', `--prefix=${out}/`], { index, input: files });
+  const project = path.join(out, prefix);
+  // An untracked config still says where the research folders are.
+  if (!fs.existsSync(path.join(project, PROJECT_CONFIG_PATH))) { fs.mkdirSync(project, { recursive: true }); fs.copyFileSync(path.join(root, PROJECT_CONFIG_PATH), path.join(project, PROJECT_CONFIG_PATH)); }
+  return (await openCore(project)).validateAll();
+}
+
+/**
+ * Git pre-commit check: refuse a commit whose staged research files have
+ * problems the last commit did not. Both trees are exported and validated as a
+ * whole, so a problem that was already there never blocks a commit, and a
+ * failure of the check itself lets the commit through.
+ */
+async function runPreCommit(args: Args): Promise<void> {
+  const root = typeof args.flags.project === 'string' ? path.resolve(args.flags.project) : findProjectRoot(process.cwd());
+  if (!root) return;
+  let scratch: string | undefined;
+  let fresh: string[];
+  try {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'research-precommit-'));
+    const top = (await gitIn(root, ['rev-parse', '--show-toplevel'])).trim();
+    const prefix = path.relative(fs.realpathSync(top), fs.realpathSync(root)).split(path.sep).join('/');
+    const paths = await loadProjectPaths(root);
+    const scope = [PROJECT_CONFIG_PATH, paths.researchRoot];
+    let before: string[] = [];
+    if (await gitIn(top, ['rev-parse', '--verify', '-q', 'HEAD']).then(() => true, () => false)) {
+      const index = path.join(scratch, 'head.index');
+      await gitIn(top, ['read-tree', 'HEAD'], { index });
+      before = await validateTree(root, top, prefix, scope, path.join(scratch, 'head'), index);
+    }
+    const known = new Set(before);
+    fresh = (await validateTree(root, top, prefix, scope, path.join(scratch, 'staged'))).filter((problem) => !known.has(problem));
+  } catch (error: unknown) {
+    process.stderr.write(`Research Assistant: pre-commit check skipped (${error instanceof Error ? error.message : String(error)}).\n`);
+    return;
+  } finally {
+    if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  if (!fresh.length) return;
+  process.stderr.write([
+    `Research Assistant: this commit would add ${fresh.length} problem(s) to the research files:`,
+    ...fresh.slice(0, 20).map((problem) => `- ${problem}`),
+    ...(fresh.length > 20 ? [`- ... and ${fresh.length - 20} more`] : []),
+    `Fix them and commit again (check with ${MAINTENANCE_COMMAND} validate). To commit anyway: git commit --no-verify.`,
+  ].join('\n') + '\n');
+  process.exitCode = 1;
+}
+
 function text(value: string | true | undefined, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`--${name} is required`);
   return value;
@@ -303,6 +408,7 @@ async function main(): Promise<void> {
   const [command, sub, third] = args.positional;
   if (!command || command === 'help' || args.flags.help) { process.stdout.write(USAGE + '\n'); return; }
   if (command === 'hook') { await runHook(sub, args); return; }
+  if (command === 'precommit') { await runPreCommit(args); return; }
   const root = typeof args.flags.project === 'string' ? path.resolve(args.flags.project) : findProjectRoot(process.cwd());
   if (!root) throw new Error('No .research-assistant.json found; run from the project or pass --project.');
   const stale = staleDriver(root);

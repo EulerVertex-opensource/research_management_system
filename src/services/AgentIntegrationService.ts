@@ -4,8 +4,9 @@ import * as os from 'os';
 import * as fs from 'fs/promises';
 import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
-import { WORKER_TIERS, buildHooksFile, buildProjectMcpJson, buildWorkerAgent, upsertCodexMcpTable, workerAgentName } from './AgentIntegrationCore';
-import { AGENT_PROVIDERS, LOOP_COMMAND, MCP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, loopScriptPath } from './AgentProviders';
+import { WORKER_TIERS, buildHooksFile, buildPreCommitHook, buildProjectMcpJson, buildWorkerAgent, upsertCodexMcpTable, workerAgentName } from './AgentIntegrationCore';
+import { AGENT_PROVIDERS, LOOP_COMMAND, LOOP_SCRIPT, LOOP_SKILL, MCP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, loopScriptPath } from './AgentProviders';
+import { NodeGitRunner } from '../cli/nodeGit';
 
 /**
  * Writes each agent's hook and MCP configuration for the research loop, driven
@@ -43,8 +44,31 @@ export class AgentIntegrationService {
         }
       }
     }
+    await this.ensurePreCommitHook(root).catch((error: unknown) => this.output.appendLine(`[agents] Skipped the git pre-commit check: ${error instanceof Error ? error.message : String(error)}`));
     if (written.length) this.output.appendLine(`[agents] Wrote ${written.join(', ')}`);
     return written;
+  }
+
+  /** Install the research pre-commit check in the workspace's git repository, unless the repository manages its own hooks. */
+  private async ensurePreCommitHook(root: string): Promise<void> {
+    const git = new NodeGitRunner(root);
+    const top = await git.run(['rev-parse', '--show-toplevel']);
+    if (top.code !== 0) return; // not a git repository
+    const custom = await git.run(['config', '--get', 'core.hooksPath']);
+    if (custom.code === 0 && custom.stdout.trim()) { this.output.appendLine(`[agents] core.hooksPath is set (${custom.stdout.trim()}); the research pre-commit check is not installed.`); return; }
+    const hooks = await git.run(['rev-parse', '--git-path', 'hooks']);
+    if (hooks.code !== 0) return;
+    const project = path.relative(await fs.realpath(top.stdout.trim()), await fs.realpath(root)).split(path.sep).join('/') || '.';
+    const script = path.posix.join(project, AGENT_PROVIDERS.codex.skillsDir, LOOP_SKILL, 'scripts', LOOP_SCRIPT);
+    const file = path.join(path.resolve(root, hooks.stdout.trim()), 'pre-commit');
+    const existing = await fs.readFile(file, 'utf8').catch(() => '');
+    const content = buildPreCommitHook(existing, script, project);
+    if (content === undefined) { this.output.appendLine(`[agents] ${file} is the repository's own hook; the research pre-commit check is not installed.`); return; }
+    if (content === existing) return;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, content, { encoding: 'utf8', mode: 0o755 });
+    await fs.chmod(file, 0o755);
+    this.output.appendLine(`[agents] Installed the research pre-commit check in ${file}`);
   }
 
   /** Idempotently register the bundled MCP bridge in Codex's user config (only when Codex is installed). */

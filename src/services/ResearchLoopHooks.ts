@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
-import { LOOP_COMMAND } from './AgentProviders';
+import { LOOP_COMMAND, MAINTENANCE_COMMAND } from './AgentProviders';
 import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/layout';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
@@ -36,6 +36,35 @@ export function stopDecision(state: LoopState | undefined, input: HookInput, ins
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
   const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it; earlier stages are summarized in its context pack, so do not reread their files. ${instruction ?? ''}`.trim();
   return { block: true, reason };
+}
+
+/** The research problems present when the researcher's turn began, and how often Stop has sent the agent back since. */
+export interface GuardRecord { baseline: string[]; blocks: number }
+export const GUARD_PATH = `${STATE_DIR}/guard.json`;
+/** Consecutive Stop blocks for new problems before the turn may end anyway (the dashboard still shows them). */
+export const GUARD_BLOCK_CAP = 2;
+
+/**
+ * Whether Stop sends the agent back to fix research problems this turn
+ * introduced, however the files were written (a script, a folder move, an
+ * agent without PreToolUse hooks). Problems already present when the turn
+ * began never trap the agent. Pure; the caller persists the record.
+ */
+export function guardDecision(record: GuardRecord | undefined, problems: string[]): { block: boolean; reason?: string; record: GuardRecord } {
+  if (!record) return { block: false, record: { baseline: problems, blocks: 0 } };
+  const before = new Set(record.baseline);
+  const fresh = problems.filter((problem) => !before.has(problem));
+  if (!fresh.length) return { block: false, record: { ...record, blocks: 0 } };
+  if (record.blocks >= GUARD_BLOCK_CAP) return { block: false, record };
+  const shown = fresh.slice(0, 12).map((problem) => `- ${problem}`);
+  if (fresh.length > shown.length) shown.push(`- ... and ${fresh.length - shown.length} more`);
+  const reason = [
+    `Research files: this turn left ${fresh.length} new problem(s) in the research folders:`,
+    ...shown,
+    'Fix them before finishing: move misplaced files into the research layout (raw materials to research-local/), rename clashing IDs, and repair broken references.',
+    `Do not delete research content just to silence a problem; if a fix needs the researcher's decision, say so and stop. Check with: ${MAINTENANCE_COMMAND} validate`,
+  ].join('\n');
+  return { block: true, reason, record: { ...record, blocks: record.blocks + 1 } };
 }
 
 function targetsOf(input: HookInput): string[] {
@@ -96,7 +125,7 @@ interface Creation { target: string; isDir?: boolean; content?: string; fromShel
  * Paths a write-type call would create. Edits and deletes of existing files
  * are not creations: moving content out of a misplaced file stays possible.
  */
-function creationsOf(input: HookInput, isShell: boolean): Creation[] {
+function creationsOf(input: HookInput, isShell: boolean, root: string | undefined, exists: (relative: string) => boolean): Creation[] {
   const tool = input.tool_input ?? {};
   const created: Creation[] = [];
   const name = (input.tool_name ?? '').toLowerCase();
@@ -116,6 +145,44 @@ function creationsOf(input: HookInput, isShell: boolean): Creation[] {
     for (const match of command.matchAll(/[\w./-]+\.[A-Za-z][A-Za-z0-9]*\b/g)) created.push({ target: match[0], fromShell: true });
     for (const match of command.matchAll(/\bmkdir\s+([^;&|<>\n]+)/g)) {
       for (const arg of match[1].trim().split(/\s+/)) if (arg && !arg.startsWith('-')) created.push({ target: arg.replace(/^['"]|['"]$/g, ''), isDir: true, fromShell: true });
+    }
+    created.push(...copyDestinations(command, root, exists));
+  }
+  return created;
+}
+
+const COPY_COMMAND = /^(?:mv|cp|rsync|ln|git\s+mv)$/;
+const looksLikeDir = (target: string) => target.endsWith('/') || !/\.[A-Za-z0-9]+$/.test(path.posix.basename(target));
+
+/**
+ * Where mv, cp, git mv, rsync, and ln put what they copy: the last argument
+ * (or `-t DIR`), or each source's name inside it when it is an existing
+ * folder. Folders count too, so `cp -r raw research/library/x/sources` is
+ * checked although no file name in the command says so.
+ */
+function copyDestinations(command: string, root: string | undefined, exists: (relative: string) => boolean): Creation[] {
+  const created: Creation[] = [];
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    const words = segment.trim().split(/\s+/).map((word) => word.replace(/^['"]|['"]$/g, '')).filter(Boolean);
+    const verb = words[0] === 'git' ? words.slice(0, 2).join(' ') : words[0];
+    if (!verb || !COPY_COMMAND.test(verb)) continue;
+    const args: string[] = [];
+    let into: string | undefined;
+    const rest = words.slice(verb.split(' ').length);
+    for (let i = 0; i < rest.length; i += 1) {
+      if (rest[i] === '-t') into = rest[++i];
+      else if (rest[i].startsWith('--target-directory=')) into = rest[i].slice('--target-directory='.length);
+      else if (!rest[i].startsWith('-')) args.push(rest[i]);
+    }
+    const destination = into ?? (args.length > 1 ? args.pop() : undefined);
+    // Remote rsync targets (host:path) never land in the project.
+    if (!destination || destination.includes(':')) continue;
+    const relative = projectRelative(destination, root);
+    const intoFolder = into !== undefined || (relative !== undefined && looksLikeDir(destination) && exists(relative));
+    if (!intoFolder) { created.push({ target: destination, isDir: looksLikeDir(destination), fromShell: true }); continue; }
+    for (const source of args) {
+      const name = path.posix.basename(source.replace(/\/+$/, ''));
+      if (name) created.push({ target: `${destination.replace(/\/+$/, '')}/${name}`, isDir: looksLikeDir(source), fromShell: true });
     }
   }
   return created;
@@ -140,7 +207,7 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   if (isShell && RAW_GIT.test(text)) {
     return { deny: true, reason: `Research loop: do not run git pull/push/rebase/merge directly. Use ${LOOP_COMMAND} sync status | sync pull | sync prepare; publishing (sync publish) needs the researcher's confirmation.` };
   }
-  const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
+  const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brsync\b|\bln\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
   for (const target of targets) {
     if (shellWrites && (under(target, approvalsFile, root) || target.endsWith('/approvals.json') || under(target, shared.approvals, root) || under(target, STATE_DIR, root))) {
       return { deny: true, reason: `Research loop: ${target} is written only by the researcher through the extension. Approvals are never set by the agent.` };
@@ -162,7 +229,7 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   if (isShell && shellWrites && /status:\s*['"]?approved/.test(text) && (text.includes(paths.assets) || text.includes(paths.definitions))) {
     return { deny: true, reason: 'Research loop: shell commands may not set status: approved on assets or definitions.' };
   }
-  for (const creation of isShell && !shellWrites && !/\bmkdir\b/.test(text) ? [] : creationsOf(input, isShell)) {
+  for (const creation of isShell && !shellWrites && !/\bmkdir\b/.test(text) ? [] : creationsOf(input, isShell, root, exists)) {
     const relative = projectRelative(creation.target, root);
     if (!relative || (creation.fromShell && exists(relative))) continue;
     const problem = layoutProblem(paths, relative, creation.isDir) ?? (creation.content !== undefined ? folderNoteProblem(paths, relative, creation.content) : undefined);
