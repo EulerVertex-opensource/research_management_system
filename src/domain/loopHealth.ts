@@ -101,11 +101,13 @@ export function computeLoopHealth(input: HealthInput): LoopHealth {
   if (state.status === 'paused') {
     const reason = state.lastError ?? '';
     const cap = /^Autopilot stopped after (\d+)/.exec(reason);
+    const handedBack = /^Autonomous run finished: (.*?)\.?$/.exec(reason);
     const body = cap
       ? `The agent made ${cap[1]} automatic continuations in one chat session, the limit set in Settings. Resume in a fresh chat so it starts from a clean context; it rebuilds everything from the files.`
+      : handedBack ? `The agent worked on its own until ${handedBack[1]}. Its handoff and the Overview show what it proved, what it set aside, and what waits for your review. Resuming starts a new run with a fresh budget.`
       : !reason || /^Paused by the researcher/.test(reason) ? 'You paused it. The research files are unchanged.' : `Reason: ${reason}`;
     return { ...base, key: 'paused', turn: 'researcher', tone: 'warning', eyebrow: 'Loop paused',
-      headline: cap ? 'The loop paused itself after its limit of automatic continuations.' : 'The loop is paused.', body,
+      headline: cap ? 'The loop paused itself after its limit of automatic continuations.' : handedBack ? 'The autonomous run is over; the loop is back with you.' : 'The loop is paused.', body,
       buttons: [{ label: 'Resume the loop', action: { action: 'loop', op: 'resume' }, kind: 'primary' }],
       ifIgnored: 'Nothing moves until you resume it.', statusBar: { text: 'Research: paused', level: 'warning' }, signature: `paused:${reason}` };
   }

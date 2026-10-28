@@ -103,12 +103,63 @@ function Now({ payload, onAction, onNavigate, onOpenSettings }: Pick<Props, 'onA
           {health.last ? `\nLast step${when(health.last.at) ? ` (${when(health.last.at)})` : ''}: ${health.last.text}` : ''}
         </div>
       )}
-      {(payload.autoMode || !payload.projectApproved) && (
+      {((payload.autoMode && !payload.autonomy?.active) || !payload.projectApproved) && (
         <div style={{ fontSize: 12, color: COLOR.muted, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
           {!payload.projectApproved && <span style={{ color: COLOR.waiting }}>The goals in project.md are not accepted yet.</span>}
-          {payload.autoMode && <span>Auto mode is on: some results are accepted without asking you. <button style={link} onClick={onOpenSettings}>Settings</button></span>}
+          {payload.autoMode && !payload.autonomy?.active && <span>Auto mode is on: some results are accepted without asking you. <button style={link} onClick={onOpenSettings}>Settings</button></span>}
         </div>
       )}
+    </Block>
+  );
+}
+
+const clock = (iso: string) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+/**
+ * Autonomous mode: while the agent works alone, its budget; once it hands the
+ * loop back, what it did, so the researcher can pick up from there.
+ */
+function Autonomy({ payload, onShowInResults, onOpenActivity }: Pick<Props, 'onShowInResults' | 'onOpenActivity'> & { payload: GraphPayload }) {
+  const run = payload.autonomy;
+  if (!run || (!run.active && !run.handedOverAt)) return null;
+  const titleOf = (id: string) => payload.nodes.find((node) => node.id === id)?.title ?? id;
+  const names = (ids: string[]) => ids.map((id, index) => (
+    <React.Fragment key={id}>{index > 0 && ', '}<button style={{ ...link, fontSize: 13 }} onClick={() => onShowInResults(id)}>{titleOf(id)}</button></React.Fragment>
+  ));
+  const tone = run.active ? COLOR.active : COLOR.waiting;
+  const share = run.budget ? Math.min(1, run.spent / run.budget) : 0;
+  const row = (label: string, content: React.ReactNode) => (
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 170px) minmax(0, 1fr)', gap: 12, fontSize: 13, alignItems: 'baseline' }}>
+      <span style={{ color: COLOR.muted, fontSize: 12 }}>{label}</span>
+      <div style={{ minWidth: 0 }}>{content}</div>
+    </div>
+  );
+  const spending = run.spending.slice(0, 5).map((item) => `${titleOf(item.id)} (${item.attempts})`).join(', ');
+  return (
+    <Block title={run.active ? 'Autonomous run' : 'Autonomous run · handed back to you'} tone={tone} wash={run.active ? 5 : 9}
+      aside={<span style={{ color: COLOR.muted }}>{run.active ? `since ${clock(run.startedAt)}` : `${clock(run.startedAt)} – ${clock(run.handedOverAt!)}`}</span>}>
+      <div style={{ fontSize: 13 }}>
+        {run.active
+          ? 'The agent works on its own and asks you nothing. It hands the loop back when the budget or the time limit runs out, or when nothing is left that it can do alone.'
+          : <>It stopped because {run.reason ?? 'its run ended'}. Here is what it did; what waits for your review is below. Resuming starts a new run with a fresh budget.</>}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, flexWrap: 'wrap' }}>
+        <span aria-hidden="true" style={{ flex: '0 0 160px', height: 6, borderRadius: 3, background: tint(COLOR.muted, 25), overflow: 'hidden' }}>
+          <span style={{ display: 'block', height: '100%', width: `${Math.round(share * 100)}%`, background: tone }} />
+        </span>
+        <span>{run.spent} of {plural(run.budget, 'attempt')} spent</span>
+        {run.deadline && run.active && <span style={{ color: COLOR.muted }}>· hands back by {clock(run.deadline)} at the latest</span>}
+        <span style={{ color: COLOR.muted }}>· {run.revisions} of {plural(run.revisionLimit, 'goal revision')}</span>
+      </div>
+      {run.proved.length > 0 && row('Proved', names(run.proved))}
+      {run.setAside.length > 0 && row('Set aside by the agent', (
+        <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {run.setAside.map((item) => <li key={item.id}>{names([item.id])}{item.note ? <span style={{ color: COLOR.muted }}> — {item.note}</span> : null}</li>)}
+        </ul>
+      ))}
+      {run.addedGoals.length > 0 && row('Goals it added', <>{names(run.addedGoals)}<div style={{ fontSize: 12, color: COLOR.muted }}>Your own goals are all still there. Keep or drop either kind in project.md.</div></>)}
+      {spending && row('Where the attempts went', spending)}
+      {run.decided > 0 && row('Questions it decided', <>{plural(run.decided, 'question')}, each kept as an idea with the default it chose. <button style={link} onClick={onOpenActivity}>Activity →</button></>)}
     </Block>
   );
 }
@@ -204,7 +255,10 @@ function Progress({ payload, onShowInResults, onOpenPaper }: Pick<Props, 'onShow
         return (
           <button key={node.id} onClick={() => onShowInResults(node.id)} title={`${node.title}: show in Results`}
             style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 140px 150px', gap: 12, alignItems: 'center', padding: '6px 10px', borderRadius: 6, border: `1px ${node.progress === 'done' ? 'solid' : 'dashed'} ${tint(tone, 50)}`, background: tint(tone, node.progress === 'done' ? 8 : 5), color: 'var(--vscode-foreground)', cursor: 'pointer', textAlign: 'left', fontSize: 13 }}>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.title}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {node.title}
+              {node.agentGoal && <span title="The agent added this goal while working on its own; yours are kept." style={{ marginLeft: 8, fontSize: 11, color: COLOR.muted, border: `1px solid ${COLOR.border}`, borderRadius: 3, padding: '0 4px' }}>added by the agent</span>}
+            </span>
             <span aria-hidden="true" style={{ height: 6, borderRadius: 3, background: tint(COLOR.muted, 25), overflow: 'hidden' }}>
               <span style={{ display: 'block', height: '100%', width: `${Math.round(share * 100)}%`, background: tone }} />
             </span>
@@ -231,6 +285,7 @@ export function OverviewPage({ payload, onAction, onNavigate, onShowInResults, o
     <div style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '16px 18px 24px', background: COLOR.canvas }}>
       <div style={{ maxWidth: 920, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Now payload={payload} onAction={onAction} onNavigate={onNavigate} onOpenSettings={onOpenSettings} />
+        <Autonomy payload={payload} onShowInResults={onShowInResults} onOpenActivity={onOpenActivity} />
         <Decisions payload={payload} onAction={onAction} onNavigate={onNavigate} onShowInResults={onShowInResults} onOpenNeeds={onOpenNeeds} onOpenPaper={onOpenPaper} />
         <Progress payload={payload} onShowInResults={onShowInResults} onOpenPaper={onOpenPaper} />
         <Block title="Recently" aside={payload.history.length > 3 ? <button style={link} onClick={onOpenActivity}>All activity →</button> : undefined}>

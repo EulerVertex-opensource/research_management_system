@@ -72,6 +72,8 @@ export interface ContextFocus {
   researcherInput?: string;
   changesRequested?: string;
   direction?: string;
+  /** The direction is the agent's own, given in autonomous mode with `budget allocate`. */
+  ownDirection?: boolean;
   /** Object search: the round, this worker's slot (search) or the round's results (search_summary), and the board. */
   search?: { mode: SearchMode; round: number; slot?: SearchSlot; board: string; roundDigest?: string; requested?: boolean };
 }
@@ -146,7 +148,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
   const target = focus.assetId;
   if (focus.researcherInput) notes.push(`Researcher input: ${focus.researcherInput}`);
   if (focus.changesRequested) notes.push(`The researcher requested changes: ${focus.changesRequested}`);
-  if (focus.direction) notes.push(`Latest researcher direction: ${focus.direction}`);
+  if (focus.direction) notes.push(`${focus.ownDirection ? 'Your own latest direction (autonomous mode), which this plan must follow' : 'Latest researcher direction'}: ${focus.direction}`);
 
   switch (focus.stage) {
     case 'discuss_goals':

@@ -123,6 +123,13 @@ export interface LoopState {
   lastError?: string | null;
   /** Set with stage `waiting`: what the researcher must resolve; `lastError` holds the same as text for the agent. */
   waitingOn?: WaitingReason[];
+  /**
+   * An autonomous run, while the researcher's setting has autonomous mode on: when it began, the
+   * attempts it spent (an executed plan or a search round each), the asset whose allotment ran out
+   * and waits on the agent's own decision, the goal revisions it made and the set-aside results
+   * that prompted them, and when it handed the loop back.
+   */
+  autonomy?: { startedAt: string; spent: number; deciding?: string; revisions?: number; revisedFor?: string[]; handedOverAt?: string };
   startedAt: string;
   /** When status last became running (start, resume, or an extension of a stopped loop); an agent silent since then has not picked it up. */
   runningSince?: string;

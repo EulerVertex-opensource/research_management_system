@@ -41,6 +41,7 @@ export function parkLabel(reason: string): string {
   if (reason === 'search_exhausted') return 'Search ran out';
   if (reason === 'counterexample_pending') return 'On hold';
   if (reason === 'researcher') return 'Set aside by you';
+  if (reason === 'agent_gave_up') return 'Set aside by the agent';
   return 'Set aside';
 }
 
@@ -48,6 +49,7 @@ export function parkClause(reason: string, failedPlans = 0): string {
   if (reason === 'search_exhausted') return 'because its search ran out without a match';
   if (reason === 'counterexample_pending') return 'while a possible counterexample waits for you';
   if (reason === 'researcher') return 'by you';
+  if (reason === 'agent_gave_up') return 'by the agent, working on its own, after its attempts ran out';
   if (reason === 'three_failures') return failedPlans ? `after ${failedPlans} failed proof attempt${failedPlans > 1 ? 's' : ''}` : 'after repeated failed proof attempts';
   return reason ? `(${reason.replace(/_/g, ' ')})` : '';
 }

@@ -1,4 +1,4 @@
-import { AUTO_APPROVE_RULES, AutoApprovePolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, RIGOR_KEYS, RIGOR_OPTIONS, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch } from '../models/settings';
+import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutonomyPolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, RIGOR_KEYS, RIGOR_OPTIONS, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch } from '../models/settings';
 
 /**
  * Pure defaults, normalization, and validation for the Settings view and the
@@ -8,6 +8,10 @@ import { AUTO_APPROVE_RULES, AutoApprovePolicy, LOOP_NUMBER_KEYS, LoopNumberKey,
 export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
   enabled: false, proofs: true, supporting: true, citations: true, definitions: true, counterexamples: false, specifications: false, project: false,
 };
+
+/** What autonomous mode approves: every rule, each still judged from the file itself. */
+export const AUTONOMOUS_AUTO_APPROVE: AutoApprovePolicy = { enabled: true, ...Object.fromEntries(AUTO_APPROVE_RULES.map((rule) => [rule, true])) } as AutoApprovePolicy;
+export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
 
 /** Rigor or speed: Careful is the default; Fast trades checks for progress. */
 export const RIGOR_PRESETS: Record<'careful' | 'fast', RigorPolicy> = {
@@ -35,12 +39,13 @@ export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(ty
 };
 
 /** Where a numeric loop setting appears in the Settings view. */
-export type LoopFieldGroup = 'general' | 'refute' | 'construct' | 'search';
+export type LoopFieldGroup = 'general' | 'refute' | 'construct' | 'search' | 'autonomy';
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   general: 'Search & effort',
   refute: 'Object search: refute (falsify)',
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
+  autonomy: 'Autonomous mode',
 };
 
 export interface LoopNumberField { defaultValue: number; range: readonly [number, number]; label: string; hint: string; unit?: string; group: LoopFieldGroup }
@@ -64,11 +69,14 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   boardObstructions: { defaultValue: 12, range: [1, 50], group: 'search', label: 'Obstructions shown', hint: 'Latest obstructions on the search board every worker reads.' },
   boardNearMisses: { defaultValue: 3, range: [0, 10], group: 'search', label: 'Near-misses shown', hint: 'Best failed candidates on the search board, with their checks.' },
   requestedSearchRounds: { defaultValue: 2, range: [1, 10], group: 'search', label: 'Rounds for a requested search', hint: 'Default rounds when you ask for a deeper counterexample search.' },
+  autonomyBudget: { defaultValue: 30, range: [1, 1000], group: 'autonomy', unit: 'attempts', label: 'Budget', hint: 'Proof attempts and search rounds the agent may spend on its own before it hands the loop back to you.' },
+  autonomyHours: { defaultValue: 0, range: [0, 168], group: 'autonomy', unit: 'hours', label: 'Time limit', hint: 'Hands the loop back after this long even with budget left; 0 means no time limit.' },
+  autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal revisions', hint: 'Times the agent may add a weaker or alternative goal of its own when results are set aside. It never drops your goals; you decide about them at hand-back.' },
 };
 
 const loopNumberDefaults = Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, LOOP_NUMBER_FIELDS[key].defaultValue])) as Record<LoopNumberKey, number>;
 
-export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, rigor: DEFAULT_RIGOR, ...loopNumberDefaults };
+export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, rigor: DEFAULT_RIGOR, autonomy: DEFAULT_AUTONOMY, ...loopNumberDefaults };
 
 export const LIMITS = {
   autoPullIntervalMinutes: [0, 1440],
@@ -80,7 +88,7 @@ const clampInt = (value: unknown, [min, max]: readonly [number, number], fallbac
 
 /**
  * Read the loop policy leniently, but fail closed: a missing or malformed
- * autoApprove block means auto mode is off.
+ * autoApprove or autonomy block means auto mode or autonomous mode is off.
  */
 export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; problems: string[] } {
   const problems: string[] = [];
@@ -93,6 +101,13 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
       && ['enabled', ...AUTO_APPROVE_RULES].every((key) => (auto as Record<string, unknown>)[key] === undefined || typeof (auto as Record<string, unknown>)[key] === 'boolean');
     if (valid) autoApprove = { ...DEFAULT_AUTO_APPROVE, ...(auto as Partial<AutoApprovePolicy>) };
     else problems.push('autoApprove is malformed; auto mode is off.');
+  }
+  const autonomyInput = input.autonomy;
+  let autonomy: AutonomyPolicy = { ...DEFAULT_AUTONOMY };
+  if (autonomyInput !== undefined) {
+    const enabled = autonomyInput && typeof autonomyInput === 'object' && !Array.isArray(autonomyInput) ? (autonomyInput as Record<string, unknown>).enabled : undefined;
+    if (enabled === undefined || typeof enabled === 'boolean') autonomy = { enabled: enabled === true };
+    else problems.push('autonomy is malformed; autonomous mode is off.');
   }
   const rigorInput = input.rigor && typeof input.rigor === 'object' && !Array.isArray(input.rigor) ? input.rigor as Record<string, unknown> : {};
   if (input.rigor !== undefined && rigorInput !== input.rigor) problems.push('rigor is malformed; using the careful defaults.');
@@ -108,6 +123,7 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
       version: 1,
       autoApprove,
       rigor,
+      autonomy,
       ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, clampInt(input[key], LOOP_NUMBER_FIELDS[key].range, LOOP_NUMBER_FIELDS[key].defaultValue)])) as Record<LoopNumberKey, number>,
     },
     problems,
@@ -122,7 +138,7 @@ export function parseLoopSettings(text: string | undefined): { settings: LoopSet
 
 export function applyLoopPatch(settings: LoopSettings, patch: SettingsPatch['loop']): LoopSettings {
   if (!patch) return settings;
-  return normalizeLoopSettings({ ...settings, ...patch, autoApprove: { ...settings.autoApprove, ...patch.autoApprove }, rigor: { ...settings.rigor, ...patch.rigor } }).settings;
+  return normalizeLoopSettings({ ...settings, ...patch, autoApprove: { ...settings.autoApprove, ...patch.autoApprove }, rigor: { ...settings.rigor, ...patch.rigor }, autonomy: { ...settings.autonomy, ...patch.autonomy } }).settings;
 }
 
 /** Git remote and branch names go into git arguments: no options, no ranges, no shell characters. */
@@ -151,6 +167,7 @@ export function validateSettingsPatch(patch: SettingsPatch, budgetStages: readon
   }
   if (patch.loop) {
     for (const key of ['enabled', ...AUTO_APPROVE_RULES] as const) bool(`loop.autoApprove.${key}`, patch.loop.autoApprove?.[key]);
+    bool('loop.autonomy.enabled', patch.loop.autonomy?.enabled);
     for (const key of LOOP_NUMBER_KEYS) intIn(`loop.${key}`, patch.loop[key], LOOP_NUMBER_FIELDS[key].range);
     for (const key of RIGOR_KEYS) oneOf(`loop.rigor.${key}`, patch.loop.rigor?.[key], RIGOR_OPTIONS[key]);
   }

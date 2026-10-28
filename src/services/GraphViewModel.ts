@@ -135,7 +135,8 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     if (flags.includes('counterexample') || parked?.reason === 'counterexample_pending') return result('needs_you', needsLabel('counterexample'), 'A possible counterexample waits for you');
     if (parked) {
       const detail = parked.reason === 'three_failures' ? `${failedPlans || 'Several'} proof attempt${failedPlans === 1 ? '' : 's'} failed`
-        : parked.reason === 'search_exhausted' ? 'No match found' : parked.reason === 'researcher' ? 'You set it aside' : '';
+        : parked.reason === 'search_exhausted' ? 'No match found' : parked.reason === 'researcher' ? 'You set it aside'
+        : parked.reason === 'agent_gave_up' ? parked.note || 'The agent, working on its own, gave up on it' : '';
       return result('stuck', parkLabel(parked.reason), detail);
     }
     if (flags.includes('question')) return result('needs_you', needsLabel('question'), 'The agent asked you something');

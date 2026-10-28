@@ -32,7 +32,9 @@ export function stopDecision(state: LoopState | undefined, input: HookInput, ins
   if (state.stage === 'waiting' || state.stage === 'ready' || state.stage === 'review_project') return { block: false };
   const session = input.session_id ?? 'unknown';
   const record = state.autopilot.sessions[session] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
-  if (record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
+  // An autonomous run is bounded by its budget instead; the chat compacts its own context.
+  const autonomous = Boolean(state.autonomy && !state.autonomy.handedOverAt);
+  if (!autonomous && record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
   const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it; earlier stages are summarized in its context pack, so do not reread their files. ${instruction ?? ''}`.trim();
   return { block: true, reason };

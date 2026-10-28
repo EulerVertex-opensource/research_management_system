@@ -53,6 +53,7 @@ const USAGE = `Usage: research-loop <command> [options]
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
+  budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
   idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
   idea resolve <ideaId> --by <decision, plan, or asset ID> [--note "..."]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
@@ -506,6 +507,22 @@ async function main(): Promise<void> {
       return;
     }
     case 'unpark': { await core.unpark(text(sub, 'asset')); out(`Unparked ${sub}.`); return; }
+    case 'budget': {
+      if (sub === 'status') {
+        const run = core.current?.autonomy;
+        const settings = await core.loopSettings();
+        const summary = !settings.autonomy.enabled ? 'Autonomous mode is off.' : !run ? 'Autonomous mode is on; the run starts at the next step.'
+          : run.handedOverAt ? `The autonomous run handed back at ${run.handedOverAt} after ${run.spent} attempt(s); resuming starts a new run.` : core.autonomyNote(run);
+        out(json ? { enabled: settings.autonomy.enabled, autonomy: run ?? null, budget: settings.autonomyBudget, hours: settings.autonomyHours } : summary);
+        return;
+      }
+      if (sub === 'allocate') {
+        out(await core.allocate(text(third, 'asset'), Number(text(args.positional[3], 'n')), text(args.flags.reason, 'reason')));
+        await core.touch(session);
+        return;
+      }
+      throw new Error('budget status|allocate <asset> <n> --reason "..."');
+    }
     case 'idea': {
       if (sub === 'add') {
         const tags = args.lists.tag ?? [];

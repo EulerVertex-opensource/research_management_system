@@ -13,8 +13,9 @@ import {
 } from './ResearchLoopModel';
 import { INACTIVE_STATUSES, IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
 import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
+import type { AutonomyView } from '../models/graph';
 import { readLoopSettings } from './LoopSettingsStore';
-import { DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
+import { AUTONOMOUS_AUTO_APPROVE, DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
 import {
   CandidateInfo, NEGATED_CONCLUSION, RoundInfo, SearchMode, SearchProgress, assignDirections, candidateChecks, checkSections, parseCandidate, parseRound, renderBoard, roundDigest, searchProgress, specProperties,
 } from '../domain/search';
@@ -303,6 +304,8 @@ export class ResearchLoopCore {
     if (state.status !== 'running') state.runningSince = this.now();
     state.status = 'running';
     state.lastError = null;
+    // Resuming after an autonomous run handed back starts a new run with a fresh budget.
+    if (state.autonomy?.handedOverAt) delete state.autonomy;
     await this.save();
     await this.event('resumed');
   }
@@ -779,7 +782,8 @@ export class ResearchLoopCore {
   async autoApproveQueued(): Promise<string[]> {
     const state = this.state;
     if (!state?.approvalQueue.length) return [];
-    const policy = (await this.loopSettings()).autoApprove;
+    const settings = await this.loopSettings();
+    const policy = settings.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : settings.autoApprove;
     if (!policy.enabled) return [];
     const granted: string[] = [];
     for (let progress = true; progress;) {
@@ -925,6 +929,7 @@ export class ResearchLoopCore {
   async park(assetId: string, reason: string, note?: string): Promise<void> {
     const state = this.require();
     state.parked[assetId] = { reason, at: this.now(), note };
+    if (state.autonomy?.deciding === assetId) delete state.autonomy.deciding;
     await this.writeDecision('parked', assetId, note ?? '', { reason });
     await this.save();
     await this.event('parked', { assetId, reason });
@@ -1031,7 +1036,7 @@ export class ResearchLoopCore {
     if (mode === 'refute' && !requested && round > limits.rounds) return undefined;
     if (mode === 'construct') {
       const used = await this.constructionUsage(assetId);
-      if (used.rounds >= limits.rounds || used.candidates >= settings.constructMaxCandidates) return undefined;
+      if (used.rounds >= ((await this.allotment(assetId)) ?? limits.rounds) || used.candidates >= settings.constructMaxCandidates) return undefined;
     }
     const ideas = [...(await this.collect(this.paths.ideas)).values()]
       .filter((idea) => idea.data.idea_kind === 'test_case' && idea.data.status === 'draft' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId))
@@ -1084,6 +1089,10 @@ export class ResearchLoopCore {
     const used = await this.constructionUsage(assetId);
     const observations = [...(await this.collect(this.paths.ideas)).values()].filter((idea) => idea.data.status === 'draft' && idea.data.idea_kind === 'observation' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId)).map((idea) => idea.id);
     await this.setStage('select', { assetId });
+    if (await this.autonomy()) {
+      await this.event('search_finished', { assetId, mode: 'construct', ...used });
+      return this.decideStuck(assetId, `The construction search for ${assetId} used ${used.rounds} round(s) and ${used.candidates} candidate(s) since the last direction without an object that passes every property.`);
+    }
     await this.askQuestion('blocked', `The construction search for ${assetId} used ${used.rounds} round(s) and ${used.candidates} candidate(s) since the last direction without an object that passes every property${observations.length ? `; see the observations ${observations.join(', ')}` : ''}. Give a new direction (or relax the specification under a new asset ID), or skip to park it.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
     await this.event('search_finished', { assetId, mode: 'construct', ...used });
     return `The construction search for ${assetId} is exhausted. Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.`;
@@ -1505,6 +1514,21 @@ export class ResearchLoopCore {
     const state = this.require();
     if (state.status !== 'running') return this.result(`The loop is ${state.status}. Run: ${LOOP_COMMAND} resume`);
     await this.resolveOverdueQuestion();
+    const run = await this.autonomy();
+    if (run) {
+      const question = state.pendingQuestion;
+      if (question) {
+        // Asked before autonomous mode was turned on: settle it the autonomous way.
+        state.pendingQuestion = undefined;
+        await this.event('question_expired', { questionId: question.id, kind: question.kind });
+        await this.decideAlone(question.kind, question.prompt, question.assetId);
+        if (state.status !== 'running') return this.result(state.lastError ?? undefined);
+      }
+      const over = this.autonomyOver(run, await this.loopSettings());
+      if (over) return this.result(await this.handOver(over));
+      if (run.deciding && (state.parked[run.deciding] || !(await this.isDraftResult(run.deciding)))) { delete run.deciding; await this.save(); }
+      if (run.deciding) return this.result(await this.decisionInstruction(run.deciding));
+    }
     if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
     await this.refreshRetired();
     const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute'].includes(state.stage);
@@ -1537,6 +1561,7 @@ export class ResearchLoopCore {
       if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete, ...(selection.missingDefinitions?.length ? { missingDefinitions: selection.missingDefinitions } : {}) };
       if (selection.stage === 'waiting') { state.lastError = selection.reason; state.waitingOn = selection.waitingOn; }
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
+      if (selection.stage === 'waiting' && run && !(await this.reviseGoals(run))) return this.result(await this.handOver(`nothing is left that it can do on its own (${selection.reason})`));
     }
     const result = this.result();
     if (state.stage === 'ready') {
@@ -1594,7 +1619,7 @@ export class ResearchLoopCore {
       stage: state.stage, assetId, planId: state.current.planId, counterexampleId: state.stage === 'verify_construction' ? state.current.search?.candidateId : state.current.counterexampleId,
       missing: state.scaffoldBrief?.missing, incomplete: state.scaffoldBrief?.incomplete, researcherInput: state.researcherInput?.text,
       changesRequested: assetId ? state.progress[assetId]?.changesRequested : undefined,
-      direction: assetId ? latestDirection(await this.decisions(), assetId)?.text : undefined,
+      ...(assetId ? directionFocus(latestDirection(await this.decisions(), assetId)) : {}),
     };
     const search = assetId && (state.stage === 'search' || state.stage === 'search_summary') ? state.current.search : undefined;
     const writeManifest = (rendered: RenderedContext, manifest: ContextManifest, extra: Record<string, unknown> = {}) => this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id), ...extra }, null, 2) + '\n');
@@ -1710,10 +1735,11 @@ export class ResearchLoopCore {
     const brief: Record<string, unknown> = {
       stage: state.stage, assetId: state.current.assetId, planId: state.current.planId, counterexampleId: state.current.counterexampleId, search: state.current.search,
       researcherInput: state.researcherInput?.text, changesRequested: state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined,
-      parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: state.scaffoldBrief, extension: state.extension,
+      parked: state.parked, approvalQueue: state.approvalQueue.map((item) => `${item.kind}:${item.target}`), scaffold: state.scaffoldBrief, extension: state.extension, autonomy: state.autonomy,
       paths: { project: this.paths.projectMd, assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, checks: this.shared.checks, candidates: this.shared.candidates, papers: this.paths.paperIndex, bibliography: this.paths.bibliography },
     };
-    return { stage: state.stage, instruction: blocked ?? this.instruction(state), brief, blocked };
+    const autonomous = state.status === 'running' && state.autonomy && !state.autonomy.handedOverAt ? `\n${this.autonomyNote(state.autonomy)}` : '';
+    return { stage: state.stage, instruction: (blocked ?? this.instruction(state)) + autonomous, brief, blocked };
   }
 
   private extensionInstruction(extension: LoopExtension): string {
@@ -1978,10 +2004,21 @@ export class ResearchLoopCore {
   }
 
   async report(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
+    const { stage, current: { assetId } } = this.require();
+    const result = await this.reportStage(report);
+    // An autonomous run pays for each executed plan and each search round.
+    const attempt = (stage === 'execute' && (report.outcome === 'proved' || report.outcome === 'failed')) || (stage === 'search' && report.outcome === 'searched');
+    const handover = attempt ? await this.charge(assetId, stage, report.outcome) : undefined;
+    return handover ? { stage: this.require().stage, message: `${result.message}\n${handover}` } : result;
+  }
+
+  private async reportStage(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
     const state = this.require();
     if (state.status !== 'running') throw new Error(`The loop is ${state.status}; resume it first.`);
     await this.resolveOverdueQuestion();
     if (state.pendingQuestion) throw new Error(`Question ${state.pendingQuestion.id} is still pending; answer it (or wait) before reporting.`);
+    const run = await this.autonomy();
+    if (run?.deciding && report.outcome !== 'question') throw new Error(await this.decisionInstruction(run.deciding));
     const stale = report.outcome === 'question' ? undefined : await this.staleBaseProblem();
     if (stale) throw new Error(stale);
     const stage = state.stage;
@@ -1999,6 +2036,7 @@ export class ResearchLoopCore {
     };
     if (report.outcome === 'question') {
       const kind: QuestionKind = stage === 'plan' && report.question?.toLowerCase().includes('fail') ? 'blocked' : 'discussion';
+      if (run) return { stage: this.require().stage, message: await this.decideAlone(kind, report.question || report.summary) };
       await this.askQuestion(kind, report.question || report.summary);
       return { stage, message: `Question recorded for the researcher. Ask it in chat, then record the answer with: ${LOOP_COMMAND} question answer --text "..."` };
     }
@@ -2013,8 +2051,19 @@ export class ResearchLoopCore {
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
+        if (run && state.researcherInput?.kind === 'autonomous_revision' && report.outcome === 'none') {
+          // The agent found no sound revision: the goals stay as they were, and the run ends.
+          delete state.extension;
+          state.researcherInput = undefined;
+          await this.setStage('select', { assetId: undefined });
+          return { stage: 'select', message: await this.handOver(`it found no sound revision of the goals (${report.summary.split('\n')[0]})`) };
+        }
         const extensionProblems = await this.extensionProblems(project);
         if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
+        if (run && state.researcherInput?.kind === 'autonomous_revision' && state.extension) {
+          const baseline = state.extension.baselineRequired;
+          await this.event('autonomy_goals_added', { ids: requiredAssetIds(project).filter((id) => !baseline.includes(id)) });
+        }
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
         state.researcherInput = undefined;
         if ((await this.autoApproveQueued()).includes('project:project')) return finish('project.md drafted and approved automatically (auto mode). Continue with next.', 'select');
@@ -2146,10 +2195,11 @@ export class ResearchLoopCore {
         if (report.outcome !== 'failed') throw new Error('execute outcome must be proved, failed, or question.');
         if (plan.data.type !== 'plan' || plan.data.status !== 'failed' || !sectionContent(plan.content, 'Failure')) throw new Error(`${planId} must have status failed and a ## Failure section.`);
         const failures = await this.failuresSinceDirection(assetId);
-        const limit = (await this.loopSettings()).maxFailedPlans;
+        const limit = (await this.allotment(assetId)) ?? (await this.loopSettings()).maxFailedPlans;
         delete state.current.statementDigest;
         if (failures >= limit) {
           await this.setStage('plan', { planId: undefined });
+          if (run) return { stage: 'plan', message: await this.decideStuck(assetId, `${failures} approaches failed for ${assetId} since the last direction (its allotment was ${limit}).`) };
           await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
           return { stage: 'plan', message: `${failures} approaches failed for ${assetId} (limit ${limit}). Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.` };
         }
@@ -2341,6 +2391,200 @@ export class ResearchLoopCore {
     await this.setStage('select', { assetId: undefined, planId: undefined, counterexampleId: undefined, statementDigest: undefined });
   }
 
+  // ---------- autonomous mode ----------
+
+  /**
+   * Start, keep, or drop the autonomous run to match the researcher's setting.
+   * Returns the run while autonomous mode is on and it has not handed back yet.
+   */
+  private async autonomy(): Promise<NonNullable<LoopState['autonomy']> | undefined> {
+    const state = this.state;
+    if (!state) return undefined;
+    if (!(await this.loopSettings()).autonomy.enabled) {
+      if (state.autonomy) { delete state.autonomy; await this.save(); await this.event('autonomy_off'); }
+      return undefined;
+    }
+    if (!state.autonomy) { state.autonomy = { startedAt: this.now(), spent: 0 }; await this.save(); await this.event('autonomy_started'); }
+    return state.autonomy.handedOverAt ? undefined : state.autonomy;
+  }
+
+  /** Why the autonomous run is over, or undefined while budget and time remain. */
+  private autonomyOver(run: NonNullable<LoopState['autonomy']>, settings: LoopSettings): string | undefined {
+    if (run.spent >= settings.autonomyBudget) return `it spent its budget of ${settings.autonomyBudget} attempt(s)`;
+    if (settings.autonomyHours > 0 && Date.parse(this.now()) - Date.parse(run.startedAt) >= settings.autonomyHours * 3600_000) return `it reached its time limit of ${settings.autonomyHours} hour(s)`;
+    return undefined;
+  }
+
+  /** One attempt spent on `assetId`; returns the hand-back message when that was the last one. */
+  private async charge(assetId: string | undefined, stage: LoopStage, outcome: string): Promise<string | undefined> {
+    const run = await this.autonomy();
+    if (!run) return undefined;
+    run.spent += 1;
+    await this.save();
+    await this.event('autonomy_spent', { assetId, stage, outcome });
+    const over = this.autonomyOver(run, await this.loopSettings());
+    return over ? this.handOver(over) : undefined;
+  }
+
+  /** End the autonomous run: a handoff tells the researcher what happened, and the loop pauses for them. */
+  private async handOver(reason: string): Promise<string> {
+    const state = this.require();
+    const run = state.autonomy!;
+    run.handedOverAt = this.now();
+    delete run.deciding;
+    const text = `Autonomous run finished: ${reason}.`;
+    await this.event('autonomy_handover', { reason, spent: run.spent });
+    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent added goals of its own ${run.revisions} time(s), keeping yours` : ''}.`);
+    await this.pause(text);
+    return `${text} The loop is handed back to the researcher: stop working now and tell them briefly what was proved, what was set aside, and what waits for their review.`;
+  }
+
+  autonomyNote(run: NonNullable<LoopState['autonomy']>): string {
+    const settings = this.lastSettings ?? DEFAULT_LOOP_SETTINGS;
+    const until = settings.autonomyHours > 0 ? `, until ${new Date(Date.parse(run.startedAt) + settings.autonomyHours * 3600_000).toISOString()}` : '';
+    return `Autonomous mode (set by the researcher): they are away. Never call ask_researcher or report question; decide every question yourself and say what you chose and why in the report summary. Budget: ${run.spent} of ${settings.autonomyBudget} attempts spent (an executed plan or a search round is one)${until}. When a result's attempts run out, decide yourself whether it deserves more (${LOOP_COMMAND} budget allocate) or should be set aside.`;
+  }
+
+  /**
+   * Nothing is left that the agent can do alone, but results it could not prove are set aside:
+   * while revisions remain, it rethinks the goals itself. The revision is an extension of the
+   * approved project, so it can only add results (a weaker statement, a special case, another
+   * route) and never drops the researcher's. Returns whether a revision started.
+   */
+  private async reviseGoals(run: NonNullable<LoopState['autonomy']>): Promise<boolean> {
+    const state = this.require();
+    const settings = await this.loopSettings();
+    if ((run.revisions ?? 0) >= settings.autonomyRevisions || !(await this.isProjectApproved())) return false;
+    const setAside = Object.entries(state.parked).filter(([id, info]) => info.reason !== 'counterexample_pending' && !(run.revisedFor ?? []).includes(id));
+    if (!setAside.length) return false;
+    run.revisions = (run.revisions ?? 0) + 1;
+    run.revisedFor = [...(run.revisedFor ?? []), ...setAside.map(([id]) => id)];
+    const list = setAside.map(([id, info]) => `${id} (${info.reason.replace(/_/g, ' ')}${info.note ? `: ${info.note}` : ''})`).join('; ');
+    const goal = `Autonomous revision ${run.revisions} of ${settings.autonomyRevisions} (the researcher is away). Set aside: ${list}. From what is proved so far and what the failed plans and searches showed, judge whether a weaker statement, a special case, or another route to the Main Problem is within reach. If so, add it under new asset ID(s) and say in ## Intended Contribution what changed and why; the researcher decides at hand-back whether to keep the originals. If no sound revision is in sight, run: ${LOOP_COMMAND} report none --summary "<why>", and the loop hands back.`;
+    await this.markExtension(goal);
+    state.researcherInput = { kind: 'autonomous_revision', text: goal, at: this.now() };
+    state.lastError = null;
+    await this.event('autonomy_revision', { revision: run.revisions, setAside: setAside.map(([id]) => id) });
+    await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined });
+    return true;
+  }
+
+  /** The current or last autonomous run for the Overview; undefined when there has been none since the loop last resumed. */
+  async autonomySummary(): Promise<AutonomyView | undefined> {
+    const state = this.state;
+    const run = state?.autonomy;
+    if (!state || !run) return undefined;
+    const settings = await this.loopSettings();
+    const events = (await this.recentEvents(Number.MAX_SAFE_INTEGER)).filter((event) => String(event.at ?? '') >= run.startedAt);
+    const spending = new Map<string, number>();
+    const proved: string[] = [];
+    const setAside: Array<{ id: string; note?: string }> = [];
+    const addedGoals: string[] = [];
+    let decided = 0;
+    for (const event of events) {
+      const assetId = typeof event.assetId === 'string' ? event.assetId : undefined;
+      if (event.type === 'autonomy_spent' && assetId) {
+        spending.set(assetId, (spending.get(assetId) ?? 0) + 1);
+        if (event.outcome === 'proved' && !proved.includes(assetId)) proved.push(assetId);
+      }
+      if (event.type === 'parked' && event.reason === 'agent_gave_up' && assetId && state.parked[assetId] && !setAside.some((item) => item.id === assetId)) setAside.push({ id: assetId, note: state.parked[assetId].note });
+      if (event.type === 'autonomy_goals_added' && Array.isArray(event.ids)) for (const id of event.ids) if (!addedGoals.includes(String(id))) addedGoals.push(String(id));
+      if (event.type === 'autonomy_decided') decided += 1;
+    }
+    const handover = events.filter((event) => event.type === 'autonomy_handover').pop();
+    return {
+      active: state.status === 'running' && !run.handedOverAt, startedAt: run.startedAt, handedOverAt: run.handedOverAt,
+      reason: run.handedOverAt && typeof handover?.reason === 'string' ? handover.reason : undefined,
+      spent: run.spent, budget: settings.autonomyBudget,
+      deadline: settings.autonomyHours > 0 ? new Date(Date.parse(run.startedAt) + settings.autonomyHours * 3600_000).toISOString() : undefined,
+      revisions: run.revisions ?? 0, revisionLimit: settings.autonomyRevisions,
+      spending: [...spending].map(([id, attempts]) => ({ id, attempts })).sort((a, b) => b.attempts - a.attempts),
+      proved, setAside, addedGoals, decided,
+    };
+  }
+
+  /** Required results the agent added in any autonomous revision of the goals; they stay marked after the run. */
+  async agentGoals(): Promise<string[]> {
+    const ids = (await this.recentEvents(Number.MAX_SAFE_INTEGER, (event) => event.type === 'autonomy_goals_added')).flatMap((event) => Array.isArray(event.ids) ? event.ids.map(String) : []);
+    return [...new Set(ids)];
+  }
+
+  /** Attempts the agent gave an asset with `budget allocate`, while that is its latest direction. */
+  private async allotment(assetId: string): Promise<number | undefined> {
+    const direction = latestDirection(await this.decisions(), assetId);
+    return direction?.reason === 'autonomous' ? direction.rounds : undefined;
+  }
+
+  private async isDraftResult(assetId: string): Promise<boolean> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+    try { return Boolean(raw) && parseMarkdown(raw).data.status === 'draft'; } catch { return false; }
+  }
+
+  /** A result's attempts ran out: the loop waits on the agent's own decision, never on the researcher. */
+  private async decideStuck(assetId: string, what: string): Promise<string> {
+    const run = this.require().autonomy!;
+    run.deciding = assetId;
+    await this.save();
+    await this.event('autonomy_deciding', { assetId });
+    return this.decisionInstruction(assetId, what);
+  }
+
+  private async decisionInstruction(assetId: string, what?: string): Promise<string> {
+    const run = this.require().autonomy!;
+    const left = Math.max(0, (await this.loopSettings()).autonomyBudget - run.spent);
+    return `${what ?? `The attempts for ${assetId} are used up.`} Decide yourself, without the researcher: read its failed plans and search board (${LOOP_COMMAND} show <plan>, ${LOOP_COMMAND} search status ${assetId}) and judge whether a genuinely different approach is in sight. Then either give it more attempts with that approach: ${LOOP_COMMAND} budget allocate ${assetId} <n> --reason "<what the failures show and what to try instead>" (${left} attempt(s) of the budget left; weigh what other results still need), or set it aside: ${LOOP_COMMAND} park ${assetId} --reason agent_gave_up --note "<the obstruction, and the kind of idea that would get past it>".`;
+  }
+
+  /**
+   * Autonomous mode: the agent gives an asset `attempts` more tries with a
+   * direction of its own. Recorded as a direction, so failed plans before it
+   * stop counting and the plan pack shows it; a set-aside asset comes back.
+   */
+  async allocate(assetId: string, attempts: number, reason: string): Promise<string> {
+    const state = this.require();
+    const run = await this.autonomy();
+    if (!run) throw new Error('budget allocate works only in autonomous mode, which the researcher turns on in Settings.');
+    if (!reason.trim()) throw new Error('Say in --reason what the failures show and what to try instead.');
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+    if (!raw) throw new Error(`Unknown asset ${assetId}.`);
+    const data = parseMarkdown(raw).data;
+    if (data.status !== 'draft' || !PROVABLE_TYPES.has(data.type)) throw new Error(`${assetId} is not a draft theorem, lemma, proposition, or construction.`);
+    const left = (await this.loopSettings()).autonomyBudget - run.spent;
+    if (!Number.isInteger(attempts) || attempts < 1 || attempts > left) throw new Error(`Give a whole number of attempts from 1 to ${left} (the budget left).`);
+    const construct = isConstructionSpec(raw);
+    const searchRound = construct ? (await this.searchProgressFor(assetId)).lastRound : undefined;
+    await this.writeDecision('direction', assetId, reason.trim(), { reason: 'autonomous', rounds: attempts, failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
+    delete state.parked[assetId];
+    await this.event('budget_allocated', { assetId, attempts });
+    if (run.deciding === assetId) {
+      delete run.deciding;
+      if (construct) await this.setStage('select', { assetId: undefined });
+      else await this.setStage('plan', { assetId, planId: undefined });
+    } else await this.save();
+    return `${assetId} has ${attempts} more ${construct ? 'search round(s)' : 'proof attempt(s)'} with your direction. Run: ${LOOP_COMMAND} next`;
+  }
+
+  /**
+   * Autonomous mode answers in the researcher's place, without a popup: a stuck
+   * result waits on the agent's own decision; any other question is kept as an
+   * idea for the researcher, and the agent goes on with its stated default.
+   * Returns what the agent does next.
+   */
+  async decideAlone(kind: QuestionKind, prompt: string, assetId?: string): Promise<string> {
+    const state = this.require();
+    const target = assetId ?? state.current.assetId;
+    if (kind === 'blocked' && target && await this.isDraftResult(target)) return this.decideStuck(target, `You are stuck on ${target}: ${prompt}`);
+    await this.event('autonomy_decided', { kind, assetId: target });
+    if (kind === 'goals') {
+      if (!projectSection(await this.files.readFile(this.paths.projectMd).catch(() => ''), 'Main Problem')) return this.handOver('it has no research goal to work on; give one and resume');
+      await this.setStage('draft_project');
+      return `Autonomous mode: the researcher is not asked. project.md already states the goal; continue with ${LOOP_COMMAND} next.`;
+    }
+    if (kind === 'counterexample_review') return `Autonomous mode: nobody reviews it now; it stays recorded. Continue with ${LOOP_COMMAND} next.`;
+    if (prompt.trim()) await this.saveIdea(`Open question: ${prompt.slice(0, 60)}`, `${prompt}\n\nAutonomous mode: the researcher was not asked; the agent went on with its stated default.`, target && await this.files.exists(`${this.paths.assets}/${target}.md`) ? [target] : [], 'agent', ['open-question'], 'question');
+    return 'Autonomous mode: the researcher is not asked. Go on with the default you stated; the question is kept as an idea for their review.';
+  }
+
   // ---------- status ----------
 
   statusSummary(): Record<string, unknown> {
@@ -2350,7 +2594,7 @@ export class ResearchLoopCore {
       status: state.status, stage: state.stage, provider: state.provider, assetId: state.current.assetId, planId: state.current.planId,
       counterexampleId: state.current.counterexampleId, waitingForHuman: isWaitingForHuman(state), pendingQuestion: state.pendingQuestion,
       approvalQueue: state.approvalQueue, parked: state.parked, lock: state.lock, lastSummary: state.lastSummary, lastError: state.lastError,
-      unreadAnswers: state.answers.filter((answer) => !answer.consumed), updatedAt: state.updatedAt,
+      unreadAnswers: state.answers.filter((answer) => !answer.consumed), autonomy: state.autonomy, updatedAt: state.updatedAt,
     };
   }
 
@@ -2365,7 +2609,8 @@ export class ResearchLoopCore {
     const unread = state.answers.filter((answer) => !answer.consumed);
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
-    const auto = this.lastSettings?.autoApprove;
+    if (state.autonomy && !state.autonomy.handedOverAt) lines.push(this.autonomyNote(state.autonomy));
+    const auto = this.lastSettings?.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : this.lastSettings?.autoApprove;
     if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${AUTO_APPROVE_RULES.filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
     const rigor = this.lastSettings?.rigor;
     if (rigor) lines.push(`How careful (set by the researcher): counterexample search ${rigor.refuteSearch === 'all' ? 'for every result' : rigor.refuteSearch === 'main' ? 'for main results only' : 'off'}; definitions ${rigor.agreeDefinitions === 'main' ? 'used by main results are agreed before proving' : 'checked at the end'}; when stuck without a direction, ${rigor.whenStuck === 'retry' ? 'try one new approach of your own' : 'the result is set aside'}; unanswered questions ${rigor.unansweredQuestions === 'wait' ? 'wait for the researcher' : 'proceed with your stated default'}.`);
@@ -2387,4 +2632,10 @@ function sameDigests(stamped: unknown, current: Record<string, string>): boolean
   if (!stamped || typeof stamped !== 'object' || Array.isArray(stamped)) return false;
   const entries = Object.entries(stamped as Record<string, unknown>);
   return entries.length === Object.keys(current).length && entries.every(([id, digest]) => current[id] === digest);
+}
+
+/** A direction as the plan pack shows it: the agent's own (autonomous mode) is not the researcher's. */
+function directionFocus(direction: DecisionInfo | undefined): { direction?: string; ownDirection?: boolean } {
+  if (!direction) return {};
+  return direction.reason === 'autonomous' ? { direction: direction.text, ownDirection: true } : { direction: direction.text };
 }

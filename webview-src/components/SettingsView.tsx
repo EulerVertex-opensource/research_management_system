@@ -28,7 +28,8 @@ const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?
   project: { label: 'Project goals', hint: 'project.md and its required results', warning: 'The loop will pursue goals you have not reviewed.' },
 };
 const RULES = AUTO_APPROVE_RULES.map((id) => ({ id, ...RULE_TEXT[id] }));
-const FIELD_GROUPS = Object.keys(LOOP_FIELD_GROUPS) as LoopFieldGroup[];
+/** Autonomous mode's numbers sit under its own switch, not among the general groups. */
+const FIELD_GROUPS = (Object.keys(LOOP_FIELD_GROUPS) as LoopFieldGroup[]).filter((group) => group !== 'autonomy');
 
 // ---------- drafts: what the form holds, as the inputs show it ----------
 
@@ -37,7 +38,7 @@ const toNumber = (text: string) => text.trim() === '' ? NaN : Number(text);
 
 function agentDraft(s: SettingsPayload) { return { provider: s.agent.provider, useDefaultOnStart: s.agent.useDefaultOnStart }; }
 function loopDraft(s: SettingsPayload) {
-  return { autoApprove: { ...s.loop.autoApprove }, rigor: { ...s.loop.rigor }, ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, num(s.loop[key])])) as Record<LoopNumberKey, string> };
+  return { autoApprove: { ...s.loop.autoApprove }, rigor: { ...s.loop.rigor }, autonomy: { ...s.loop.autonomy }, ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, num(s.loop[key])])) as Record<LoopNumberKey, string> };
 }
 function syncDraft(s: SettingsPayload) {
   const sync = s.sync;
@@ -57,8 +58,8 @@ function patchFor(section: SectionId, draft: Drafts, saved: Drafts): SettingsPat
   const changed = <T extends Record<string, unknown>>(next: T, old: T) => Object.fromEntries(Object.entries(next).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(old[key])));
   if (section === 'agent') return { agent: changed(draft.agent, saved.agent) };
   if (section === 'loop') {
-    const { autoApprove, rigor, ...numbers } = changed(draft.loop, saved.loop) as Partial<Drafts['loop']>;
-    return { loop: { ...(autoApprove ? { autoApprove } : {}), ...(rigor ? { rigor } : {}), ...Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, toNumber(value as string)])) } };
+    const { autoApprove, rigor, autonomy, ...numbers } = changed(draft.loop, saved.loop) as Partial<Drafts['loop']>;
+    return { loop: { ...(autoApprove ? { autoApprove } : {}), ...(rigor ? { rigor } : {}), ...(autonomy ? { autonomy } : {}), ...Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, toNumber(value as string)])) } };
   }
   if (section === 'sync') {
     const sync = changed(draft.sync, saved.sync) as Record<string, unknown>;
@@ -121,7 +122,13 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
   const agent = drafts.agent;
   const loop = drafts.loop;
   const sync = drafts.sync;
-  const autoOn = loop.autoApprove.enabled;
+  const autonomyOn = loop.autonomy.enabled;
+  const autoOn = loop.autoApprove.enabled || autonomyOn;
+  const numberField = (key: LoopNumberKey, disabled = false) => {
+    const field = LOOP_NUMBER_FIELDS[key];
+    return <div key={key} style={{ opacity: disabled ? 0.5 : 1 }}><NumberField label={field.label} hint={field.hint} unit={field.unit} value={loop[key]} range={field.range}
+      onChange={(value) => update('loop', { [key]: value } as Partial<Drafts['loop']>)} error={error('loop', `loop.${key}`)} /></div>;
+  };
 
   return (
     <div style={{ height: '100%', overflow: 'auto' }}>
@@ -177,34 +184,40 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Switch on={autoOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, enabled: value } })} label="Auto mode" />
+            <Switch on={autonomyOn} onChange={(value) => update('loop', { autonomy: { enabled: value } })} label="Autonomous mode" />
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Autonomous mode</div>
+              <div style={{ fontSize: 12, color: COLOR.muted }}>The agent asks you nothing: it decides every question itself, shares the budget among the results, sets aside what it cannot do, and hands the loop back when the budget or time runs out. Every auto-approve rule below applies.</div>
+            </div>
+          </div>
+          <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '6px 12px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '6px 16px' }}>
+            {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === 'autonomy').map((key) => numberField(key, !autonomyOn))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Switch on={autoOn} disabled={autonomyOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, enabled: value } })} label="Auto mode" />
             <div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Auto mode</div>
-              <div style={{ fontSize: 12, color: COLOR.muted }}>Approve these results without asking you. Questions still come to you.</div>
+              <div style={{ fontSize: 12, color: COLOR.muted }}>{autonomyOn ? 'On while autonomous mode is on: every rule applies.' : 'Approve these results without asking you. Questions still come to you.'}</div>
             </div>
           </div>
           <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '6px 12px', opacity: autoOn ? 1 : 0.5 }}>
             {RULES.map((rule) => (
               <div key={rule.id} style={{ padding: '4px 0' }}>
-                <Check checked={loop.autoApprove[rule.id]} disabled={!autoOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, [rule.id]: value } })}
+                <Check checked={autonomyOn || loop.autoApprove[rule.id]} disabled={!autoOn || autonomyOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, [rule.id]: value } })}
                   label={rule.label} hint={rule.hint} />
-                {rule.warning && autoOn && loop.autoApprove[rule.id] && <Warning text={rule.warning} />}
+                {rule.warning && autoOn && (autonomyOn || loop.autoApprove[rule.id]) && <Warning text={rule.warning} />}
               </div>
             ))}
           </div>
           <div style={{ fontSize: 12, color: COLOR.muted, lineHeight: 1.5 }}>
             Auto approvals are recorded as <code>auto</code> in the shared approval records, so collaborators see them.
             A result whose approval was revoked by a change (its dependency changed, say) always comes back to you.
-            {!saved.loop.autoApprove.enabled && autoOn && settings.loop.queued > 0 && <> Saving approves the eligible ones of the {settings.loop.queued} request(s) now waiting.</>}
+            {!saved.loop.autoApprove.enabled && !saved.loop.autonomy.enabled && autoOn && settings.loop.queued > 0 && <> Saving approves the eligible ones of the {settings.loop.queued} request(s) now waiting.</>}
           </div>
           {FIELD_GROUPS.map((group) => (
             <React.Fragment key={group}>
               {LOOP_FIELD_GROUPS[group] && <Divider label={LOOP_FIELD_GROUPS[group]} />}
-              {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === group).map((key) => {
-                const field = LOOP_NUMBER_FIELDS[key];
-                return <NumberField key={key} label={field.label} hint={field.hint} unit={field.unit} value={loop[key]} range={field.range}
-                  onChange={(value) => update('loop', { [key]: value } as Partial<Drafts['loop']>)} error={error('loop', `loop.${key}`)} />;
-              })}
+              {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === group).map((key) => numberField(key))}
             </React.Fragment>
           ))}
           {settings.loop.problems.map((problem) => <Warning key={problem} text={problem} />)}
@@ -367,10 +380,10 @@ function Check({ checked, disabled, label, hint, onChange }: { checked: boolean;
   );
 }
 
-function Switch({ on, label, onChange }: { on: boolean; label: string; onChange: (value: boolean) => void }) {
+function Switch({ on, label, onChange, disabled = false }: { on: boolean; label: string; onChange: (value: boolean) => void; disabled?: boolean }) {
   return (
-    <button role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}
-      style={{ width: 40, height: 22, borderRadius: 11, border: `1px solid ${on ? 'transparent' : COLOR.border}`, padding: 2, cursor: 'pointer', flexShrink: 0,
+    <button role="switch" aria-checked={on} aria-label={label} disabled={disabled} onClick={() => onChange(!on)}
+      style={{ width: 40, height: 22, borderRadius: 11, border: `1px solid ${on ? 'transparent' : COLOR.border}`, padding: 2, cursor: disabled ? 'default' : 'pointer', flexShrink: 0, opacity: disabled ? 0.6 : 1,
         background: on ? 'var(--vscode-button-background)' : 'var(--vscode-input-background)', display: 'flex', justifyContent: on ? 'flex-end' : 'flex-start' }}>
       <span style={{ width: 16, height: 16, borderRadius: 8, background: on ? 'var(--vscode-button-foreground)' : 'var(--vscode-foreground)', opacity: on ? 1 : 0.6 }} />
     </button>

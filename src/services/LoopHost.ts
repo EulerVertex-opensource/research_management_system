@@ -192,7 +192,7 @@ export class LoopHost implements vscode.Disposable {
       if (!core.current) return [] as string[];
       await core.event('settings_changed', { changed });
       if (next.iterationCap !== previous.iterationCap) await core.setIterationCap(next.iterationCap);
-      return next.autoApprove.enabled ? core.autoApproveQueued() : [];
+      return next.autoApprove.enabled || next.autonomy.enabled ? core.autoApproveQueued() : [];
     });
     if (granted.length) this.output.appendLine(`[loop] Auto mode accepted ${granted.length} waiting item(s): ${granted.map((item) => item.split(':')[1]).join(', ')}`);
   }
@@ -221,16 +221,16 @@ export class LoopHost implements vscode.Disposable {
   }
 
   /**
-   * Auto mode is turned on only from the dashboard. If the file was changed by
-   * something else (an agent bypassing the hook, say) and now enables auto mode, turn it off.
+   * Auto mode and autonomous mode are turned on only from the dashboard. If the file was changed by
+   * something else (an agent bypassing the hook, say) and now enables either, turn it off.
    */
   private async guardLoopSettings(): Promise<void> {
     if (!this.memento) return;
     const text = await this.files.readFile(LOOP_SETTINGS_PATH).catch(() => undefined);
     if (text === undefined || sha256(text) === this.memento.get<string>(SETTINGS_HASH_KEY)) return;
     const { settings } = await readLoopSettings(this.files);
-    if (!settings.autoApprove.enabled) return;
-    const repaired = { ...settings, autoApprove: { ...settings.autoApprove, enabled: false } };
+    if (!settings.autoApprove.enabled && !settings.autonomy.enabled) return;
+    const repaired = { ...settings, autoApprove: { ...settings.autoApprove, enabled: false }, autonomy: { enabled: false } };
     const written = await writeLoopSettings(this.files, repaired);
     await this.memento.update(SETTINGS_HASH_KEY, sha256(written));
     this.output.appendLine('[loop] Auto mode was enabled outside the dashboard; turned it off.');
@@ -325,6 +325,10 @@ export class LoopHost implements vscode.Disposable {
     const total = (await readLoopSettings(this.files)).settings.questionTimeoutSeconds;
     const slice = sliceSeconds(args.wait_seconds);
     if (name === 'ask_researcher') {
+      // Autonomous mode: the researcher is away, so nothing pops up and the agent decides at once.
+      const alone = await this.withCore(async (core) => (await core.loopSettings()).autonomy.enabled && core.current?.status === 'running'
+        ? core.decideAlone((args.kind as QuestionKind) ?? 'discussion', String(args.question ?? ''), typeof args.asset_id === 'string' ? args.asset_id : undefined) : undefined);
+      if (alone !== undefined) return { status: 'final', answered: false, reason: 'autonomous', auto_action: alone };
       const question = await this.withCore((core) => core.askQuestion((args.kind as QuestionKind) ?? 'discussion', String(args.question ?? ''), { assetId: typeof args.asset_id === 'string' ? args.asset_id : undefined, options: Array.isArray(args.options) ? args.options.map(String) : undefined, timeoutSec: total }));
       this.interactions.set(question.id, this.askResearcher(question.id, question.prompt, question.kind, question.options, total));
       return this.awaitInteraction(question.id, slice);
@@ -334,6 +338,8 @@ export class LoopHost implements vscode.Disposable {
       const outcome = await this.withCore((core) => core.requestApproval(kind, target, summary));
       if (outcome.status !== 'queued' || !outcome.request) return { status: 'final', answered: true, decision: 'approved', auto: outcome.status === 'auto_approved', note: outcome.status === 'auto_approved' ? 'Approved automatically (auto mode, set by the researcher).' : 'Already approved; nothing to do.' };
       const request = outcome.request;
+      // Autonomous mode: nobody reviews it until the loop hands back, so the agent does not wait for it.
+      if ((await readLoopSettings(this.files)).settings.autonomy.enabled) return { status: 'final', answered: false, request_id: request.id, reason: 'autonomous', note: 'Queued for the researcher, who reviews it when the loop hands back; continue with other work.' };
       this.interactions.set(request.id, this.requestApproval(request.id, kind, target, summary, total));
       return this.awaitInteraction(request.id, slice);
     }
@@ -480,7 +486,13 @@ export class LoopHost implements vscode.Disposable {
     const events = this.core ? await this.core.recentEvents(80, isTimelineEvent) : [];
     const recheck = this.core ? await this.core.recheckFlags() : {};
     const payload = await collectGraphPayload(this.files, paths, nodes, state, events, recheck);
-    payload.autoMode = (await readLoopSettings(this.files)).settings.autoApprove.enabled;
+    const loopSettings = (await readLoopSettings(this.files)).settings;
+    payload.autoMode = loopSettings.autoApprove.enabled || loopSettings.autonomy.enabled;
+    if (this.core && state) {
+      payload.autonomy = await this.core.autonomySummary();
+      const agentGoals = new Set(await this.core.agentGoals());
+      for (const node of payload.nodes) if (node.required && agentGoals.has(node.id)) node.agentGoal = true;
+    }
     if (this.pendingUpstream) {
       const { ref, behind, reason } = this.pendingUpstream;
       payload.attention.push({
@@ -628,7 +640,7 @@ export class LoopHost implements vscode.Disposable {
       await this.withCore((core) => core.answerQuestion(question.id, outcome.decision === 'answer' ? 'answer' : 'skip', outcome.text, 'popup'));
       return;
     }
-    const alerting = health.key === 'stopped' || health.key === 'stalled' || (health.key === 'paused' && /automatic continuations/.test(health.headline));
+    const alerting = health.key === 'stopped' || health.key === 'stalled' || (health.key === 'paused' && /automatic continuations|autonomous run/.test(health.headline));
     if (!alerting) { this.alerted = undefined; return; }
     if (this.alerted === health.signature) return;
     this.alerted = health.signature;
@@ -640,6 +652,11 @@ export class LoopHost implements vscode.Disposable {
         const action = health.buttons[0]?.action;
         if (action) await this.graphAction(action);
       } else if (choice === overview) await this.openOverview();
+      return;
+    }
+    if (health.key === 'paused' && /autonomous run/.test(health.headline)) {
+      const choice = await vscode.window.showWarningMessage(`${health.headline} ${health.body}`, overview, 'Later');
+      if (choice === overview) await this.openOverview();
       return;
     }
     if (health.key === 'paused') {

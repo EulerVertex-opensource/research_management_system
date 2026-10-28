@@ -50,6 +50,8 @@ export interface GraphNodeView {
   progress: NodeProgress;
   /** Short state label, e.g. "Set aside" or "Needs your review". */
   progressLabel: string;
+  /** A required result the agent added in autonomous mode, beside the researcher's own goals. */
+  agentGoal?: boolean;
   /** One line under the title, e.g. "3 proof attempts failed" or "Needs Key bound first". */
   progressDetail: string;
   /** Taken from the literature rather than proved here: a paper or textbook source, or a library result. */
@@ -165,6 +167,32 @@ export interface LoopHealth {
   signature: string;
 }
 
+/** An autonomous run as the Overview shows it, derived from the loop state and its events. */
+export interface AutonomyView {
+  /** Working on its own now; false once it handed back. */
+  active: boolean;
+  startedAt: string;
+  handedOverAt?: string;
+  /** Why it handed back. */
+  reason?: string;
+  spent: number;
+  budget: number;
+  /** When the time limit hands back; absent without one. */
+  deadline?: string;
+  revisions: number;
+  revisionLimit: number;
+  /** Attempts per result in this run, most first. */
+  spending: Array<{ id: string; attempts: number }>;
+  /** Results it proved in this run. */
+  proved: string[];
+  /** Results it set aside in this run and that are still set aside, with its note. */
+  setAside: Array<{ id: string; note?: string }>;
+  /** Required results it added in this run's revisions of the goals. */
+  addedGoals: string[];
+  /** Questions it decided itself; each is kept as an idea. */
+  decided: number;
+}
+
 /** One line of the Activity timeline. */
 export interface HistoryEntry { at: string; text: string; tone: LoopTone; target?: string }
 
@@ -176,6 +204,8 @@ export interface GraphPayload {
   loop?: { status: string; stage: string; assetId?: string };
   /** Auto mode is on: some approvals are granted without the researcher. */
   autoMode?: boolean;
+  /** The autonomous run: its budget while it works, and what it did once it handed back. */
+  autonomy?: AutonomyView;
   manuscriptState?: string;
   nodes: GraphNodeView[];
   edges: GraphEdgeView[];
