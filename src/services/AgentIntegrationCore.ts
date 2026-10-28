@@ -134,7 +134,7 @@ export function workerAgentName(tier: WorkerTier): string { return `research-wor
  */
 export function buildWorkerAgent(tier: WorkerTier, existingText: string, skillsDir: string, loopCommand: string): string | undefined {
   if (existingText.trim() && !existingText.includes(WORKER_MARK)) return undefined;
-  const stages = tier === 'light' ? 'scaffold, sources, and search_summary' : 'search, verify_counterexample, verify_construction, plan, and execute';
+  const stages = tier === 'light' ? 'scaffold, sources, and search_summary' : 'search, verify_counterexample, verify_construction, plan, execute, and verify_proof';
   return `---
 name: ${workerAgentName(tier)}
 description: Runs one research-loop stage (${stages}) from its compiled context pack and returns a short summary. Used by the research-loop driver only.

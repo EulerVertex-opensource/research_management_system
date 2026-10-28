@@ -33,6 +33,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
       if (stage === 'ready') return entry('Every main result is done.', 'success');
       if (stage === 'plan') return entry(`Started planning a proof of ${name}.`);
       if (stage === 'execute') return entry(`Started proving ${name}.`);
+      if (stage === 'verify_proof') return entry(`Started checking the proof of ${name}.`);
       if (stage === 'search') return entry(`Started a search round on ${name}.`);
       if (stage === 'verify_counterexample') return entry(`Started checking a possible counterexample to ${name}.`);
       if (stage === 'verify_construction') return entry(`Started checking a candidate for ${name}.`);
@@ -57,6 +58,8 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'refuted': return { text: `${name} is disproved by ${title(text(event.exampleId))}.`, tone: 'error', target: asset };
     case 'counterexample_rejected': return { text: `You rejected the possible counterexample ${title(text(event.exampleId))}.`, tone: 'info' };
     case 'construction_found': return entry(`Found a candidate for ${name}.`, 'success');
+    case 'proof_verified': return entry(`An independent check confirmed the proof of ${name}.`, 'success');
+    case 'proof_rejected': return entry(`An independent check found a gap in the proof of ${name}; the agent will try another approach.`, 'warning');
     case 'search_round': return entry(`Search round ${Number(event.round) || '?'} on ${name}: ${plural(Number(event.candidates) || 0, 'candidate')}.`);
     case 'search_finished': return entry(`The search on ${name} finished${event.rounds ? ` after ${plural(Number(event.rounds), 'round')}` : ''}.`);
     case 'question': return entry(`The agent asked you a question${name ? ` about ${name}` : ''}.`, 'warning');

@@ -19,17 +19,17 @@ export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
  * researcher does not respond). A Record so a new policy without a place does not compile.
  */
 export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away'> = {
-  refuteSearch: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks',
+  refuteSearch: 'checks', verifyProofs: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks',
   missingDefinitions: 'away', whenStuck: 'away', unansweredQuestions: 'away',
 };
 export const CHECK_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'checks');
 export const AWAY_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'away');
-type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'agreeDefinitions' | 'onDependencyChange'>;
+type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'verifyProofs' | 'agreeDefinitions' | 'onDependencyChange'>;
 
 /** How thorough: Careful is the default; Fast trades checks for progress. Presets cover the checks only. */
 export const RIGOR_PRESETS: Record<'careful' | 'fast', CheckPolicy> = {
-  careful: { refuteSearch: 'all', agreeDefinitions: 'main', onDependencyChange: 'revert' },
-  fast: { refuteSearch: 'main', agreeDefinitions: 'off', onDependencyChange: 'flag' },
+  careful: { refuteSearch: 'all', verifyProofs: 'agent', agreeDefinitions: 'main', onDependencyChange: 'revert' },
+  fast: { refuteSearch: 'main', verifyProofs: 'off', agreeDefinitions: 'off', onDependencyChange: 'flag' },
 };
 export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' };
 
@@ -61,6 +61,7 @@ export interface RigorField { label: string; hint: string; options: Record<strin
 /** Every "How careful" setting, in display order, with the words for each choice. */
 export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(typeof RIGOR_OPTIONS)[K][number], string> } } = {
   refuteSearch: { label: 'Look for counterexamples before proving', hint: 'A search for a counterexample before each proof catches false statements early, at a cost in tokens.', options: { all: 'Every result', main: 'Main results only', off: 'Never' } },
+  verifyProofs: { label: 'Check each proof', hint: 'The agent that planned a proof also writes it. An independent check catches gaps before the proof is approved. If you check them yourself, proofs are never approved automatically, whatever the level above allows.', options: { agent: 'An independent agent verifies it', researcher: 'I verify every proof myself', off: 'No separate check' } },
   agreeDefinitions: { label: 'Agree on definitions before proving', hint: 'The definitions a main result’s statement uses decide what the goal means.', options: { main: 'Main results’ definitions first', off: 'Check them at the end' } },
   onDependencyChange: { label: 'When something a result rests on changes', hint: 'A changed definition or statement can make the proofs built on it be about something else.', options: { revert: 'Everything downstream back to review', flag: 'Mark it for re-check' } },
   missingDefinitions: { label: 'When a definition is used but missing', hint: 'The agent drafts it in either case; it never accepts it for you.', options: { wait: 'Draft it, then wait for me', continue: 'Draft it and go on' } },

@@ -228,6 +228,10 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
       }
     }
   }
+  // The loop stamps a plan's verified proof after an independent check confirms it; an agent stamping it would skip that check.
+  if (shellWrites && /verified_proof_digest/.test(text) && (isShell || targets.some((target) => under(target, paths.plans, root)))) {
+    return { deny: true, reason: 'Research loop: only the loop records that a proof was verified (verified_proof_digest). Write ## Verdict in the plan and report confirmed or rejected.' };
+  }
   if (isShell && shellWrites && /status:\s*['"]?approved/.test(text) && (text.includes(paths.assets) || text.includes(paths.definitions))) {
     return { deny: true, reason: 'Research loop: shell commands may not set status: approved on assets or definitions.' };
   }

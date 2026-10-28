@@ -21,6 +21,7 @@ const STAGE_TEXT: Record<string, string> = {
   verify_construction: 'checking a candidate for {result}',
   plan: 'planning a proof of {result}',
   execute: 'proving {result}',
+  verify_proof: 'checking the proof of {result}',
   waiting: 'stopped until you act',
   ready: 'done with every main result',
 };

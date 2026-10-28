@@ -26,7 +26,8 @@ const plan = (id, status = 'pending', difference = '') => matter.stringify(`\n##
 const succeeded = (id) => matter.stringify('\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [x] Apply reflexivity.\n\n## Verification\n\nCheck the equality.\n\n## Outcome\n\nProof incorporated into main_theorem.\n', { type: 'plan', title: id, status: 'succeeded', target_asset: 'main_theorem', inspired_by: [], tags: [] });
 const check = (target = 'main_theorem') => matter.stringify('\n## Cases checked\n\n- n = 0 and n = 1\n\n## Limitations\n\nOnly small cases.\n', { type: 'falsification_check', title: `Check ${target}`, target_asset: target, outcome: 'no_counterexample_found' });
 const SETTINGS = '.research-assistant-loop/settings.json';
-const auto = (rules = {}, extra = {}) => JSON.stringify({ version: 1, autoApprove: { enabled: true, ...rules }, ...extra });
+// Proofs go straight to approval here; the independent check has its own tests (verify-proof.test.cjs).
+const auto = (rules = {}, extra = {}) => JSON.stringify({ version: 1, autoApprove: { enabled: true, ...rules }, rigor: { verifyProofs: 'off' }, ...extra });
 
 function memoryFiles(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -42,7 +43,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 function fixture(initial = {}, options = { iterationCap: 5 }) {
-  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', ...initial });
+  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, rigor: { verifyProofs: 'off' } }), ...initial });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, ...options });
   return { files, core, map: files.map };
 }
@@ -146,7 +147,7 @@ test('auto approvals in one selection are followed by a fresh one: supporting re
 test('a kind switched off stays with the researcher', async () => {
   // Checked at the end (Fast): the definition comes to the researcher once the proof is in.
   const f = fixture();
-  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off' } }));
+  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off', verifyProofs: 'off' } }));
   await driveToFalsify(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   await prove(f);
   assert.equal((await f.core.next()).stage, 'waiting');

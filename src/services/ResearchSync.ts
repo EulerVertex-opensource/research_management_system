@@ -75,7 +75,7 @@ export function syncNowAction(status: Record<string, unknown>): SyncNowAction {
   return { action: 'none' };
 }
 
-const WORKING_STAGES = new Set(['draft_project', 'scaffold', 'sources', 'search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute']);
+const WORKING_STAGES = new Set(['draft_project', 'scaffold', 'sources', 'search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute', 'verify_proof']);
 
 export class ResearchSync {
   constructor(

@@ -82,12 +82,12 @@ export interface RenderedContext { text: string; tokens: number; included: Conte
 
 export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
-  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000,
+  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
-  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep',
+  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }
@@ -254,6 +254,13 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
       }
       break;
     }
+    case 'verify_proof':
+      if (!target) break;
+      asset(target, 'all', 0, 'the statement and the proof to verify');
+      for (const dep of deps(target)) asset(dep, 'statement', 1, 'dependency the proof may use as a black box');
+      definitionsOf([target], 1, 2);
+      excluded.push('the plan and its reasoning (verify the proof as written)', 'proofs of dependencies');
+      break;
     default:
       break;
   }

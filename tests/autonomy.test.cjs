@@ -38,7 +38,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 function fixture(extra = {}, clock) {
-  const settings = { version: 1, rigor: { refuteSearch: 'off' }, autonomy: { enabled: true }, maxFailedPlans: 1, ...extra };
+  const settings = { version: 1, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, maxFailedPlans: 1, ...extra };
   const files = memoryFiles({ 'research/project.md': '# Project\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify(settings) });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, iterationCap: 5, ...(clock ? { now: () => clock.now } : {}) });
   return { files, core, map: files.map };

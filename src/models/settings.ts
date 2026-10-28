@@ -32,6 +32,8 @@ export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
 export const RIGOR_OPTIONS = {
   /** Counterexample search before a proof: every result, main results only, or none. */
   refuteSearch: ['all', 'main', 'off'],
+  /** A proof the loop wrote: an independent agent verifies it before approval, the researcher verifies every one (never approved automatically), or neither. */
+  verifyProofs: ['agent', 'researcher', 'off'],
   /** The definitions main results use must be agreed before any proof work, or are checked at the end. */
   agreeDefinitions: ['main', 'off'],
   /** When a statement or definition a result rests on changes: send everything downstream back to review, or mark it for re-check. */

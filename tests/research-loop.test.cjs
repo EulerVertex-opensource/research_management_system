@@ -39,8 +39,11 @@ function memoryFiles(initial = {}) {
 }
 
 let counter = 0;
+// These tests drive a proof straight to approval; the independent check has its own tests (verify-proof.test.cjs).
+const NO_PROOF_CHECK = JSON.stringify({ version: 1, rigor: { verifyProofs: 'off' } });
+
 function fixture(initial = {}) {
-  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', ...initial });
+  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', '.research-assistant-loop/settings.json': NO_PROOF_CHECK, ...initial });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, iterationCap: 5 });
   return { files, core, map: files.map };
 }

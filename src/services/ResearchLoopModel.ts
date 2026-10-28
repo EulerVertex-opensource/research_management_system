@@ -17,7 +17,7 @@ export type AgentProvider = 'claude' | 'codex';
 export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
-  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'waiting' | 'ready';
+  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'waiting' | 'ready';
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification';
