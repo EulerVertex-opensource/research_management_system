@@ -183,6 +183,37 @@ test('auto mode on project goals skips review_project; off by default', async ()
   assert.equal((await on.core.next()).stage, 'scaffold');
 });
 
+test('a state reload during an auto approval does not re-approve the project forever', async () => {
+  const f = fixture();
+  f.map.set(SETTINGS, auto({ project: true }));
+  await f.core.start('claude', { goal: 'Prove it.' });
+  f.map.set(paths.projectMd, project);
+  // A file watcher in the extension reloads the core mid-approval, while state.json still holds the request.
+  const write = f.files.writeFile;
+  let approvalWrites = 0;
+  let reloaded = false;
+  f.files.writeFile = async (file, content) => {
+    await write(file, content);
+    if (file !== 'research/approvals/project.json') return;
+    if (++approvalWrites > 5) throw new Error('project approval rewritten in a loop');
+    if (!reloaded) { reloaded = true; await f.core.load(); }
+  };
+  const result = await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  assert.equal(reloaded, true);
+  assert.equal(approvalWrites, 1);
+  assert.equal(result.stage, 'select');
+  assert.equal(f.core.current.approvalQueue.length, 0);
+});
+
+test('peek reads the state without replacing the one in use', async () => {
+  const f = fixture();
+  await f.core.start('claude', { goal: 'Prove it.' });
+  const inUse = f.core.current;
+  const peeked = await f.core.peek();
+  assert.equal(peeked.runId, inUse.runId);
+  assert.equal(f.core.current, inUse);
+});
+
 test('counterexamples are confirmed automatically only when switched on', async () => {
   for (const enabled of [false, true]) {
     const f = fixture();

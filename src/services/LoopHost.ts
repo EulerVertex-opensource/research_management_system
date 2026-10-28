@@ -201,7 +201,7 @@ export class LoopHost implements vscode.Disposable {
   async approvalSummary(): Promise<{ queued: number; recentAuto: Array<{ at: string; kind: string; target: string }> }> {
     if (!this.core) return { queued: 0, recentAuto: [] };
     let state: LoopState | undefined;
-    try { state = await this.core.load(); } catch { state = undefined; }
+    try { state = await this.core.peek(); } catch { state = undefined; }
     const recentAuto = (await this.core.recentEvents(1000)).filter((event) => event.type === 'auto_approved').slice(-10).reverse()
       .map((event) => ({ at: String(event.at ?? ''), kind: String(event.kind ?? ''), target: String(event.target ?? '') }));
     return { queued: state?.approvalQueue.length ?? 0, recentAuto };
@@ -481,7 +481,7 @@ export class LoopHost implements vscode.Disposable {
     if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
     const paths = this.paths;
     let state: LoopState | undefined;
-    try { state = await this.core?.load(); } catch { state = undefined; }
+    try { state = await this.core?.peek(); } catch { state = undefined; }
     // Filtered before the limit: a stage that reads many nodes logs a context_request each, which the timeline does not show.
     const events = this.core ? await this.core.recentEvents(80, isTimelineEvent) : [];
     const recheck = this.core ? await this.core.recheckFlags() : {};
@@ -489,7 +489,7 @@ export class LoopHost implements vscode.Disposable {
     const loopSettings = (await readLoopSettings(this.files)).settings;
     payload.autoMode = loopSettings.autoApprove.enabled || loopSettings.autonomy.enabled;
     if (this.core && state) {
-      payload.autonomy = await this.core.autonomySummary();
+      payload.autonomy = await this.core.autonomySummary(state);
       const agentGoals = new Set(await this.core.agentGoals());
       for (const node of payload.nodes) if (node.required && agentGoals.has(node.id)) node.agentGoal = true;
     }
@@ -602,7 +602,7 @@ export class LoopHost implements vscode.Disposable {
   private async refreshStatusBar(): Promise<void> {
     if (!this.core) { this.statusBar.hide(); return; }
     let state: LoopState | undefined;
-    try { state = await this.core.load(); } catch { state = undefined; }
+    try { state = await this.core.peek(); } catch { state = undefined; }
     if (state?.pendingQuestion && !this.openQuestions.has(state.pendingQuestion.id) && !this.resolving) {
       // A question the loop raised itself (no popup is waiting on it): resolve it once overdue, per the researcher's setting.
       this.resolving = true;

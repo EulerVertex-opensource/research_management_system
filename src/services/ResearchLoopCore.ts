@@ -155,15 +155,20 @@ export class ResearchLoopCore {
   // ---------- state persistence ----------
 
   async load(): Promise<LoopState | undefined> {
-    const raw = await this.files.readFile(STATE_PATH).catch(() => '');
-    if (!raw.trim()) { this.state = undefined; return undefined; }
-    const parsed = JSON.parse(raw) as Partial<LoopState> & { version?: number };
-    if (parsed.version !== 2) {
-      this.state = undefined;
-      return undefined;
-    }
-    this.state = parsed as LoopState;
+    this.state = await this.peek();
     return this.state;
+  }
+
+  /**
+   * Read state.json without adopting it. Callers outside the host's serialized
+   * queue (status bar, dashboard) use this: replacing `this.state` mid-operation
+   * would leave a running action holding a stale copy.
+   */
+  async peek(): Promise<LoopState | undefined> {
+    const raw = await this.files.readFile(STATE_PATH).catch(() => '');
+    if (!raw.trim()) return undefined;
+    const parsed = JSON.parse(raw) as Partial<LoopState> & { version?: number };
+    return parsed.version === 2 ? parsed as LoopState : undefined;
   }
 
   private async save(): Promise<void> {
@@ -780,18 +785,21 @@ export class ResearchLoopCore {
    * `kind:target` for each request granted.
    */
   async autoApproveQueued(): Promise<string[]> {
-    const state = this.state;
-    if (!state?.approvalQueue.length) return [];
+    if (!this.state?.approvalQueue.length) return [];
     const settings = await this.loopSettings();
     const policy = settings.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : settings.autoApprove;
     if (!policy.enabled) return [];
     const granted: string[] = [];
+    // Each request is granted at most once per call, so a queue that fails to shrink cannot loop forever.
+    const done = new Set<string>();
     for (let progress = true; progress;) {
       progress = false;
-      for (const request of [...state.approvalQueue]) {
-        if (!state.approvalQueue.some((item) => item.id === request.id)) continue;
+      // Read the queue afresh: approving edits `this.state`, which a reload may have replaced since the call began.
+      for (const request of [...this.require().approvalQueue]) {
+        if (done.has(request.id) || !this.require().approvalQueue.some((item) => item.id === request.id)) continue;
         const rule = await this.autoRule(request, policy);
         if (!rule) continue;
+        done.add(request.id);
         await this.approveRequest(request, 'auto');
         await this.event('auto_approved', { kind: request.kind, target: request.target, rule });
         granted.push(`${request.kind}:${request.target}`);
@@ -2470,8 +2478,7 @@ export class ResearchLoopCore {
   }
 
   /** The current or last autonomous run for the Overview; undefined when there has been none since the loop last resumed. */
-  async autonomySummary(): Promise<AutonomyView | undefined> {
-    const state = this.state;
+  async autonomySummary(state = this.state): Promise<AutonomyView | undefined> {
     const run = state?.autonomy;
     if (!state || !run) return undefined;
     const settings = await this.loopSettings();
