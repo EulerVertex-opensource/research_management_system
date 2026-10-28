@@ -6,6 +6,7 @@
  */
 
 import type { NodeProgress } from '../domain/copy';
+import type { UnderstandingLevel, UnderstandingState } from '../domain/understandingLevels';
 export type { NodeProgress } from '../domain/copy';
 
 /** Why a node needs a look; the webview colors and filters by these. */
@@ -62,6 +63,8 @@ export interface GraphNodeView {
   statement: string;
   /** For a required result: how many of the results it rests on (itself included) are done. */
   closure?: { done: number; total: number };
+  /** A verified result: where the researcher stands on it (their own local mark) and the level the teaching chat aims for. */
+  understanding?: { state: UnderstandingState; level?: UnderstandingLevel; suggested: UnderstandingLevel };
 }
 
 export type GraphEdgeType = 'depends_on' | 'uses_definition' | 'refutes';
@@ -85,7 +88,11 @@ export type GraphAction =
   | { action: 'loop'; op: 'start' | 'resume' | 'extend' | 'openChat' }
   | { action: 'syncPull' }
   /** The researcher read a result marked for re-check again, and it still holds. */
-  | { action: 'confirmRecheck'; id: string };
+  | { action: 'confirmRecheck'; id: string }
+  /** The researcher's own mark of how well they know a verified result; `none` forgets it. */
+  | { action: 'understand'; id: string; level: UnderstandingLevel | 'none' }
+  /** Copy a teaching prompt (for one result, or for everything new) and open the agent chat. */
+  | { action: 'teach'; id?: string };
 
 export interface AttentionButton { label: string; action: GraphAction; kind?: 'primary' | 'secondary'; needsText?: string; /** Tooltip saying what the button does. */ hint?: string }
 
@@ -215,4 +222,6 @@ export interface GraphPayload {
   health: LoopHealth;
   /** Newest first. */
   history: HistoryEntry[];
+  /** Verified results, and how many of them are new to the researcher or changed since they studied them. */
+  study?: { behind: number; total: number };
 }

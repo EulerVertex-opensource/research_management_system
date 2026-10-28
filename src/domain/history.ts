@@ -47,6 +47,10 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     }
     case 'parked': return entry(`Set ${name} aside ${parkClause(text(event.reason))}.`, 'error');
     case 'unparked': return entry(`${name} is back in the queue.`, 'info');
+    case 'revision_started': return entry(`Checking the rewording of ${name}'s proof you asked for in the teaching chat.`, 'info');
+    case 'revision_rejected': return entry(`The rewording of ${name}'s proof did not pass the check; the previous proof is back.`, 'warning');
+    case 'revision_discarded': return entry(`A rewording of ${name} was dropped: ${text(event.reason)}.`, 'warning');
+    case 'remarks_updated': return entry(`Your remarks on ${name} were saved.`);
     case 'approved': return entry(text(event.source) === 'auto' ? `${name} was approved automatically.` : `You accepted ${name}.`, 'success');
     case 'auto_approved': return entry(`${name} was approved automatically.`, 'success');
     case 'approval_requested': return entry(`Asked you: ${approvalTitle(text(event.kind), name, type(asset))}.`, 'warning');

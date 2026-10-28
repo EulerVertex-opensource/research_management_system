@@ -53,6 +53,29 @@ export const AUTO_HOLDS_PATH = `${STATE_DIR}/auto-holds.json`;
 /** User-level registry of running extension bridges, so a globally registered MCP server can find the project. */
 export const BRIDGE_REGISTRY = ['.research-assistant', 'bridges.json'];
 export interface BridgeEntry { root: string; port: number; token: string; pid: number; startedAt: string }
+export const EXTENSION_ID = 'tianhao.research-management-system';
+/**
+ * Chat links that open a node's page in the dashboard. Agent chats render only
+ * web links and file paths (Codex drops vscode:// links), so a link points at a
+ * small local file per node; when an editor opens one, the extension closes it
+ * and shows the node in the dashboard. Without the extension, the file names
+ * the node's own file.
+ */
+export const DASHBOARD_LINKS_DIR = `${STATE_DIR}/open`;
+export const dashboardLinkPath = (id: string) => `${DASHBOARD_LINKS_DIR}/${id}.md`;
+export const dashboardLinkStub = (title: string, file: string) =>
+  `# ${title}\n\nOpening this in the Research Assistant dashboard. If nothing happened, the Research Assistant extension is not running in this window; the file itself is ${file}.\n`;
+/** Write the link file of each node that lacks one or names another title or file; returns how many were written. */
+export async function writeDashboardLinks(files: LoopFiles, nodes: Array<{ id: string; title: string; file: string }>): Promise<number> {
+  let written = 0;
+  for (const node of nodes) {
+    const stub = dashboardLinkStub(node.title, node.file);
+    if ((await files.readFile(dashboardLinkPath(node.id)).catch(() => undefined)) === stub) continue;
+    await files.writeFile(dashboardLinkPath(node.id), stub);
+    written++;
+  }
+  return written;
+}
 
 export interface LoopFiles {
   readFile(relativePath: string): Promise<string>;
@@ -92,7 +115,8 @@ export interface LoopExtension { goal: string; at: string; baselineRequired: str
 export interface LoopLock { sessionId: string; provider?: AgentProvider; acquiredAt: string; heartbeatAt: string }
 export interface StageSummary { stage: LoopStage; assetId?: string; outcome: ReportOutcome; summary: string; files: string[]; at: string }
 /** One reason the loop has nothing actionable (stage `waiting`); the dashboard lists each one. */
-export interface WaitingReason { kind: 'approval' | 'parked' | 'missing_definition' | 'cycle'; target: string; detail?: string }
+/** `study`: the researcher asked the loop not to get further ahead of them; target is the count of verified results they have not studied. */
+export interface WaitingReason { kind: 'approval' | 'parked' | 'missing_definition' | 'cycle' | 'study'; target: string; detail?: string }
 
 export interface LoopState {
   version: 2;

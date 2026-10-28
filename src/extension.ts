@@ -70,6 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
     loop('approve', () => provider!.loopHost.approveCommand()),
     loop('captureIdea', () => provider!.loopHost.captureIdeaCommand()),
     loop('openChat', () => provider!.loopHost.openChat()),
+    loop('teach', () => provider!.loopHost.teachCommand()),
     loop('syncStatus', () => provider!.loopHost.syncStatusCommand()),
     loop('syncPull', () => provider!.loopHost.syncPullCommand()),
     loop('syncPrepare', () => provider!.loopHost.syncPrepareCommand()),
@@ -78,7 +79,21 @@ export function activate(context: vscode.ExtensionContext): void {
     loop('refreshIntegration', () => provider!.refreshProject(true)),
   ];
 
-  context.subscriptions.push(output, openDashboard, openOverview, refreshAgentSetup, showOutput, ...loopCommands);
+  // Links in the agent chat (the teach skill names results with them) open that node's page in the dashboard.
+  const uriHandler = vscode.window.registerUriHandler({
+    handleUri: async (uri) => {
+      const id = new URLSearchParams(uri.query).get('id');
+      if (uri.path === '/node' && id) await provider!.showNode(id);
+    },
+  });
+  // From a research file open in the editor (e.g. a file link in the chat) to its page in the dashboard.
+  const showNodeInDashboard = vscode.commands.registerCommand('research-assistant.showNodeInDashboard', async (resource?: vscode.Uri) => {
+    const file = resource ?? vscode.window.activeTextEditor?.document.uri;
+    if (!file || !file.path.endsWith('.md')) { void vscode.window.showInformationMessage('Open a research file (a result, definition, idea, or plan) first.'); return; }
+    await provider!.showNode(file.path.slice(file.path.lastIndexOf('/') + 1, -'.md'.length));
+  });
+
+  context.subscriptions.push(output, openDashboard, openOverview, refreshAgentSetup, showOutput, uriHandler, showNodeInDashboard, ...loopCommands);
 }
 
 export function deactivate(): void {

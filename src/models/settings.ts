@@ -20,6 +20,7 @@ export const LOOP_NUMBER_KEYS = [
   'constructWidth', 'constructRounds', 'constructMaxCandidates', 'specialDirectionsFromRound',
   'candidatesPerWorker', 'boardObstructions', 'boardNearMisses', 'requestedSearchRounds',
   'autonomyBudget', 'autonomyHours', 'autonomyRevisions',
+  'studyAhead',
 ] as const;
 export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
 

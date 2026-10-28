@@ -42,6 +42,7 @@ The researcher reads, word for word on the dashboard and in popups, every `repor
 
 - The first line stands alone, since the Overview and Activity show it by itself: the mathematical outcome in one sentence (what was proved, what failed and why, what is needed). At most four more lines: the reason, then what happens next.
 - Name results by title or a short description ("the a priori assumptions lemma"), never by ID or file name. Give an ID only when the researcher must type it, in parentheses after the title.
+- In your chat replies, write such a title as a dashboard link, `[the a priori assumptions lemma](.research-assistant-loop/open/a_priori_assumptions.md)`: a click opens its page in the dashboard. Use exactly this relative path with the node's ID, never an absolute path or a `vscode://` link, which agent chats do not open. Link a definition, a plan, or an idea you point the researcher to the same way. Give a file link only when the researcher asks to open the file itself. Report summaries, park notes, and popup texts stay plain words with no links.
 - Leave out the loop's machinery: slots, workers, packs, stages, candidate files, outcome words, version suffixes such as `_v4`, code formatting. For a search round, say what the round as a whole found or ruled out, not what each slot did.
 - `$…$` math renders in approval summaries and park notes; report summaries and questions show as plain text, so write short formulas in words or plain symbols there. Never paste a whole statement; name the hypothesis or step that matters.
 - A set-aside result or a `blocked` question names the obstruction and the kind of idea that would get past it: a new definition, a weaker statement, a missing lemma, another approach.
@@ -78,6 +79,10 @@ When the researcher chooses *Work on its own* in Settings (autonomous mode), `ne
   2. Decide the shape with the researcher: (a) a new approach to an existing asset, so a new plan with `inspired_by`; (b) a missing intermediate result, so a new draft lemma asset added to the `depends_on` of the result it serves (say that this re-opens that result's approval); (c) a new end goal, so `extend --goal "..."`, then a new entry under `required_results` in project.md followed by `request_approval(kind: "project")`.
   3. Draft the concrete statement and an executable checklist; confirm with `ask_researcher(kind: "discussion")`.
   4. Write the files, run `research-maintenance validate` and `links`, link plan and idea with `idea convert <ideaId> --asset ... --goal ... --steps ... --verification ...` (or, for a new lemma, `idea resolve <ideaId> --by <lemma_id>`), and `unpark` any asset the idea targets.
+
+## Teaching chat
+
+The researcher may follow the proofs in a second chat with the `teach` skill. That chat explains verified results only and never drives the loop: the hooks keep it from taking the loop's lock, from being sent on at Stop, and from running `next` or `report`. Keep driving here; doubts raised there arrive as ideas (origin researcher, kind risk) related to the result, so weigh them like any researcher input. The researcher may also have a verified proof reworded there. Between stages, `next` applies the rewording: remarks at once; a reworded proof goes in place and the stage becomes `verify_proof` for it, whatever the check setting. Run that stage like any other. A rejected rewording brings the previous proof back and counts as no failed attempt. When the researcher set a limit on how far the loop may get ahead of them, `next` waits with a study reason once that many verified results are new to them; say so in one line and stop.
 
 ## Sharing with collaborators (git sync)
 

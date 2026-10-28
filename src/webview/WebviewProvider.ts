@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import * as path from 'path';
+import { DASHBOARD_LINKS_DIR, writeDashboardLinks } from '../services/ResearchLoopModel';
 import { FileService } from '../services/FileService';
 import { NodeIndexService } from '../services/NodeIndexService';
 import { PaperIndexService } from '../services/PaperIndexService';
@@ -39,6 +41,8 @@ export class WebviewProvider {
   readonly loopHost: LoopHost;
   /** Show the Overview once the newly opened dashboard has loaded. */
   private pendingOverview = false;
+  /** A node to show once the dashboard has loaded. */
+  private pendingNode: string | undefined;
   private integrationEnsured = false;
   private readonly context: vscode.ExtensionContext;
   private readonly manuscriptBuildService: ManuscriptBuildService;
@@ -68,10 +72,23 @@ export class WebviewProvider {
     this.loopHost.onDidChangeState(() => this.scheduleGraph());
     this.loopHost.setNodeSource(() => this.nodeIndex?.getAll() ?? []);
     this.loopHost.setOverviewHandler(() => this.openOverview());
+    this.loopHost.setNodeHandler((id) => this.showNode(id));
     this.loopHost.onDidChangeSettings(() => void this.sendSettings());
     // Not onDidChangeState: computing the badge goes through the loop core, which fires it again.
     this.loopHost.onDidSync(() => this.scheduleSyncState(0));
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('researchAssistant')) void this.sendSettings(); }));
+    // A dashboard link clicked in an agent chat opens its link file in an editor: show the node instead.
+    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor((editor) => { if (editor) void this.followDashboardLink(editor.document.uri); }));
+  }
+
+  /** See dashboardLinkPath: close the link file's tab and open the node's page. */
+  private async followDashboardLink(uri: vscode.Uri): Promise<void> {
+    const folder = vscode.Uri.joinPath(this.fileService.rootUri, DASHBOARD_LINKS_DIR).fsPath + path.sep;
+    if (uri.scheme !== 'file' || !uri.fsPath.startsWith(folder) || !uri.fsPath.endsWith('.md')) return;
+    const id = path.basename(uri.fsPath, '.md');
+    const tabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs).filter((tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === uri.fsPath);
+    await vscode.window.tabGroups.close(tabs).then(undefined, () => undefined);
+    await this.showNode(id);
   }
 
   start(): Promise<void> {
@@ -94,6 +111,14 @@ export class WebviewProvider {
     if (!existing) this.pendingOverview = true;
     await this.open();
     if (existing) { this.send({ type: 'showView', view: 'graph' }); this.scheduleGraph(); }
+  }
+
+  /** Open the dashboard on one node's page: links in the agent chat (the URI handler) and the editor's title button land here. */
+  async showNode(id: string): Promise<void> {
+    const existing = Boolean(this.panel);
+    if (!existing) this.pendingNode = id;
+    await this.open();
+    if (existing) this.send({ type: 'showNode', id });
   }
 
   async open(): Promise<void> {
@@ -207,6 +232,8 @@ export class WebviewProvider {
       this.refreshIndex(),
       this.paperIndex!.getPapers(),
     ]);
+    // The running extension's guidance wins: an older build (another window, or before a reload) may have written AGENTS.md.
+    if (initialized) await generateAgentInstructions(nodes, this.fileService, paths).catch((error: unknown) => this.output.appendLine(`[agents] Could not update the agent guidance: ${String(error)}`));
     this.setupFileWatchers();
     this.send({
       type: 'init',
@@ -218,6 +245,7 @@ export class WebviewProvider {
     });
     this.send({ type: 'papersData', papers });
     if (this.pendingOverview && initialized) { this.pendingOverview = false; this.send({ type: 'showView', view: 'graph' }); this.scheduleGraph(); }
+    if (this.pendingNode && initialized) { this.send({ type: 'showNode', id: this.pendingNode }); this.pendingNode = undefined; }
     await this.sendManuscriptStatus();
     this.scheduleSyncState(0);
     if (initialized) {
@@ -267,6 +295,8 @@ export class WebviewProvider {
   /** Refresh the node index; duplicate IDs or dependency errors go to the output once per change and to the sidebar's file-problems note on every refresh. */
   private async refreshIndex(): Promise<ResearchNode[]> {
     const nodes = await this.nodeIndex!.refresh();
+    // Every node gets the file its chat links point at; only new or renamed ones are written.
+    void writeDashboardLinks(this.fileService, nodes.map((node) => ({ id: node.id, title: node.title || node.id, file: node.filePath }))).catch((error: unknown) => this.output.appendLine(`[links] ${String(error)}`));
     const problems = this.nodeIndex!.getProblems();
     const signature = problems.join('\n');
     if (signature !== this.reportedProblems) {

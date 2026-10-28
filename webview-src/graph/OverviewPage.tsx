@@ -238,7 +238,7 @@ function Decisions({ payload, onAction, onNavigate, onShowInResults, onOpenNeeds
   );
 }
 
-function Progress({ payload, onShowInResults, onOpenPaper }: Pick<Props, 'onShowInResults' | 'onOpenPaper'> & { payload: GraphPayload }) {
+function Progress({ payload, onAction, onShowInResults, onOpenPaper }: Pick<Props, 'onAction' | 'onShowInResults' | 'onOpenPaper'> & { payload: GraphPayload }) {
   const blocking = blockingStates(payload);
   const mains = payload.required.map((id) => payload.nodes.find((node) => node.id === id)).filter((node): node is GraphNodeView => Boolean(node));
   const rank = (node: GraphNodeView) => (node.progress === 'done' ? 3 : blocking.get(node.id) === 'stuck' ? 0 : blocking.get(node.id) === 'needs_you' ? 1 : 2);
@@ -274,6 +274,15 @@ function Progress({ payload, onShowInResults, onOpenPaper }: Pick<Props, 'onShow
         <span style={{ color: SECTION_STATE_COLOR[paper ?? ''] ?? COLOR.muted }}>{paper ? SECTION_STATE_LABEL[paper] ?? paper : 'no outline yet'}</span>
         {payload.sections.length > 0 && <button style={{ ...link, marginLeft: 'auto' }} onClick={() => onOpenPaper()}>Which results it covers →</button>}
       </div>
+      {payload.study && payload.study.total > 0 && (
+        <div style={{ fontSize: 13, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+          <span style={{ color: COLOR.muted }}>What you know:</span>
+          <span style={{ color: payload.study.behind ? COLOR.waiting : COLOR.muted }}>
+            {payload.study.behind ? `${plural(payload.study.behind, 'verified result')} new to you or changed since you studied ${payload.study.behind === 1 ? 'it' : 'them'}` : `you have studied all ${plural(payload.study.total, 'verified result')}`}
+          </span>
+          {payload.study.behind > 0 && <button style={{ ...link, marginLeft: 'auto' }} title="Copies a teaching prompt and opens the agent chat: start a new chat beside the loop and paste it" onClick={() => onAction({ action: 'teach' })}>Study them in a new chat ↗</button>}
+        </div>
+      )}
     </Block>
   );
 }
@@ -287,7 +296,7 @@ export function OverviewPage({ payload, onAction, onNavigate, onShowInResults, o
         <Now payload={payload} onAction={onAction} onNavigate={onNavigate} onOpenSettings={onOpenSettings} />
         <Autonomy payload={payload} onShowInResults={onShowInResults} onOpenActivity={onOpenActivity} />
         <Decisions payload={payload} onAction={onAction} onNavigate={onNavigate} onShowInResults={onShowInResults} onOpenNeeds={onOpenNeeds} onOpenPaper={onOpenPaper} />
-        <Progress payload={payload} onShowInResults={onShowInResults} onOpenPaper={onOpenPaper} />
+        <Progress payload={payload} onAction={onAction} onShowInResults={onShowInResults} onOpenPaper={onOpenPaper} />
         <Block title="Recently" aside={payload.history.length > 3 ? <button style={link} onClick={onOpenActivity}>All activity →</button> : undefined}>
           <HistoryList entries={payload.history.slice(0, 3)} onShow={onShowInResults} />
         </Block>

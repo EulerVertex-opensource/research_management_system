@@ -5,6 +5,7 @@ import { MarkdownPreview } from '../components/MarkdownPreview';
 import { ActionRow, buttonStyle } from './AttentionList';
 import { useTechnical } from '../technical';
 import { COLOR, CITED_COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
+import { LEVEL_HINT, LEVEL_LABEL, STATE_LABEL, UNDERSTANDING_LEVELS } from '../../src/domain/understandingLevels';
 
 /**
  * One result as a box: its state, title and one line of detail; opened, it
@@ -38,6 +39,36 @@ export function StatePill({ node }: { node: GraphNodeView }) {
   return <span style={{ fontSize: 11, fontWeight: 600, padding: '0 8px', borderRadius: 9, background: tint(style.color, 30), whiteSpace: 'nowrap' }}>{node.progressLabel}</span>;
 }
 
+/** Where the researcher stands on a verified result: new to them, changed, or the level they marked. */
+export function UnderstandingPill({ node }: { node: GraphNodeView }) {
+  const understanding = node.understanding;
+  if (!understanding) return null;
+  const behind = understanding.state !== 'understood';
+  const text = understanding.state === 'understood' && understanding.level ? `You: ${LEVEL_LABEL[understanding.level].toLowerCase()}` : understanding.state === 'new' ? 'New to you' : 'Changed since you studied it';
+  return <span title={STATE_LABEL[understanding.state]} style={{ fontSize: 11, fontWeight: 600, padding: '0 6px', borderRadius: 8, border: `1px solid ${behind ? COLOR.waiting : COLOR.border}`, color: behind ? COLOR.waiting : COLOR.muted, whiteSpace: 'nowrap' }}>{text}</span>;
+}
+
+/** The researcher's own mark for a verified result, and a way to have it explained in a teaching chat. */
+function UnderstandingRow({ node, onAction }: { node: GraphNodeView; onAction: (action: GraphAction) => void }) {
+  const understanding = node.understanding;
+  if (!understanding) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+      <label style={{ color: COLOR.muted, display: 'flex', gap: 6, alignItems: 'center' }}>
+        What you know of it:
+        <select value={understanding.level ?? ''} title="Only you set this; it stays on this computer"
+          onChange={(event) => onAction({ action: 'understand', id: node.id, level: (event.target.value || 'none') as typeof UNDERSTANDING_LEVELS[number] | 'none' })}
+          style={{ background: 'var(--vscode-dropdown-background)', color: 'var(--vscode-dropdown-foreground)', border: '1px solid var(--vscode-dropdown-border)', fontSize: 12 }}>
+          <option value="">{understanding.state === 'statement_changed' ? 'Studied an older version' : 'Not studied yet'}</option>
+          {UNDERSTANDING_LEVELS.map((level) => <option key={level} value={level} title={LEVEL_HINT[level]}>{LEVEL_LABEL[level]}{level === understanding.suggested ? ' (suggested)' : ''}</option>)}
+        </select>
+      </label>
+      <button style={buttonStyle('secondary')} title="Copies a teaching prompt and opens the agent chat: start a new chat beside the loop and paste it"
+        onClick={() => onAction({ action: 'teach', id: node.id })}>Walk me through it ↗</button>
+    </div>
+  );
+}
+
 /** The box every list in the dashboard uses: a thin border, a slight fill, rounded corners. */
 export function boxStyle(color: string = COLOR.border, selected = false): React.CSSProperties {
   return {
@@ -68,6 +99,7 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
           {required && <span style={{ fontSize: 11, fontWeight: 700, color: COLOR.waiting }}>★ Main result</span>}
           {node.kind === 'definition' && <span style={{ fontSize: 11, fontWeight: 700, color: DEFINITION_COLOR, padding: '0 6px', borderRadius: 8, border: `1px solid ${DEFINITION_COLOR}` }}>Definition</span>}
           {node.cited && node.progress !== 'done' && <span style={{ fontSize: 11, fontWeight: 600, color: CITED_COLOR }}>Cited</span>}
+          <UnderstandingPill node={node} />
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
             {onClose
               ? <button onClick={onClose} aria-label="Close" title="Close" style={{ ...buttonStyle('secondary'), padding: '0 7px' }}>×</button>
@@ -102,6 +134,7 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
             {technical && <span style={{ fontFamily: 'var(--vscode-editor-font-family, monospace)' }}>{node.filePath}</span>}
           </div>
           {item && <ActionRow buttons={item.buttons.filter((button) => button.action.action !== 'openNode')} onAction={onAction} onNavigate={onDetails} />}
+          <UnderstandingRow node={node} onAction={onAction} />
           {onTrace && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               <button style={buttonStyle('secondary')} onClick={() => onTrace('up')} title="Show only the results it rests on">What it rests on</button>

@@ -22,7 +22,9 @@ import {
 import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
-import { hasSection, sectionContent, statementPart } from '../domain/sections';
+import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
+import { ProofRevision, REVISIONS_DIR, withProof, withRemarks } from '../domain/revisions';
+import { understandingParts } from '../domain/understanding';
 import { layoutReport } from '../domain/layout';
 import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
@@ -34,6 +36,7 @@ import {
   ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, projectPart, renderContext, renderShow,
 } from './ResearchContext';
 import { ideaPlanProblems } from './ProofIdeas';
+import { Teaching } from './Teaching';
 import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLibraryPath, libraryFolders, libraryProblems, listNodeFiles, locateNodeFile, nodeFolders, searchLibrary } from '../domain/registry';
 
 export interface CoreOptions {
@@ -344,6 +347,13 @@ export class ResearchLoopCore {
     }
     state.lock = { sessionId, provider: state.provider, acquiredAt: lock?.sessionId === sessionId ? lock.acquiredAt : this.now(), heartbeatAt: this.now() };
     return true;
+  }
+
+  /** A teaching chat may have taken an idle loop's lock before the hooks knew what it was; it gives the lock back. */
+  async releaseLock(sessionId: string): Promise<void> {
+    if (this.state?.lock?.sessionId !== sessionId) return;
+    this.state.lock = undefined;
+    await this.save();
   }
 
   async touch(sessionId?: string, force = false): Promise<boolean> {
@@ -1540,6 +1550,11 @@ export class ResearchLoopCore {
         candidate = (this.isFalsified(id, asset.raw, checks) || skipSearch) && !requested ? { stage: 'plan', assetId: id } : { stage: 'search', assetId: id, mode: 'refute' };
       }
     }
+    if (candidate && candidate.stage !== 'verify_proof') {
+      // The researcher asked the loop not to get further ahead of them: no new proof work while too many verified results wait to be studied.
+      const behind = await this.studyBacklog();
+      if (behind) return { stage: 'waiting', reason: `${behind.count} verified result(s) wait for the researcher to study them (their limit is ${behind.limit}); the loop starts no new proof until they catch up with the teach skill`, waitingOn: [{ kind: 'study', target: String(behind.count), detail: String(behind.limit) }] };
+    }
     if (candidate) return candidate;
     const definitionIds = definitionClosure(order, assets, definitions);
     const unapproved = definitionIds.filter((id) => !(definitions.get(id)?.data.status === 'approved' && isApproved(approvals, 'definition', id, definitions.get(id)!.raw)));
@@ -1564,6 +1579,107 @@ export class ResearchLoopCore {
       ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
     ];
     return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
+  }
+
+  // ---------- rewordings from the teaching chat ----------
+
+  private async removeFile(file: string): Promise<void> {
+    if (this.files.deleteFile) await this.files.deleteFile(file);
+    else await this.files.writeFile(file, '');
+  }
+
+  /**
+   * Apply one rewording the teaching chat proposed (see revisions.ts). Remarks
+   * are written at once; they change nothing that was approved or verified. A
+   * reworded proof replaces the old one, which its rewrite plan keeps, and the
+   * independent check runs on it next, whatever the researcher's check
+   * setting. A proposal made against an older version is dropped. Returns
+   * true when it started that check.
+   */
+  private async startRevision(): Promise<boolean> {
+    for (const file of await this.files.listFiles(REVISIONS_DIR, '.json')) {
+      let revision: ProofRevision | undefined;
+      try { revision = JSON.parse(await this.files.readFile(file)) as ProofRevision; } catch { revision = undefined; }
+      const drop = async (reason: string) => { await this.removeFile(file); await this.event('revision_discarded', { assetId: revision?.id, reason }); };
+      if (!revision?.id) { await drop('unreadable'); continue; }
+      const nodeFile = (await findNodeFile(this.files, this.paths, 'asset', revision.id)) ?? (await findNodeFile(this.files, this.paths, 'definition', revision.id));
+      if (!nodeFile || isLibraryPath(nodeFile, this.paths)) { await drop('no such result in the project'); continue; }
+      const raw = await this.files.readFile(nodeFile);
+      const parts = understandingParts(raw);
+      if (parts.statementDigest !== revision.baseStatement || (revision.proof && parts.proofDigest !== revision.baseProof)) { await drop('the result changed after the rewording was proposed'); continue; }
+      const parsed = parseMarkdown(raw);
+      if (!revision.proof) {
+        await this.files.writeFile(nodeFile, stringifyMarkdown(withRemarks(parsed.content, revision.remarks ?? ''), parsed.data));
+        await this.removeFile(file);
+        await this.event('remarks_updated', { assetId: revision.id });
+        continue;
+      }
+      const wasApproved = parsed.data.status === 'approved' && isApproved((await this.approvals()).records, 'asset', revision.id, raw);
+      // The changed proof is not what the researcher approved: it is a draft again until they accept it.
+      const data = { ...parsed.data, status: parsed.data.status === 'approved' ? 'draft' : parsed.data.status };
+      const newRaw = stringifyMarkdown(withProof(parsed.content, revision.proof), data);
+      await this.files.writeFile(nodeFile, newRaw);
+      let planId = `${revision.id}_rewording`;
+      for (let n = 2; await this.files.exists(`${this.paths.plans}/${planId}.md`); n++) planId = `${revision.id}_rewording_${n}`;
+      const previous = stripManagedBlocks(sectionContent(parsed.content, 'Proof')).trim();
+      const body = [
+        `## Goal\n\nTarget: [${String(parsed.data.title ?? revision.id)}](../assets/${revision.id}.md)\n\nReword the proof as the researcher asked in the teaching chat; the mathematics stays the same.`,
+        '## Plan\n\n1. [x] Reword the proof as described under ## Changes.',
+        '## Verification\n\nAn independent check of the reworded proof against the statement, as for any proof.',
+        `## Changes\n\n${revision.changes ?? 'Rewording.'}`,
+        `## Previous proof\n\n${previous}`,
+        ...(revision.remarks !== undefined ? [`## Remarks to add\n\n${revision.remarks.trim() || '(remove the remarks)'}`] : []),
+        `## Outcome\n\nThe reworded proof is in [${String(parsed.data.title ?? revision.id)}](../assets/${revision.id}.md).`,
+      ].join('\n\n');
+      await this.files.writeFile(`${this.paths.plans}/${planId}.md`, stringifyMarkdown(`\n${body}\n`, {
+        type: 'plan', title: `Reworded proof of ${String(parsed.data.title ?? revision.id)}`, status: 'succeeded', target_asset: revision.id, purpose: 'rewrite', inspired_by: [], tags: [],
+        proof_digest: proofDigest(newRaw), statement_digest: statementDigest(newRaw), dependency_digests: await this.dependencyDigests(data) ?? {},
+        rewrites_proof_digest: parts.proofDigest, ...(wasApproved ? { was_approved: true } : {}),
+      }));
+      await this.removeFile(file);
+      await this.event('revision_started', { assetId: revision.id, planId });
+      await this.setStage('verify_proof', { assetId: revision.id, planId, counterexampleId: undefined });
+      return true;
+    }
+    return false;
+  }
+
+  /** A confirmed rewording: its remarks are written, and the researcher's understanding moves to the wording they asked for. */
+  private async finishRewrite(assetId: string, planContent: string, planData: Record<string, any>, assetRaw: string): Promise<void> {
+    const file = `${this.paths.assets}/${assetId}.md`;
+    if (/^## Remarks to add[ \t]*$/m.test(planContent)) {
+      const remarks = sectionContent(planContent, 'Remarks to add');
+      const asset = parseMarkdown(assetRaw);
+      assetRaw = stringifyMarkdown(withRemarks(asset.content, remarks === '(remove the remarks)' ? '' : remarks), asset.data);
+      await this.writeOwned(file, assetRaw);
+    }
+    await new Teaching(this.files, this.paths).carryMark(assetId, String(planData.rewrites_proof_digest ?? ''), assetRaw, this.now());
+  }
+
+  /** A rejected rewording: the previous proof comes back (approved again when it was), and the rewrite plan is abandoned, not counted as a failed attempt. */
+  private async rejectRewrite(assetId: string, planId: string): Promise<string> {
+    const planFile = `${this.paths.plans}/${planId}.md`;
+    const plan = parseMarkdown(await this.files.readFile(planFile));
+    const file = `${this.paths.assets}/${assetId}.md`;
+    const asset = parseMarkdown(await this.files.readFile(file));
+    const restored = { content: withProof(asset.content, sectionContent(plan.content, 'Previous proof')), data: { ...asset.data } };
+    const approvedAgain = plan.data.was_approved === true && isApproved((await this.approvals()).records, 'asset', assetId, stringifyMarkdown(restored.content, { ...restored.data, status: 'approved' }));
+    if (approvedAgain) restored.data.status = 'approved';
+    await this.writeOwned(file, stringifyMarkdown(restored.content, restored.data));
+    plan.data.status = 'abandoned';
+    delete plan.data.verified_proof_digest;
+    const content = `${plan.content.trimEnd()}\n\n## Failure\n\nThe independent check rejected the reworded proof; ## Verdict names the step. The previous proof was restored.\n`;
+    await this.writeOwned(planFile, stringifyMarkdown(content, plan.data));
+    await this.event('revision_rejected', { assetId, planId });
+    return `The reworded proof of ${assetId} did not pass the independent check (## Verdict in ${planId}); the previous proof is back${approvedAgain ? ' and still approved' : ''}. Tell the researcher in one line, naming the step; the teaching chat shows the verdict. Continue with next.`;
+  }
+
+  /** Verified results the researcher has not studied, when that reaches their `studyAhead` limit; never while the agent works on its own. */
+  private async studyBacklog(): Promise<{ count: number; limit: number } | undefined> {
+    const settings = await this.loopSettings();
+    if (!settings.studyAhead || settings.autonomy.enabled) return undefined;
+    const { behind } = await new Teaching(this.files, this.paths).overview();
+    return behind >= settings.studyAhead ? { count: behind, limit: settings.studyAhead } : undefined;
   }
 
   /** Compute or confirm the current stage and return the instruction for the agent. */
@@ -1597,6 +1713,8 @@ export class ResearchLoopCore {
       const data = (await this.files.exists(file)) ? parseMarkdown(await this.files.readFile(file)).data : undefined;
       if (!data || data.status !== 'draft' || state.parked[state.current.assetId]) recompute = true;
     }
+    // Between stages, a rewording from the teaching chat goes first: its check is short and the researcher is waiting on it.
+    if (recompute && await this.startRevision()) recompute = false;
     if (recompute) {
       const selection = await this.computeSelection();
       const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined };
@@ -1659,6 +1777,7 @@ export class ResearchLoopCore {
       paperIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''), paperIndexFile: this.paths.paperIndex,
       assets: await this.collectKind('asset'), definitions: await this.collectKind('definition'),
       plans: await this.collect(this.paths.plans), ideas: await this.collect(this.paths.ideas), checks: await this.collect(this.shared.checks), candidates: await this.collect(this.shared.candidates),
+      style: await new Teaching(this.files, this.paths).styleText(),
       reports: events.filter((event) => event.type === 'report').map((event) => event as ContextSources['reports'][number]),
     };
   }
@@ -2275,12 +2394,16 @@ export class ResearchLoopCore {
           plan.data.verified_proof_digest = proofDigest(assetRaw);
           await this.writeOwned(planFile, stringifyMarkdown(plan.content, plan.data));
           await this.event('proof_verified', { assetId, planId });
-          await this.enqueueApproval('asset', assetId, `Proof from ${planId}, verified independently.`);
+          const rewrite = plan.data.purpose === 'rewrite';
+          if (rewrite) await this.finishRewrite(assetId, plan.content, plan.data, assetRaw);
+          await this.enqueueApproval('asset', assetId, rewrite ? 'Proof reworded at your request in the teaching chat, verified independently.' : `Proof from ${planId}, verified independently.`);
           if ((await this.autoApproveQueued()).includes(`asset:${assetId}`)) return finish(`Proof of ${assetId} verified independently and approved automatically (auto mode). Continue with next.`, 'select', { assetId: undefined, planId: undefined });
           return finish(`Proof of ${assetId} verified independently. Call request_approval(kind: "asset", target: "${assetId}") and continue with next.`, 'select', { assetId: undefined, planId: undefined });
         }
         if (report.outcome !== 'rejected') throw new Error('verify_proof outcome must be confirmed, rejected, or question.');
         if (!/^rejected\b/i.test(verdict)) throw new Error(`## Verdict of ${planId} must begin with rejected.`);
+        // A rejected rewording costs nothing: the verified proof it would have replaced comes back.
+        if (plan.data.purpose === 'rewrite') return finish(await this.rejectRewrite(assetId, planId), 'select', { assetId: undefined, planId: undefined });
         await this.rejectProof(assetId, planId);
         return this.afterFailedPlan(assetId, planId, `Independent verification rejected the proof from ${planId}`, finish, Boolean(run));
       }

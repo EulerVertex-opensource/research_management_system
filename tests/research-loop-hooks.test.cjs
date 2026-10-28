@@ -100,7 +100,9 @@ test('hook entry point blocks Stop while running and stays silent otherwise', ()
     write('research/project.md', '# Project\n');
     const hook = (event, input) => spawnSync(process.execPath, [cli, 'hook', event], { encoding: 'utf8', input: JSON.stringify({ cwd: root, session_id: 'sess', ...input }) });
     assert.equal(hook('Stop', {}).status, 0);
-    assert.equal(hook('SessionStart', {}).stdout, '');
+    // Without a loop a new chat only learns how to link what it names to the dashboard.
+    assert.match(JSON.parse(hook('SessionStart', {}).stdout).hookSpecificOutput.additionalContext, /^Research Assistant: [\s\S]*\[Title\]\(\.research-assistant-loop\/open\/<id>\.md\)/);
+    assert.equal(hook('UserPromptSubmit', {}).stdout, '');
     assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root, '--iteration-cap', '2'], { encoding: 'utf8' }).status, 0);
     const blocked = (result) => result.status === 0 && result.stdout.trim() !== '' && JSON.parse(result.stdout).decision === 'block';
     const first = hook('Stop', {});
@@ -131,6 +133,45 @@ test('hook entry point blocks Stop while running and stays silent otherwise', ()
     assert.match(fs.readFileSync(path.join(root, '.research-assistant-loop/state.json'), 'utf8'), /"status": "paused"/);
     const deny = hook('PreToolUse', { tool_name: 'Write', tool_input: { file_path: path.join(root, 'research/assets/a.md'), content: 'status: approved' } });
     assert.match(deny.stdout, /"permissionDecision":"deny"/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a teaching chat beside the loop never takes its lock, is never sent on at Stop, and may not drive it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-teach-'));
+  try {
+    const write = (relative, content) => { fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true }); fs.writeFileSync(path.join(root, relative), content); };
+    write('.research-assistant.json', JSON.stringify({ version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [], notations: null, sections: 'sections' }, research: { root: 'research', project: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' } }));
+    write('research/project.md', '# Project\n');
+    const hook = (event, session, input = {}) => spawnSync(process.execPath, [cli, 'hook', event], { encoding: 'utf8', input: JSON.stringify({ cwd: root, session_id: session, ...input }) });
+    const state = () => JSON.parse(fs.readFileSync(path.join(root, '.research-assistant-loop/state.json'), 'utf8'));
+    const loop = 'node .claude/skills/research-loop/scripts/research-loop.cjs';
+    assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root], { encoding: 'utf8' }).status, 0);
+    hook('UserPromptSubmit', 'driver');
+    hook('PreToolUse', 'driver', { tool_name: 'Bash', tool_input: { command: `${loop} next` } });
+    assert.equal(state().lock.sessionId, 'driver');
+    // The driver has been quiet past the lock's lifetime, so a new chat would take the lock on opening.
+    const loopState = state();
+    loopState.lock.heartbeatAt = '2000-01-01T00:00:00.000Z';
+    write('.research-assistant-loop/state.json', JSON.stringify(loopState));
+    hook('SessionStart', 'teacher');
+    assert.equal(state().lock.sessionId, 'teacher');
+    const context = JSON.parse(hook('UserPromptSubmit', 'teacher', { prompt: '/teach' }).stdout);
+    assert.match(context.hookSpecificOutput.additionalContext, /this chat is the teaching chat/);
+    assert.equal(state().lock, undefined, 'naming the teach skill gives the lock back');
+    assert.equal(hook('Stop', 'teacher').stdout, '', 'the teaching chat is not sent on');
+    assert.match(hook('PreToolUse', 'teacher', { tool_name: 'Bash', tool_input: { command: `${loop} next` } }).stdout, /"permissionDecision":"deny"/);
+    assert.equal(hook('PreToolUse', 'teacher', { tool_name: 'Bash', tool_input: { command: `${loop} teach list` } }).stdout, '');
+    // Both chats are told how to link what they name to the dashboard: a relative link file, since chats drop vscode:// links.
+    assert.match(JSON.parse(hook('UserPromptSubmit', 'teacher', { prompt: 'next one' }).stdout).hookSpecificOutput.additionalContext, /\[Title\]\(\.research-assistant-loop\/open\/<id>\.md\)/);
+    // The driver comes back, takes the lock again, and is still sent on at Stop.
+    const driverContext = JSON.parse(hook('UserPromptSubmit', 'driver', { prompt: 'continue' }).stdout).hookSpecificOutput.additionalContext;
+    assert.match(driverContext, /dashboard link[\s\S]*\.research-assistant-loop\/open\/<id>\.md/);
+    assert.match(spawnSync(process.execPath, [cli, 'status', '--brief', '--project', root], { encoding: 'utf8' }).stdout, /\.research-assistant-loop\/open\/<id>\.md/);
+    assert.equal(state().lock.sessionId, 'driver');
+    assert.equal(JSON.parse(hook('Stop', 'driver').stdout).decision, 'block');
+    // The driver asking for an explanation in its own chat stays the driver.
+    hook('UserPromptSubmit', 'driver', { prompt: '/teach' });
+    assert.equal(JSON.parse(hook('Stop', 'driver').stdout).decision, 'block');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

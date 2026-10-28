@@ -5,8 +5,9 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
-import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { GUARD_PATH, GuardRecord, HookInput, contextOutput, denyOutput, guardDecision, preToolUseDecision, researchReads, stopBlockOutput, stopDecision } from '../services/ResearchLoopHooks';
+import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, denyOutput, guardDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, teachingToolDecision, withSessionRole } from '../services/ResearchLoopHooks';
+import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
 import { AGENT_PROVIDERS, MAINTENANCE_COMMAND } from '../services/AgentProviders';
@@ -19,6 +20,8 @@ import { applyInterlinks } from '../services/ResearchInterlinks';
 import { locateNodeFile } from '../domain/registry';
 import { toIdeaKind } from '../domain/nodeKinds';
 import { vocabularyReminder } from '../domain/researcherText';
+import { LEVEL_LABEL, toLevel } from '../domain/understanding';
+import { Teaching } from '../services/Teaching';
 
 declare const __EXTENSION_VERSION__: string | undefined;
 const EXTENSION_VERSION = typeof __EXTENSION_VERSION__ === 'string' ? __EXTENSION_VERSION__ : undefined;
@@ -51,6 +54,11 @@ const USAGE = `Usage: research-loop <command> [options]
   report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
   search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
+  teach list [--json]   (verified results, those new to the researcher first, each after what it rests on)
+  teach pack <id>   (the material for teaching one verified result)
+  teach mark <id> --level black_box|idea|full|none [--note "..."] --interactive   (the researcher, in their own terminal)
+  teach revise <id> --file <draft.md|->   (a rewording the researcher asked for: ## Proof with ## Changes, and/or ## Remarks; the loop checks and applies it)
+  teach style [--add "rule"]   (the project's proof style; --add after the researcher agreed to keep a rule)
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
@@ -114,17 +122,20 @@ function describePreview(preview: PublishPreview): string {
 }
 
 /** Ask on the controlling terminal; agents' shells have none, so this cannot be answered by an agent. */
-function confirmOnTty(text: string): boolean {
+function confirmOnTty(text: string, word = 'publish', elsewhere = 'run sync publish --interactive yourself in a terminal, or confirm in VS Code'): boolean {
   let fd: number;
-  try { fd = fs.openSync('/dev/tty', 'r+'); } catch { throw new Error('No terminal is attached; run sync publish --interactive yourself in a terminal, or confirm in VS Code.'); }
+  try { fd = fs.openSync('/dev/tty', 'r+'); } catch { throw new Error(`No terminal is attached; ${elsewhere}.`); }
   try {
-    fs.writeSync(fd, `${text}\n\nType "publish" to confirm: `);
+    fs.writeSync(fd, `${text}\n\nType "${word}" to confirm: `);
     let answer = '';
     const buffer = Buffer.alloc(1);
     while (fs.readSync(fd, buffer, 0, 1, null) === 1 && buffer[0] !== 10) answer += buffer.toString('utf8');
-    return answer.trim().toLowerCase() === 'publish';
+    return answer.trim().toLowerCase() === word;
   } finally { fs.closeSync(fd); }
 }
+
+/** Told to every chat on the project, so the results it names in chat open in the dashboard when clicked (see dashboardLinkPath). */
+const LINK_HINT = `When you name a result, definition, plan, or idea in chat, write its title as a dashboard link, which opens its page in the Research Assistant dashboard: [Title](${dashboardLinkPath('<id>')}), with exactly this relative path (not an absolute one, not vscode://). Link the research file itself only when the researcher wants the raw file.`;
 
 /** Ask the researcher in VS Code through the extension bridge; undefined when the extension is not running. */
 async function confirmInExtension(root: string, text: string): Promise<boolean | undefined> {
@@ -235,6 +246,35 @@ async function guardStop(root: string, core: ResearchLoopCore, session: string):
   return decision.block ? decision.reason : undefined;
 }
 
+/**
+ * Record what this turn says about its chat (see SessionRoles) and return the
+ * chat's role. A chat that has driven the loop stays the driver; one that
+ * becomes a teaching chat gives back a lock it took while the loop was idle.
+ */
+async function noteSessionRole(root: string, core: ResearchLoopCore, event: string, input: HookInput): Promise<SessionRole | undefined> {
+  const session = input.session_id;
+  const files = new NodeLoopFiles(root);
+  const roles = parseSessionRoles(await files.readFile(SESSIONS_PATH).catch(() => ''));
+  const known = sessionRole(roles, session);
+  const signal = roleSignal(event, input, TEACH_PROMPT_PATTERN);
+  if (!session || !signal || known === 'drive' || (known === 'teach' && signal === 'drive')) return known;
+  await files.writeFile(SESSIONS_PATH, JSON.stringify(withSessionRole(roles, signal, session, new Date().toISOString())) + '\n');
+  if (signal === 'teach') await core.releaseLock(session);
+  return signal;
+}
+
+/** What happens to a rewording now, said so the teacher can tell the researcher; a rewording is applied only by a running loop. */
+function revisionNext(core: ResearchLoopCore, proof: boolean): string {
+  const state = core.current;
+  const applied = proof ? 'checks the reworded proof independently and, if it holds, puts it in place (the previous proof stays until then)' : 'adds the remarks';
+  if (!state || state.status === 'idle' || state.status === 'stopped') return `Nothing applies it yet: the research loop is not running. Tell the researcher to start it (Research Assistant: Start Research Loop, then /research-loop or $research-loop in a chat); the loop then ${applied}.`;
+  if (state.status === 'paused') return `The research loop is paused. Tell the researcher to resume it (Research Assistant: Resume Research Loop); the loop then ${applied}.`;
+  if (state.stage === 'waiting' || state.stage === 'ready') return `The loop is waiting. Tell the researcher to ask the agent in the loop's chat to continue; it then ${applied}.`;
+  return `The loop ${applied} after its current step.`;
+}
+
+const TEACHING_NOTE = 'Research loop: this chat is the teaching chat. Explain verified results with the teach skill; do not run research-loop next, report, or other commands that drive the loop, and do not edit project files. The loop runs in its own chat.';
+
 async function runHook(event: string, args: Args): Promise<void> {
   let input: HookInput = {};
   try { input = JSON.parse((await readStdin()) || '{}'); } catch { input = {}; }
@@ -250,6 +290,9 @@ async function runHook(event: string, args: Args): Promise<void> {
   try { core = await openCore(root); } catch { return; }
   const state = core.current;
   const session = input.session_id;
+  let role: SessionRole | undefined;
+  try { role = stale ? undefined : await noteSessionRole(root, core, event, input); } catch { role = undefined; }
+  if (role === 'teach') { await runTeachingHook(event, root, input); return; }
   // Liveness for the dashboard: only a running loop's agent, and never a stale driver.
   const note = (signal: AgentSignal) => (state?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), signal) : Promise.resolve());
   const shellTool = state ? AGENT_PROVIDERS[state.provider]?.shellTool : undefined;
@@ -259,12 +302,16 @@ async function runHook(event: string, args: Args): Promise<void> {
     case 'UserPromptSubmit': {
       // Every turn, loop or not: what was wrong before the turn is not the agent's to fix at Stop.
       try { await guardBaseline(root, core, session ?? 'unknown', event === 'UserPromptSubmit'); } catch { /* the guard never blocks a turn from starting */ }
-      if (!state || (state.status !== 'running' && state.status !== 'paused' && !state.pendingQuestion)) return;
+      if (!state || (state.status !== 'running' && state.status !== 'paused' && !state.pendingQuestion)) {
+        // Any chat on the project names results; how to link them holds with or without a loop.
+        if (event === 'SessionStart') process.stdout.write(contextOutput(event, `Research Assistant: ${LINK_HINT}`) + '\n');
+        return;
+      }
       if (session && !core.heartbeat(session)) {
         process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
         return;
       }
-      let brief = core.briefStatus();
+      let brief = `${core.briefStatus()}\n${LINK_HINT}`;
       try {
         const sync = JSON.parse(fs.readFileSync(path.join(root, SYNC_PATH), 'utf8')) as { phase?: string; conflicted?: string[] };
         if (sync.phase === 'conflict') brief += `\nGit sync stopped on conflicts in ${sync.conflicted?.join(', ') ?? 'research files'}; the researcher resolves them, then run sync pull --continue. Do not resolve mathematical conflicts yourself.`;
@@ -334,6 +381,20 @@ async function runHook(event: string, args: Args): Promise<void> {
     default:
       return;
   }
+}
+
+/**
+ * Hooks in the teaching chat: it reads beside the loop, so it never takes the
+ * lock, consumes the driver's answers, counts as the agent's activity, or is
+ * sent on at Stop; it only gets told what it is and kept from driving or editing.
+ */
+async function runTeachingHook(event: string, root: string, input: HookInput): Promise<void> {
+  if (event === 'SessionStart' || event === 'UserPromptSubmit') { process.stdout.write(contextOutput(event, `${TEACHING_NOTE}\n${LINK_HINT}`) + '\n'); return; }
+  if (event !== 'PreToolUse') return;
+  const paths = await loadProjectPaths(root);
+  const teaching = teachingToolDecision(paths, input, root);
+  const decision = teaching.deny ? teaching : preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
+  if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
 }
 
 /** Run git with an optional index file and stdin; rejects on a non-zero exit. */
@@ -421,14 +482,14 @@ async function main(): Promise<void> {
   const session = typeof args.flags.session === 'string' ? args.flags.session : undefined;
   const out = (value: unknown) => process.stdout.write((typeof value === 'string' ? value : JSON.stringify(value, null, 2)) + '\n');
   // The agent drives the loop through these commands: each is a sign of life (status is also what a researcher runs in a terminal).
-  const alive = () => (command !== 'status' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
+  const alive = () => (command !== 'status' && command !== 'teach' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
   await alive();
   switch (command) {
     case 'status': {
       if (json) out(core.statusSummary());
-      else if (args.flags.brief) out(core.briefStatus());
+      else if (args.flags.brief) out(`${core.briefStatus()}\n${LINK_HINT}`);
       else {
-        out(core.briefStatus());
+        out(`${core.briefStatus()}\n${LINK_HINT}`);
         const manuscript = await core.manuscriptStatus();
         if (manuscript) out(manuscript);
         const audit = await core.contextAudit();
@@ -458,8 +519,10 @@ async function main(): Promise<void> {
     case 'next': {
       if (session && !(await core.touch(session, args.flags.force === true))) throw new Error(`Another session (${core.current?.lock?.sessionId}) is driving this loop; pass --force to take over.`);
       const next = await core.next();
-      if (json) out({ stage: next.stage, blocked: next.blocked, instruction: next.instruction, brief: next.brief });
-      else out(`Stage: ${next.stage}\n${next.instruction}`);
+      // Where the agent stops and tells the researcher what waits on them: a long autopilot run has had no prompt to carry the link rule.
+      const instruction = next.stage === 'waiting' || next.stage === 'ready' ? `${next.instruction}\n${LINK_HINT}` : next.instruction;
+      if (json) out({ stage: next.stage, blocked: next.blocked, instruction, brief: next.brief });
+      else out(`Stage: ${next.stage}\n${instruction}`);
       return;
     }
     case 'context': {
@@ -592,6 +655,39 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('search status|request <asset>');
+    }
+    case 'teach': {
+      const teaching = new Teaching(new NodeLoopFiles(root), await loadProjectPaths(root));
+      if (sub === 'list') { out(json ? await teaching.overview() : await teaching.listText()); return; }
+      if (sub === 'pack') { out(await teaching.packText(text(third, 'id'))); return; }
+      if (sub === 'mark') {
+        const id = text(third, 'id');
+        const value = text(args.flags.level, 'level');
+        const level = value === 'none' ? 'none' : toLevel(value);
+        if (!level) throw new Error('--level is black_box, idea, full, or none');
+        // Only the researcher says what they understood: in VS Code (mark_understood) or here, typed at their own terminal.
+        if (args.flags.interactive !== true) throw new Error('Only the researcher marks what they understood: use the mark_understood popup, the Results view, or run teach mark ... --interactive yourself in a terminal.');
+        const note = typeof args.flags.note === 'string' ? args.flags.note : undefined;
+        if (!confirmOnTty(`Mark ${id} as understood: ${level === 'none' ? 'forget the mark' : LEVEL_LABEL[level]}${note ? ` (note: ${note})` : ''}?`, 'yes', 'mark it in VS Code instead (the popup or the Results view)')) { out('Not marked.'); return; }
+        const item = await teaching.mark(id, level, { note, at: new Date().toISOString() });
+        out(json ? item ?? null : `Marked ${id}: ${level === 'none' ? 'forgotten' : LEVEL_LABEL[level]}.`);
+        return;
+      }
+      if (sub === 'revise') {
+        const id = text(third, 'id');
+        const source = text(args.flags.file, 'file');
+        const draft = source === '-' ? await readStdin() : fs.readFileSync(path.resolve(source), 'utf8');
+        const revision = await teaching.propose(id, draft, new Date().toISOString());
+        const what = [revision.proof ? 'the reworded proof' : '', revision.remarks !== undefined ? (revision.remarks ? 'the remarks' : 'removing the remarks') : ''].filter(Boolean).join(' and ');
+        out(json ? revision : `Saved ${what} for ${id}. ${revisionNext(core, Boolean(revision.proof))}`);
+        return;
+      }
+      if (sub === 'style') {
+        if (typeof args.flags.add === 'string') { const file = await teaching.addStyle(args.flags.add); out(`Added to ${file}; new proofs and rewordings follow it. It is shared with collaborators when the researcher publishes.`); return; }
+        out((await teaching.styleText()) || 'No proof style recorded yet (teach style --add "..." once the researcher agrees to keep a rule).');
+        return;
+      }
+      throw new Error('teach list|pack <id>|mark <id> --level L --interactive|revise <id> --file F|style [--add "rule"]');
     }
     case 'handoff': {
       const file = await core.writeHandoff(typeof args.flags.note === 'string' ? args.flags.note : undefined);

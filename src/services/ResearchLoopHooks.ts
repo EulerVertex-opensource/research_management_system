@@ -3,6 +3,7 @@ import { ProjectPaths } from '../models/types';
 import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
 import { LOOP_COMMAND, MAINTENANCE_COMMAND } from './AgentProviders';
 import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/layout';
+import { UNDERSTANDING_PATH } from '../domain/understandingLevels';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
 export interface HookInput {
@@ -211,6 +212,9 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   }
   const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brsync\b|\bln\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
   for (const target of targets) {
+    if (shellWrites && under(target, UNDERSTANDING_PATH, root)) {
+      return { deny: true, reason: `Research loop: ${target} records what the researcher understood, and only the researcher sets it (the mark_understood popup, the dashboard, or ${LOOP_COMMAND} teach mark --interactive in their own terminal).` };
+    }
     if (shellWrites && (under(target, approvalsFile, root) || target.endsWith('/approvals.json') || under(target, shared.approvals, root) || under(target, STATE_DIR, root))) {
       return { deny: true, reason: `Research loop: ${target} is written only by the researcher through the extension. Approvals are never set by the agent.` };
     }
@@ -241,6 +245,75 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
     const problem = layoutProblem(paths, relative, creation.isDir) ?? (creation.content !== undefined ? folderNoteProblem(paths, relative, creation.content) : undefined);
     if (problem) return { deny: true, reason: `Research layout: ${problem}` };
   }
+  return { deny: false };
+}
+
+/**
+ * Which chats teach and which drive the loop, by session ID. A teaching chat
+ * (the teach skill, opened beside the loop's own chat) never takes the loop's
+ * lock, is never sent on by the Stop hook, and may only read; a session that
+ * has driven the loop is never taken for a teaching one.
+ */
+export const SESSIONS_PATH = `${STATE_DIR}/sessions.json`;
+export type SessionRole = 'teach' | 'drive';
+export type SessionRoles = Record<SessionRole, Record<string, string>>;
+const ROLES_KEPT = 20;
+
+export function parseSessionRoles(text: string | undefined): SessionRoles {
+  const roles: SessionRoles = { teach: {}, drive: {} };
+  try {
+    const raw = JSON.parse(text ?? '') as Partial<SessionRoles>;
+    for (const role of ['teach', 'drive'] as const) if (raw?.[role] && typeof raw[role] === 'object') roles[role] = { ...raw[role] };
+  } catch { /* none yet */ }
+  return roles;
+}
+
+export function withSessionRole(roles: SessionRoles, role: SessionRole, session: string, at: string): SessionRoles {
+  const entries = Object.entries(roles[role]).filter(([id]) => id !== session);
+  return { ...roles, [role]: Object.fromEntries([...entries, [session, at]].slice(-ROLES_KEPT)) };
+}
+
+export function sessionRole(roles: SessionRoles, session: string | undefined): SessionRole | undefined {
+  if (!session) return undefined;
+  if (roles.drive[session]) return 'drive';
+  return roles.teach[session] ? 'teach' : undefined;
+}
+
+const LOOP_CALL = /research-loop\.cjs["']?\s+([a-z-]+)(?:\s+([a-z-]+))?/g;
+const DRIVING_COMMANDS = new Set(['start', 'resume', 'extend', 'next', 'report']);
+
+/** The research-loop commands a shell call runs, as `command sub`. */
+function loopCalls(input: HookInput): Array<{ command: string; sub?: string }> {
+  const tool = input.tool_input ?? {};
+  const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
+  return [...command.matchAll(LOOP_CALL)].map((match) => ({ command: match[1], sub: match[2] }));
+}
+
+/** What a turn says about its chat: a prompt naming the teach skill, a teach command, or a command that drives the loop. */
+export function roleSignal(event: string, input: HookInput, teachPrompt: RegExp): SessionRole | undefined {
+  if (event === 'UserPromptSubmit') return typeof input.prompt === 'string' && teachPrompt.test(input.prompt) ? 'teach' : undefined;
+  if (event !== 'PreToolUse') return undefined;
+  const calls = loopCalls(input);
+  if (calls.some((call) => DRIVING_COMMANDS.has(call.command))) return 'drive';
+  return calls.some((call) => call.command === 'teach') ? 'teach' : undefined;
+}
+
+/** Commands a teaching chat may run: reading, the teach commands, and recording the researcher's doubts as ideas. */
+function teachingMayRun(call: { command: string; sub?: string }): boolean {
+  if (['status', 'show', 'teach', 'library'].includes(call.command)) return true;
+  if (call.command === 'search') return call.sub === 'status';
+  if (call.command === 'idea') return call.sub === 'add';
+  return false;
+}
+
+/** A teaching chat reads and explains; it never drives the loop or edits the project. */
+export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
+  const tool = (input.tool_name ?? '').toLowerCase();
+  const refused = loopCalls(input).find((call) => !teachingMayRun(call));
+  if (refused) return { deny: true, reason: `This chat is the teaching chat: it explains verified results and never drives the loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there.` };
+  if (/shell|bash/.test(tool) || !/write|edit|patch|notebook/.test(tool)) return { deny: false };
+  const inProject = targetsOf(input).filter((target) => !path.isAbsolute(target) || (root !== undefined && (target === root || target.startsWith(root + path.sep))));
+  if (inProject.length) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (${inProject[0]}). Record a doubt or idea with record_idea; changes are made in the loop's own chat.` };
   return { deny: false };
 }
 

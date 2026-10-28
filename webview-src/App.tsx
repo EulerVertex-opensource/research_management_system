@@ -185,6 +185,7 @@ export function App() {
   const [resultsOptions, setResultsOptions] = useState<ViewOptions>(DEFAULT_OPTIONS);
   const [resultsSelected, setResultsSelected] = useState<string | undefined>();
   const [needsKey, setNeedsKey] = useState<string | undefined>();
+  const [pendingNode, setPendingNode] = useState<string | null>(null);
   const [manuscriptTab, setManuscriptTab] = useState<'paper' | 'coverage'>('paper');
   const [coverageSection, setCoverageSection] = useState<string | undefined>();
   const [showProblems, setShowProblems] = useState(false);
@@ -214,6 +215,9 @@ export function App() {
         break;
       case 'showView':
         dispatch({ type: 'SET_VIEW', view: msg.view });
+        break;
+      case 'showNode':
+        setPendingNode(msg.id);
         break;
       case 'settingsData':
         dispatch({ type: 'SETTINGS_DATA', settings: msg.settings, requestId: msg.requestId, errors: msg.errors });
@@ -268,6 +272,14 @@ export function App() {
   const openPaper = (section?: string) => { setCoverageSection(section); setManuscriptTab('coverage'); handleSetView('manuscript'); };
   const openNodeById = (id: string) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); };
   const graphAction = (request: GraphAction) => send({ type: 'graphAction', request });
+  // A node asked for from outside (a chat link): shown once the node index has it.
+  useEffect(() => {
+    if (!pendingNode) return;
+    if (!state.nodes.length) return;
+    const node = state.nodes.find((item) => item.id === pendingNode);
+    if (node) handleNavigateNode(node);
+    setPendingNode(null);
+  }, [pendingNode, state.nodes]);
 
   const handleRefresh = () => {
     dispatch({ type: 'SET_REFRESHING', refreshing: true });

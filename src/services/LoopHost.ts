@@ -9,7 +9,7 @@ import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
 import { ResearchLoopCore } from './ResearchLoopCore';
 import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
-import { AGENT_PATH, AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { AGENT_PATH, AgentProvider, ApprovalKind, BRIDGE_PATH, EXTENSION_ID, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
 import { readAgentActivity } from './AgentActivity';
 import { LoopSettings } from '../models/settings';
 import { normalizeLoopSettings } from '../domain/loopSettings';
@@ -32,9 +32,11 @@ import { isCited } from '../domain/schema';
 import { bindingPath, loadImpactNodes, loadProjectRevision, readSectionBriefFile, sectionTexPath } from './ManuscriptImpactLoader';
 import { parseWritingOutline } from './ManuscriptWriting';
 import { lockBinding } from '../domain/manuscriptImpact';
+import { Teaching } from './Teaching';
+import { LEVEL_HINT, LEVEL_LABEL, UNDERSTANDING_LEVELS, UNDERSTANDING_PATH, UnderstandingLevel, teachPrompt, toLevel } from '../domain/understandingLevels';
 
 function extensionVersion(): string | undefined {
-  return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === 'tianhao.research-management-system')?.packageJSON?.version;
+  return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === EXTENSION_ID)?.packageJSON?.version;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -77,6 +79,7 @@ export class LoopHost implements vscode.Disposable {
   private watcher: vscode.FileSystemWatcher | undefined;
   private settingsWatcher: vscode.FileSystemWatcher | undefined;
   private agentWatcher: vscode.FileSystemWatcher | undefined;
+  private understandingWatcher: vscode.FileSystemWatcher | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
   private busy: Promise<unknown> = Promise.resolve();
   private readonly interactions = new Map<string, Promise<ToolResult>>();
@@ -111,6 +114,7 @@ export class LoopHost implements vscode.Disposable {
   /** Questions whose popup is still open, so the health check neither shows a second one nor resolves them behind it. */
   private readonly openQuestions = new Set<string>();
   private openOverviewHandler: (() => Promise<void>) | undefined;
+  private showNodeHandler: ((id: string) => Promise<void>) | undefined;
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel, private readonly memento?: vscode.Memento) {
     this.git = new LoopGit(new NodeGitRunner(files.rootUri.fsPath));
@@ -140,6 +144,10 @@ export class LoopHost implements vscode.Disposable {
     this.agentWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, AGENT_PATH));
     const agentRefresh = () => { void this.refreshStatusBar(); };
     this.agentWatcher.onDidChange(agentRefresh); this.agentWatcher.onDidCreate(agentRefresh); this.agentWatcher.onDidDelete(agentRefresh);
+    // The researcher's marks, from a popup, the dashboard, or their terminal.
+    this.understandingWatcher?.dispose();
+    this.understandingWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, UNDERSTANDING_PATH));
+    this.understandingWatcher.onDidChange(refresh); this.understandingWatcher.onDidCreate(refresh); this.understandingWatcher.onDidDelete(refresh);
     if (first) void this.migrateLoopSettings().then(() => this.guardLoopSettings());
     void this.startBridge();
     void this.refreshStatusBar();
@@ -149,6 +157,9 @@ export class LoopHost implements vscode.Disposable {
 
   /** Where node titles come from (the dashboard's node index), for the status bar and popups. */
   setNodeSource(source: () => ResearchNode[]): void { this.nodeSource = source; }
+
+  /** How to show one node's page in the dashboard; set by the dashboard. */
+  setNodeHandler(handler: (id: string) => Promise<void>): void { this.showNodeHandler = handler; }
 
   /** How to show the Overview; set by the dashboard. */
   setOverviewHandler(handler: () => Promise<void>): void { this.openOverviewHandler = handler; }
@@ -164,6 +175,7 @@ export class LoopHost implements vscode.Disposable {
     this.watcher?.dispose();
     this.settingsWatcher?.dispose();
     this.agentWatcher?.dispose();
+    this.understandingWatcher?.dispose();
     this.settingsChanged.dispose();
     this.synced.dispose();
     this.statusBar.dispose();
@@ -344,9 +356,14 @@ export class LoopHost implements vscode.Disposable {
       return this.awaitInteraction(request.id, slice);
     }
     if (name === 'await_answer') return this.awaitInteraction(String(args.id ?? ''), slice);
+    if (name === 'mark_understood') {
+      const id = `understand_${crypto.randomBytes(6).toString('hex')}`;
+      this.interactions.set(id, this.askUnderstanding(String(args.target ?? ''), toLevel(args.suggested), typeof args.note === 'string' ? args.note : undefined));
+      return this.awaitInteraction(id, slice);
+    }
     if (name === 'record_idea') {
       const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
-      return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent', tags, toIdeaKind(args.kind, tags)) }));
+      return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], args.origin === 'researcher' ? 'researcher' : 'agent', tags, toIdeaKind(args.kind, tags)) }));
     }
     if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary(), brief: core.briefStatus() }));
     if (name === 'confirm_publish') return { confirmed: await this.confirmPublish(String(args.detail ?? '')) };
@@ -412,6 +429,45 @@ export class LoopHost implements vscode.Disposable {
     return { answered: true, question_id: question.id, decision: 'answer', text: outcome.text };
   }
 
+  /** The teaching chat asks how well the researcher now knows a result; only their pick is recorded. */
+  private async askUnderstanding(target: string, suggested: UnderstandingLevel | undefined, note: string | undefined): Promise<ToolResult> {
+    const teaching = this.teaching();
+    const item = (await teaching.overview()).items.find((entry) => entry.id === target);
+    if (!item) return { answered: false, reason: `${target} is not a verified result; only verified results are marked.` };
+    const picked = await this.pickLevel(item.title, item.level, suggested ?? item.suggested, note);
+    if (!picked) return { answered: false, reason: 'dismissed', note: 'The researcher did not mark it; carry on teaching.' };
+    await teaching.mark(target, picked, { note, at: new Date().toISOString() });
+    this.stateChanged.fire();
+    return { answered: true, level: picked === 'none' ? 'none' : picked, note: picked === 'none' ? 'The researcher cleared their mark.' : `Recorded: ${LEVEL_LABEL[picked]}.` };
+  }
+
+  private async pickLevel(title: string, current: UnderstandingLevel | undefined, suggested: UnderstandingLevel, note?: string): Promise<UnderstandingLevel | 'none' | undefined> {
+    const items = [
+      ...[suggested, ...UNDERSTANDING_LEVELS.filter((level) => level !== suggested)].map((level) => ({ label: LEVEL_LABEL[level], description: `${LEVEL_HINT[level]}${level === current ? ' (your mark now)' : ''}`, level: level as UnderstandingLevel | 'none' })),
+      ...(current ? [{ label: 'Forget my mark', description: 'Show it as new to me again.', level: 'none' as const }] : []),
+    ];
+    const picked = await vscode.window.showQuickPick(items, { title: `Research Assistant · How well do you know “${title}” now?`, placeHolder: note ? `Your summary: ${note}` : 'Only you decide this; it stays on this computer.', ignoreFocusOut: true });
+    return picked?.level;
+  }
+
+  /** Verified results new to the researcher or changed since they studied them; 0 when that cannot be read. */
+  private async studyBehind(): Promise<number> {
+    if (!this.paths) return 0;
+    try { return (await this.teaching().overview()).behind; } catch { return 0; }
+  }
+
+  private teaching(): Teaching {
+    if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
+    return new Teaching(this.files, this.paths);
+  }
+
+  /** Open the agent chat for a teaching conversation: the prompt is copied, since a new chat is the researcher's to start. */
+  async teachCommand(target?: { id: string; title: string }): Promise<void> {
+    await vscode.env.clipboard.writeText(teachPrompt(target));
+    await this.openChat(this.core?.current?.provider);
+    vscode.window.setStatusBarMessage('$(book) Teaching prompt copied: start a new chat beside the loop and paste it', 10000);
+  }
+
   private autoActionText(kind: QuestionKind): string {
     switch (kind) {
       case 'goals': return 'No goal given. Continue only if project.md already has a Main Problem; otherwise wait.';
@@ -465,7 +521,12 @@ export class LoopHost implements vscode.Disposable {
     const rejectLabel = kind === 'counterexample' ? 'Not a counterexample…' : 'Ask for changes…';
     for (;;) {
       const choice = await vscode.window.showInformationMessage(`${approvalTitle(kind, node?.title || target, node?.type ?? '', node?.origin === 'library')}${summary ? `: ${summary}` : ''}`, 'Open', approveLabel, rejectLabel, 'Later');
-      if (choice === 'Open') { await vscode.window.showTextDocument(this.files.resolve(file)); continue; }
+      if (choice === 'Open') {
+        // A result opens on its dashboard page, like the links in the chat; the project file has none.
+        if (kind !== 'project' && this.showNodeHandler) await this.showNodeHandler(target);
+        else await vscode.window.showTextDocument(this.files.resolve(file));
+        continue;
+      }
       if (choice === approveLabel) return { decision: 'approved', text: '' };
       if (choice === rejectLabel) {
         const text = await vscode.window.showInputBox({ title: `Research Assistant · ${rejectLabel.replace('…', '')}: ${node?.title || target}`, prompt: kind === 'counterexample' ? 'Why is it not a counterexample?' : 'What should change?', ignoreFocusOut: true });
@@ -493,6 +554,15 @@ export class LoopHost implements vscode.Disposable {
       const agentGoals = new Set(await this.core.agentGoals());
       for (const node of payload.nodes) if (node.required && agentGoals.has(node.id)) node.agentGoal = true;
     }
+    try {
+      const study = await this.teaching().overview();
+      const items = new Map(study.items.map((item) => [item.id, item]));
+      for (const node of payload.nodes) {
+        const item = items.get(node.id);
+        if (item) node.understanding = { state: item.state, ...(item.level ? { level: item.level } : {}), suggested: item.suggested };
+      }
+      payload.study = { behind: study.behind, total: study.items.length };
+    } catch (error: unknown) { this.output.appendLine(`[teach] Could not read what you studied: ${String(error)}`); }
     if (this.pendingUpstream) {
       const { ref, behind, reason } = this.pendingUpstream;
       payload.attention.push({
@@ -540,6 +610,16 @@ export class LoopHost implements vscode.Disposable {
         const document = await vscode.workspace.openTextDocument(this.files.resolve(sectionTexPath(paths, request.section)));
         const line = Math.max(0, (request.line ?? 1) - 1);
         await vscode.window.showTextDocument(document, { selection: new vscode.Range(line, 0, line, 0) });
+        return;
+      }
+      case 'understand': {
+        await this.teaching().mark(request.id, request.level, { at: new Date().toISOString() });
+        this.stateChanged.fire();
+        return;
+      }
+      case 'teach': {
+        const node = request.id ? this.nodeSource?.().find((item) => item.id === request.id) : undefined;
+        await this.teachCommand(request.id ? { id: request.id, title: node?.title || request.id } : undefined);
         return;
       }
       case 'agent': {
@@ -613,12 +693,22 @@ export class LoopHost implements vscode.Disposable {
     if (this.lastHealthKey !== undefined && this.lastHealthKey !== health.signature) this.stateChanged.fire();
     this.lastHealthKey = health.signature;
     void this.announce(health, state);
-    if (health.key === 'idle') { this.statusBar.hide(); return; }
-    this.statusBar.text = `${HEALTH_ICON[health.key]} ${health.statusBar.text}`;
+    const behind = await this.studyBehind();
+    const study = behind ? `${behind} verified result${behind === 1 ? '' : 's'} new to you: run “Research Assistant: Study Verified Results” to go through them in a teaching chat.` : '';
+    if (health.key === 'idle') {
+      if (!behind) { this.statusBar.hide(); return; }
+      this.statusBar.text = `$(book) ${behind} to study`;
+      this.statusBar.backgroundColor = undefined;
+      this.statusBar.command = 'research-assistant.loop.teach';
+      this.statusBar.tooltip = study;
+      this.statusBar.show();
+      return;
+    }
+    this.statusBar.text = `${HEALTH_ICON[health.key]} ${health.statusBar.text}${behind ? ` · $(book) ${behind} to study` : ''}`;
     this.statusBar.backgroundColor = health.statusBar.level === 'error' ? new vscode.ThemeColor('statusBarItem.errorBackground')
       : health.statusBar.level === 'warning' ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.statusBar.command = 'research-assistant.openOverview';
-    this.statusBar.tooltip = new vscode.MarkdownString([`**${health.headline}**`, health.body, ...health.blockers.map((item, index) => `${index + 1}. ${item.title}`), `*If you do nothing:* ${health.ifIgnored}`, 'Click to open the Overview.'].filter(Boolean).join('\n\n'));
+    this.statusBar.tooltip = new vscode.MarkdownString([`**${health.headline}**`, health.body, ...health.blockers.map((item, index) => `${index + 1}. ${item.title}`), `*If you do nothing:* ${health.ifIgnored}`, study, 'Click to open the Overview.'].filter(Boolean).join('\n\n'));
     this.statusBar.show();
   }
 

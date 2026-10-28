@@ -4,6 +4,7 @@ import type { AttentionButton, LoopBlocker, LoopHealth } from '../models/graph';
 import {
   CONTINUE_PROMPT, KEEP_TRYING_HINT, acceptLabel, approvalTitle, capitalize, elapsed, keepTryingLabel, listTitles, newIdeaLabel, parkClause, plural, stageText,
 } from './copy';
+import { teachPrompt } from './understandingLevels';
 
 /**
  * Whose turn it is and why, derived from the loop state and the research graph;
@@ -174,6 +175,11 @@ export function computeLoopHealth(input: HealthInput): LoopHealth {
         const user = reason.detail ? title(reason.detail) : undefined;
         blockers.push({ title: `The definition “${reason.target.replace(/_/g, ' ')}” is used but never written down`, detail: user ? `${user} uses it; the agent may not invent definitions.` : 'The agent may not invent definitions.',
           buttons: [{ label: 'Draft it in chat', action: { action: 'agent', prompt: `The definition ${reason.target}${reason.detail ? ` (used by ${reason.detail})` : ''} has no file. Draft it as a definition node with me, then ask me to review it; do not approve it.` }, kind: 'primary' }] });
+      } else if (reason.kind === 'study') {
+        const count = Number(reason.target) || 0;
+        blockers.push({ title: `${plural(count, 'verified result')} ${count === 1 ? 'waits' : 'wait'} for you to study ${count === 1 ? 'it' : 'them'}`,
+          detail: `You asked the loop to start no new proof while ${reason.detail ?? 'that many'} or more are new to you. Study them in a separate chat, or mark what you know in Results; then tell the agent in its own chat to continue.`,
+          buttons: [{ label: 'Study them in a new chat', action: { action: 'agent', prompt: teachPrompt() }, kind: 'primary' }] });
       } else {
         blockers.push({ target: reason.target, title: `${title(reason.target)} depends on itself through a cycle`, detail: 'Two or more results each list the other as a prerequisite.',
           buttons: [{ label: 'Fix it in chat', action: { action: 'agent', prompt: `research-loop reports a dependency cycle at ${reason.target}. Show me the cycle in depends_on and propose how to break it; change nothing until I agree.` }, kind: 'primary' }] });

@@ -58,6 +58,8 @@ export interface ContextSources {
   checks: Map<string, ContextNode>;
   /** Object-search candidates; absent in callers that predate the search. */
   candidates?: Map<string, ContextNode>;
+  /** The project's proof style (research/style.md), which a proof the loop writes follows; absent when none is recorded. */
+  style?: string;
   /** Earlier stage reports, oldest first; the pack keeps those for the current asset. */
   reports: Array<{ stage?: string; outcome?: string; summary?: string; assetId?: string; at?: string }>;
 }
@@ -251,6 +253,10 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
         excluded.push('proofs of dependencies', 'full checklists of failed plans (show <plan> for one when needed)');
       } else {
         excluded.push('other plans and ideas', 'proofs of dependencies');
+        if (sources.style?.trim()) {
+          seen.add('text:proof_style');
+          items.push({ kind: 'text', id: 'proof_style', view: 'all', priority: 1, reason: 'how the researchers want proofs written: follow it', text: sources.style.trim() });
+        }
       }
       break;
     }

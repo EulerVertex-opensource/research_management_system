@@ -5,7 +5,7 @@ description: Execute one pending proof plan for a draft asset; on success put th
 
 # Execute a proof plan
 
-Input: the context pack from `research-loop next` (the plan, the frozen target statement, dependency statements, definitions, and the full text of each result the plan `adapts`). Read only the pack; for anything else run `research-loop show <id> [--section Heading]`, for example a dependency's proof only when a step genuinely needs its argument.
+Input: the context pack from `research-loop next` (the plan, the frozen target statement, dependency statements, definitions, the full text of each result the plan `adapts`, and the project's proof style when the researchers recorded one). Write the proof the way the proof style asks. Read only the pack; for anything else run `research-loop show <id> [--section Heading]`, for example a dependency's proof only when a step genuinely needs its argument.
 
 - Follow the checklist in order; tick a box only when the step is established in writing.
 - A step "as in <id>" follows that result's proof in the pack: carry it over with the changes `## Adapted from` names, check every hypothesis it uses in the new setting, and write the adapted argument out in full. An adapted proof is reproved here, not cited.

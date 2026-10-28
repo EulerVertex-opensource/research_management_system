@@ -70,7 +70,7 @@ export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(ty
 };
 
 /** Where a numeric loop setting appears in the Settings view. */
-export type LoopFieldGroup = 'general' | 'away' | 'refute' | 'construct' | 'search' | 'autonomy';
+export type LoopFieldGroup = 'general' | 'away' | 'refute' | 'construct' | 'search' | 'autonomy' | 'teaching';
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   general: 'Search & effort',
   away: 'When you don’t respond',
@@ -78,6 +78,7 @@ export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
   autonomy: 'Working on its own',
+  teaching: 'Keeping up with the proofs',
 };
 
 export interface LoopNumberField { defaultValue: number; range: readonly [number, number]; label: string; hint: string; unit?: string; group: LoopFieldGroup }
@@ -104,6 +105,7 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   autonomyBudget: { defaultValue: 30, range: [1, 1000], group: 'autonomy', unit: 'attempts', label: 'Budget', hint: 'Proof attempts and search rounds the agent may spend on its own before it hands the loop back to you.' },
   autonomyHours: { defaultValue: 0, range: [0, 168], group: 'autonomy', unit: 'hours', label: 'Time limit', hint: 'Hands the loop back after this long even with budget left; 0 means no time limit.' },
   autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal revisions', hint: 'Times the agent may add a weaker or alternative goal of its own when results are set aside. It never drops your goals; you decide about them at hand-back.' },
+  studyAhead: { defaultValue: 0, range: [0, 50], group: 'teaching', unit: 'results', label: 'How far the loop may get ahead of you', hint: 'Verified results you have not studied yet (with the teach skill, or marked in Results) before the loop waits for you instead of starting new proofs. 0 means it never waits; working on its own ignores this.' },
 };
 
 const loopNumberDefaults = Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, LOOP_NUMBER_FIELDS[key].defaultValue])) as Record<LoopNumberKey, number>;
