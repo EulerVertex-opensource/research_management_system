@@ -46,8 +46,8 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     }
     case 'parked': return entry(`Set ${name} aside ${parkClause(text(event.reason))}.`, 'error');
     case 'unparked': return entry(`${name} is back in the queue.`, 'info');
-    case 'approved': return entry(`${text(event.source) === 'auto' ? 'Auto mode' : 'You'} accepted ${name}.`, 'success');
-    case 'auto_approved': return entry(`Auto mode accepted ${name}.`, 'success');
+    case 'approved': return entry(text(event.source) === 'auto' ? `${name} was approved automatically.` : `You accepted ${name}.`, 'success');
+    case 'auto_approved': return entry(`${name} was approved automatically.`, 'success');
     case 'approval_requested': return entry(`Asked you: ${approvalTitle(text(event.kind), name, type(asset))}.`, 'warning');
     case 'approval_resolved': return event.decision === 'changes_requested' ? entry(`You asked for changes to ${name}.`, 'info') : undefined;
     case 'approval_invalidated': {
@@ -63,7 +63,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'question_answered': return entry(event.decision === 'skip' ? 'You skipped a question.' : 'You answered the agent’s question.', 'info');
     case 'question_expired': return entry('A question went unanswered; the agent used its default.');
     case 'agent_retry': return entry(`No direction from you: the agent is trying one new approach on ${name}.`, 'warning');
-    case 'autonomy_started': return entry('Autonomous mode: the agent works on its own and asks you nothing.', 'info');
+    case 'autonomy_started': return entry('The agent started working on its own; it asks you nothing until it hands the loop back.', 'info');
     case 'autonomy_decided': return entry(`The agent decided a question itself${name ? ` about ${name}` : ''}; it is kept as an idea for you.`);
     case 'autonomy_deciding': return entry(`The attempts for ${name} ran out; the agent decides itself whether to go on.`, 'warning');
     case 'budget_allocated': return entry(`The agent gave ${name} ${plural(Number(event.attempts) || 0, 'more attempt')} with a new approach of its own.`, 'info');
@@ -71,7 +71,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'autonomy_handover': return entry(`The autonomous run ended: ${text(event.reason)}. Over to you.`, 'warning');
     case 'recheck_flagged': { const id = text(event.id); return { text: `${title(id)} needs a re-check: ${title(text(event.because))} changed.`, tone: 'warning', target: id }; }
     case 'recheck_cleared': { const id = text(event.id); return { text: `You confirmed ${title(id)} still holds.`, tone: 'success', target: id }; }
-    case 'auto_mode_reset': return entry('Auto mode was switched on outside the dashboard, so it was turned off.', 'warning');
+    case 'auto_mode_reset': return entry('Automatic approval was switched on outside the dashboard, so it was turned off.', 'warning');
     case 'plans_abandoned': return entry(`Dropped ${plural(Array.isArray(event.plans) ? event.plans.length : 0, 'proof plan')} for ${name}.`);
     case 'idea_saved': {
       const related = Array.isArray(event.relatedAssets) ? event.relatedAssets.map(String) : [];

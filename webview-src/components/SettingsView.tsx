@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS, RIGOR_KEYS } from '../../src/models/settings';
-import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, RigorPolicy, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
-import { LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, rigorPreset, validateSettingsPatch } from '../../src/domain/loopSettings';
+import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS } from '../../src/models/settings';
+import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
+import { AWAY_KEYS, CHECK_KEYS, Involvement, LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, involvement, rigorPreset, validateSettingsPatch, withInvolvement } from '../../src/domain/loopSettings';
 import { COLOR } from '../graph/colors';
 
 type SectionId = 'agent' | 'loop' | 'sync' | 'budgets';
@@ -28,8 +28,15 @@ const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?
   project: { label: 'Project goals', hint: 'project.md and its required results', warning: 'The loop will pursue goals you have not reviewed.' },
 };
 const RULES = AUTO_APPROVE_RULES.map((id) => ({ id, ...RULE_TEXT[id] }));
-/** Autonomous mode's numbers sit under its own switch, not among the general groups. */
-const FIELD_GROUPS = (Object.keys(LOOP_FIELD_GROUPS) as LoopFieldGroup[]).filter((group) => group !== 'autonomy');
+/** The groups shown under "How involved are you" are left out of the general ones. */
+const FIELD_GROUPS = (Object.keys(LOOP_FIELD_GROUPS) as LoopFieldGroup[]).filter((group) => group !== 'autonomy' && group !== 'away');
+
+/** The three levels of "How involved are you", each with the one line its card shows. */
+const INVOLVEMENT_OPTIONS: Array<{ id: Involvement; label: string; hint: string }> = [
+  { id: 'review', label: 'Review everything', hint: 'Every result, definition, and goal waits for your approval.' },
+  { id: 'routine', label: 'Approve routine work', hint: 'The kinds you pick are approved without asking; questions still come to you.' },
+  { id: 'alone', label: 'Work on its own', hint: 'Asks you nothing, and hands the loop back when its budget or time runs out.' },
+];
 
 // ---------- drafts: what the form holds, as the inputs show it ----------
 
@@ -72,7 +79,7 @@ function patchFor(section: SectionId, draft: Drafts, saved: Drafts): SettingsPat
 
 // ---------- the view ----------
 
-/** Settings: how the dashboard shows the research, which agent drives the loop, auto mode and limits, sync, and context budgets. */
+/** Settings: how the dashboard shows the research, which agent drives the loop, how involved the researcher is and how thorough the loop is, sync, and context budgets. */
 export function SettingsView({ settings, result, onSave, onNavigate, showTechnical, onShowTechnical }: Props) {
   const [drafts, setDrafts] = useState<Drafts | null>(settings ? draftsOf(settings) : null);
   const [errors, setErrors] = useState<Partial<Record<SectionId, SettingsErrors>>>({});
@@ -122,12 +129,27 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
   const agent = drafts.agent;
   const loop = drafts.loop;
   const sync = drafts.sync;
-  const autonomyOn = loop.autonomy.enabled;
-  const autoOn = loop.autoApprove.enabled || autonomyOn;
-  const numberField = (key: LoopNumberKey, disabled = false) => {
+  const level = involvement(loop);
+  const alone = level === 'alone';
+  /** `stacked` puts the label above the input, for fields laid out in a grid of columns. */
+  const numberField = (key: LoopNumberKey, disabled = false, stacked = false) => {
     const field = LOOP_NUMBER_FIELDS[key];
     return <div key={key} style={{ opacity: disabled ? 0.5 : 1 }}><NumberField label={field.label} hint={field.hint} unit={field.unit} value={loop[key]} range={field.range}
-      onChange={(value) => update('loop', { [key]: value } as Partial<Drafts['loop']>)} error={error('loop', `loop.${key}`)} /></div>;
+      onChange={(value) => update('loop', { [key]: value } as Partial<Drafts['loop']>)} error={error('loop', `loop.${key}`)} disabled={disabled} stacked={stacked} /></div>;
+  };
+  const rigorField = (key: RigorKey, disabled = false) => {
+    const field = RIGOR_FIELDS[key];
+    return (
+      <div key={key} style={{ opacity: disabled ? 0.5 : 1 }}>
+        <Field label={field.label} hint={field.hint}>
+          <select value={loop.rigor[key]} aria-label={field.label} disabled={disabled} style={inputStyle}
+            onChange={(event) => update('loop', { rigor: { ...loop.rigor, [key]: event.target.value } as RigorPolicy })}>
+            {Object.entries(field.options).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+          <FieldError text={error('loop', `loop.rigor.${key}`)} />
+        </Field>
+      </div>
+    );
   };
 
   return (
@@ -158,62 +180,49 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
         </Section>
 
         <Section title="Research loop" scope="this machine" note={settings.loop.file}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <div style={{ flex: '1 1 320px' }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>How careful</div>
-                <div style={{ fontSize: 12, color: COLOR.muted }}>Careful checks more before the loop builds on something; Fast moves on and leaves more for you to check later.</div>
-              </div>
-              <Segmented value={rigorPreset(loop.rigor)}
-                options={[['careful', 'Careful'], ['fast', 'Fast'], ...(rigorPreset(loop.rigor) === 'custom' ? [['custom', 'Custom'] as [string, string]] : [])]}
-                onChange={(value) => { if (value === 'careful' || value === 'fast') update('loop', { rigor: { ...RIGOR_PRESETS[value] } }); }} />
+          <Heading title="How involved are you" hint="What the loop may do without you." />
+          <Cards value={level} options={INVOLVEMENT_OPTIONS} label="How involved are you" onChange={(value) => setDrafts({ ...drafts, loop: withInvolvement(loop, value) })} />
+          {level === 'routine' && (
+            <Box>
+              {RULES.map((rule) => (
+                <div key={rule.id} style={{ padding: '4px 0' }}>
+                  <Check checked={loop.autoApprove[rule.id]} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, [rule.id]: value } })} label={rule.label} hint={rule.hint} />
+                  {rule.warning && loop.autoApprove[rule.id] && <Warning text={rule.warning} />}
+                </div>
+              ))}
+            </Box>
+          )}
+          {alone && (
+            <Box grid min={180}>
+              <BoxTitle title={LOOP_FIELD_GROUPS.autonomy} hint="It approves everything (each still judged from its file), decides questions itself, and shares the budget among the results." />
+              {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === 'autonomy').map((key) => numberField(key, false, true))}
+              <div style={{ gridColumn: '1 / -1' }}><Warning flush text="This includes project goals, construction specifications, and counterexamples you have not reviewed." /></div>
+            </Box>
+          )}
+          <Box grid>
+            <BoxTitle title={LOOP_FIELD_GROUPS.away} hint={alone ? 'The agent decides these itself while it works on its own; your choices apply again once it hands the loop back.' : undefined} />
+            {AWAY_KEYS.map((key) => rigorField(key, alone))}
+            {numberField('questionTimeoutSeconds', alone, true)}
+          </Box>
+          {level !== 'review' && (
+            <div style={{ fontSize: 12, color: COLOR.muted, lineHeight: 1.5 }}>
+              Automatic approvals are recorded as <code>auto</code> in the shared approval records, so collaborators see them.
+              A result whose approval was revoked by a change (its dependency changed, say) always comes back to you.
+              {involvement(saved.loop) === 'review' && settings.loop.queued > 0 && <> Saving approves the eligible ones of the {settings.loop.queued} request(s) now waiting.</>}
             </div>
-            <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '8px 12px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '10px 16px' }}>
-              {RIGOR_KEYS.map((key) => {
-                const field = RIGOR_FIELDS[key];
-                return (
-                  <Field key={key} label={field.label} hint={field.hint}>
-                    <select value={loop.rigor[key]} aria-label={field.label} style={inputStyle}
-                      onChange={(event) => update('loop', { rigor: { ...loop.rigor, [key]: event.target.value } as RigorPolicy })}>
-                      {Object.entries(field.options).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select>
-                    <FieldError text={error('loop', `loop.rigor.${key}`)} />
-                  </Field>
-                );
-              })}
+          )}
+
+          <Divider label="" />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 320px' }}>
+              <Heading title="How thorough" hint="Careful checks more before the loop builds on a result; Fast moves on and leaves more for you to check later." />
             </div>
+            <Segmented value={rigorPreset(loop.rigor)}
+              options={[['careful', 'Careful'], ['fast', 'Fast'], ...(rigorPreset(loop.rigor) === 'custom' ? [['custom', 'Custom'] as [string, string]] : [])]}
+              onChange={(value) => { if (value === 'careful' || value === 'fast') update('loop', { rigor: { ...loop.rigor, ...RIGOR_PRESETS[value] } }); }} />
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Switch on={autonomyOn} onChange={(value) => update('loop', { autonomy: { enabled: value } })} label="Autonomous mode" />
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>Autonomous mode</div>
-              <div style={{ fontSize: 12, color: COLOR.muted }}>The agent asks you nothing: it decides every question itself, shares the budget among the results, sets aside what it cannot do, and hands the loop back when the budget or time runs out. Every auto-approve rule below applies.</div>
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '6px 12px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))', gap: '6px 16px' }}>
-            {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === 'autonomy').map((key) => numberField(key, !autonomyOn))}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Switch on={autoOn} disabled={autonomyOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, enabled: value } })} label="Auto mode" />
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>Auto mode</div>
-              <div style={{ fontSize: 12, color: COLOR.muted }}>{autonomyOn ? 'On while autonomous mode is on: every rule applies.' : 'Approve these results without asking you. Questions still come to you.'}</div>
-            </div>
-          </div>
-          <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '6px 12px', opacity: autoOn ? 1 : 0.5 }}>
-            {RULES.map((rule) => (
-              <div key={rule.id} style={{ padding: '4px 0' }}>
-                <Check checked={autonomyOn || loop.autoApprove[rule.id]} disabled={!autoOn || autonomyOn} onChange={(value) => update('loop', { autoApprove: { ...loop.autoApprove, [rule.id]: value } })}
-                  label={rule.label} hint={rule.hint} />
-                {rule.warning && autoOn && (autonomyOn || loop.autoApprove[rule.id]) && <Warning text={rule.warning} />}
-              </div>
-            ))}
-          </div>
-          <div style={{ fontSize: 12, color: COLOR.muted, lineHeight: 1.5 }}>
-            Auto approvals are recorded as <code>auto</code> in the shared approval records, so collaborators see them.
-            A result whose approval was revoked by a change (its dependency changed, say) always comes back to you.
-            {!saved.loop.autoApprove.enabled && !saved.loop.autonomy.enabled && autoOn && settings.loop.queued > 0 && <> Saving approves the eligible ones of the {settings.loop.queued} request(s) now waiting.</>}
-          </div>
+          <Box grid>{CHECK_KEYS.map((key) => rigorField(key))}</Box>
+
           {FIELD_GROUPS.map((group) => (
             <React.Fragment key={group}>
               {LOOP_FIELD_GROUPS[group] && <Divider label={LOOP_FIELD_GROUPS[group]} />}
@@ -223,7 +232,7 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
           {settings.loop.problems.map((problem) => <Warning key={problem} text={problem} />)}
           {settings.recentAutoApprovals.length > 0 && (
             <div style={{ fontSize: 12 }}>
-              <span style={{ color: COLOR.muted }}>Recent auto approvals: </span>
+              <span style={{ color: COLOR.muted }}>Recently approved automatically: </span>
               {settings.recentAutoApprovals.map((item, index) => (
                 <React.Fragment key={`${item.at}-${item.target}`}>
                   {index > 0 && ' · '}
@@ -354,19 +363,24 @@ function TextField({ label, hint, value, placeholder, error, mono, onChange }: {
   );
 }
 
-function NumberField({ label, hint, unit, value, range, error, onChange }: { label: string; hint: string; unit?: string; value: string; range: readonly [number, number]; error?: string; onChange: (value: string) => void }) {
+/** A number with its unit and range; `stacked` puts the label above (as Field does) instead of in a column beside it. */
+function NumberField({ label, hint, unit, value, range, error, disabled, stacked, onChange }: { label: string; hint: string; unit?: string; value: string; range: readonly [number, number]; error?: string; disabled?: boolean; stacked?: boolean; onChange: (value: string) => void }) {
+  const control = (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input value={value} inputMode="numeric" aria-label={label} disabled={disabled} onChange={(event) => onChange(event.target.value)}
+          style={{ ...inputStyle, width: 80, ...(error ? { borderColor: 'var(--vscode-inputValidation-errorBorder)' } : {}) }} />
+        <span style={{ fontSize: 12, color: COLOR.muted, whiteSpace: 'nowrap' }}>{unit ? `${unit} · ` : ''}{range[0]}–{range[1]}</span>
+      </div>
+      <div style={{ fontSize: 11, color: COLOR.muted, marginTop: 3 }}>{hint}</div>
+      <FieldError text={error} />
+    </div>
+  );
+  if (stacked) return <div><label style={labelStyle}>{label}</label>{control}</div>;
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: 12, alignItems: 'start' }}>
       <label style={{ fontSize: 13, paddingTop: 5 }}>{label}</label>
-      <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input value={value} inputMode="numeric" onChange={(event) => onChange(event.target.value)}
-            style={{ ...inputStyle, width: 80, ...(error ? { borderColor: 'var(--vscode-inputValidation-errorBorder)' } : {}) }} />
-          <span style={{ fontSize: 12, color: COLOR.muted }}>{unit ? `${unit} · ` : ''}{range[0]}–{range[1]}</span>
-        </div>
-        <div style={{ fontSize: 11, color: COLOR.muted, marginTop: 3 }}>{hint}</div>
-        <FieldError text={error} />
-      </div>
+      {control}
     </div>
   );
 }
@@ -380,13 +394,27 @@ function Check({ checked, disabled, label, hint, onChange }: { checked: boolean;
   );
 }
 
-function Switch({ on, label, onChange, disabled = false }: { on: boolean; label: string; onChange: (value: boolean) => void; disabled?: boolean }) {
+/** A choice among a few options that each need a line of explanation: equal cards filling the row. */
+function Cards<T extends string>({ value, options, label, onChange }: { value: T; options: Array<{ id: T; label: string; hint: string }>; label: string; onChange: (value: T) => void }) {
   return (
-    <button role="switch" aria-checked={on} aria-label={label} disabled={disabled} onClick={() => onChange(!on)}
-      style={{ width: 40, height: 22, borderRadius: 11, border: `1px solid ${on ? 'transparent' : COLOR.border}`, padding: 2, cursor: disabled ? 'default' : 'pointer', flexShrink: 0, opacity: disabled ? 0.6 : 1,
-        background: on ? 'var(--vscode-button-background)' : 'var(--vscode-input-background)', display: 'flex', justifyContent: on ? 'flex-end' : 'flex-start' }}>
-      <span style={{ width: 16, height: 16, borderRadius: 8, background: on ? 'var(--vscode-button-foreground)' : 'var(--vscode-foreground)', opacity: on ? 1 : 0.6 }} />
-    </button>
+    <div role="radiogroup" aria-label={label} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(180px, 100%), 1fr))', gap: 8 }}>
+      {options.map((option) => {
+        const selected = option.id === value;
+        return (
+          <button key={option.id} role="radio" aria-checked={selected} onClick={() => onChange(option.id)}
+            style={{ textAlign: 'left', padding: '8px 10px', borderRadius: 4, cursor: 'pointer', color: 'var(--vscode-foreground)', fontFamily: 'inherit',
+              border: `1px solid ${selected ? 'var(--vscode-focusBorder, var(--vscode-button-background))' : COLOR.border}`,
+              boxShadow: selected ? 'inset 0 0 0 1px var(--vscode-focusBorder, var(--vscode-button-background))' : 'none',
+              background: selected ? 'var(--vscode-list-activeSelectionBackground, var(--vscode-input-background))' : 'transparent' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 600, color: selected ? 'var(--vscode-list-activeSelectionForeground, var(--vscode-foreground))' : undefined }}>
+              <span aria-hidden style={{ width: 10, height: 10, borderRadius: 5, flexShrink: 0, border: `1px solid ${selected ? 'currentColor' : COLOR.muted}`, background: selected ? 'currentColor' : 'transparent' }} />
+              {option.label}
+            </div>
+            <div style={{ fontSize: 12, marginTop: 3, color: selected ? 'var(--vscode-list-activeSelectionForeground, var(--vscode-foreground))' : COLOR.muted, opacity: selected ? 0.85 : 1 }}>{option.hint}</div>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -407,8 +435,37 @@ function Installed({ label, installed }: { label: string; installed: boolean }) 
   return <span style={{ fontSize: 12, color: installed ? COLOR.approved : COLOR.muted }}>{installed ? '✓' : '✗'} {label}{installed ? '' : ' not installed'}</span>;
 }
 
-function Warning({ text }: { text: string }) {
-  return <div style={{ fontSize: 12, margin: '4px 0 0 22px', padding: '4px 8px', borderLeft: `3px solid ${COLOR.waiting}`, background: 'var(--vscode-inputValidation-warningBackground, transparent)' }}>⚠ {text}</div>;
+/** `flush` drops the indent that lines a warning up under a checkbox's label. */
+function Warning({ text, flush }: { text: string; flush?: boolean }) {
+  return <div style={{ fontSize: 12, margin: flush ? 0 : '4px 0 0 22px', padding: '4px 8px', borderLeft: `3px solid ${COLOR.waiting}`, background: 'var(--vscode-inputValidation-warningBackground, transparent)' }}>⚠ {text}</div>;
+}
+
+function Heading({ title, hint }: { title: string; hint: string }) {
+  return (
+    <div>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>{title}</div>
+      <div style={{ fontSize: 12, color: COLOR.muted }}>{hint}</div>
+    </div>
+  );
+}
+
+/** A bordered group of controls; `grid` lays them out in columns at least `min` pixels wide. */
+function Box({ grid, min = 300, children }: { grid?: boolean; min?: number; children: React.ReactNode }) {
+  return (
+    <div style={{ border: `1px solid ${COLOR.border}`, borderRadius: 4, padding: '10px 12px', ...(grid ? { display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(min(${min}px, 100%), 1fr))`, gap: '12px 16px' } : {}) }}>
+      {children}
+    </div>
+  );
+}
+
+/** The title of a Box, across all its columns. */
+function BoxTitle({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div style={{ gridColumn: '1 / -1' }}>
+      <div style={{ fontSize: 12, fontWeight: 600 }}>{title}</div>
+      {hint && <div style={{ fontSize: 12, color: COLOR.muted, marginTop: 2 }}>{hint}</div>}
+    </div>
+  );
 }
 
 function Divider({ label }: { label: string }) {

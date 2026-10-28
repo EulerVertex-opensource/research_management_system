@@ -13,17 +13,47 @@ export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
 export const AUTONOMOUS_AUTO_APPROVE: AutoApprovePolicy = { enabled: true, ...Object.fromEntries(AUTO_APPROVE_RULES.map((rule) => [rule, true])) } as AutoApprovePolicy;
 export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
 
-/** Rigor or speed: Careful is the default; Fast trades checks for progress. */
-export const RIGOR_PRESETS: Record<'careful' | 'fast', RigorPolicy> = {
-  careful: { refuteSearch: 'all', agreeDefinitions: 'main', onDependencyChange: 'revert', missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' },
-  fast: { refuteSearch: 'main', agreeDefinitions: 'off', onDependencyChange: 'flag', missingDefinitions: 'continue', whenStuck: 'retry', unansweredQuestions: 'default' },
+/**
+ * Where each rigor policy appears in the Settings view: `checks` under "How thorough" (what the loop
+ * verifies before building on a result), `away` under "How involved are you" (what happens when the
+ * researcher does not respond). A Record so a new policy without a place does not compile.
+ */
+export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away'> = {
+  refuteSearch: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks',
+  missingDefinitions: 'away', whenStuck: 'away', unansweredQuestions: 'away',
 };
-export const DEFAULT_RIGOR: RigorPolicy = RIGOR_PRESETS.careful;
+export const CHECK_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'checks');
+export const AWAY_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'away');
+type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'agreeDefinitions' | 'onDependencyChange'>;
 
-/** The preset a policy matches, or `custom`. */
+/** How thorough: Careful is the default; Fast trades checks for progress. Presets cover the checks only. */
+export const RIGOR_PRESETS: Record<'careful' | 'fast', CheckPolicy> = {
+  careful: { refuteSearch: 'all', agreeDefinitions: 'main', onDependencyChange: 'revert' },
+  fast: { refuteSearch: 'main', agreeDefinitions: 'off', onDependencyChange: 'flag' },
+};
+export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' };
+
+/** The preset a policy's checks match, or `custom`. */
 export function rigorPreset(policy: RigorPolicy): 'careful' | 'fast' | 'custom' {
-  for (const name of ['careful', 'fast'] as const) if (RIGOR_KEYS.every((key) => RIGOR_PRESETS[name][key] === policy[key])) return name;
+  for (const name of ['careful', 'fast'] as const) if (CHECK_KEYS.every((key) => RIGOR_PRESETS[name][key as keyof CheckPolicy] === policy[key])) return name;
   return 'custom';
+}
+
+/**
+ * How involved the researcher is: one choice in the Settings view over the two switches the
+ * settings file stores. `routine` is auto-approval by the rules; `alone` is autonomous mode.
+ */
+export type Involvement = 'review' | 'routine' | 'alone';
+type InvolvementSwitches = Pick<LoopSettings, 'autoApprove' | 'autonomy'>;
+
+export function involvement(settings: InvolvementSwitches): Involvement {
+  return settings.autonomy.enabled ? 'alone' : settings.autoApprove.enabled ? 'routine' : 'review';
+}
+
+/** The switches for a level; the rule checkboxes are kept, so returning to `routine` restores them. */
+export function withInvolvement<T extends InvolvementSwitches>(settings: T, level: Involvement): T {
+  const enabled = level === 'review' ? false : level === 'routine' ? true : settings.autoApprove.enabled;
+  return { ...settings, autoApprove: { ...settings.autoApprove, enabled }, autonomy: { enabled: level === 'alone' } };
 }
 
 export interface RigorField { label: string; hint: string; options: Record<string, string> }
@@ -35,17 +65,18 @@ export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(ty
   onDependencyChange: { label: 'When something a result rests on changes', hint: 'A changed definition or statement can make the proofs built on it be about something else.', options: { revert: 'Everything downstream back to review', flag: 'Mark it for re-check' } },
   missingDefinitions: { label: 'When a definition is used but missing', hint: 'The agent drafts it in either case; it never accepts it for you.', options: { wait: 'Draft it, then wait for me', continue: 'Draft it and go on' } },
   whenStuck: { label: 'When a result is stuck and you give no direction', hint: 'After the failed-attempt limit, or when a construction search runs out.', options: { park: 'Set it aside', retry: 'Agent tries one new approach itself' } },
-  unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout below.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
+  unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
 };
 
 /** Where a numeric loop setting appears in the Settings view. */
-export type LoopFieldGroup = 'general' | 'refute' | 'construct' | 'search' | 'autonomy';
+export type LoopFieldGroup = 'general' | 'away' | 'refute' | 'construct' | 'search' | 'autonomy';
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   general: 'Search & effort',
+  away: 'When you don’t respond',
   refute: 'Object search: refute (falsify)',
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
-  autonomy: 'Autonomous mode',
+  autonomy: 'Working on its own',
 };
 
 export interface LoopNumberField { defaultValue: number; range: readonly [number, number]; label: string; hint: string; unit?: string; group: LoopFieldGroup }
@@ -57,8 +88,8 @@ export interface LoopNumberField { defaultValue: number; range: readonly [number
  */
 export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   maxFailedPlans: { defaultValue: 3, range: [1, 10], group: 'general', label: 'Proof attempts per asset', hint: 'Failed plans before the loop asks you for a new direction.' },
-  iterationCap: { defaultValue: 10, range: [1, 100], group: 'general', label: 'Autopilot continuations', hint: 'Times the Stop hook sends the agent on per chat session; applies to the running loop too.' },
-  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'general', unit: 'seconds', label: 'Question timeout', hint: 'How long a question waits before “When a question goes unanswered” applies. Reviews never time out; they wait in Needs you.' },
+  iterationCap: { defaultValue: 10, range: [1, 100], group: 'general', label: 'Continuations per chat', hint: 'Times the Stop hook sends the agent on in one chat session; applies to the running loop too. When it works on its own, its budget applies instead.' },
+  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'away', unit: 'seconds', label: 'Question timeout', hint: 'How long a question waits before “When a question goes unanswered” applies. Reviews never time out; they wait in Needs you.' },
   refuteWidth: { defaultValue: 1, range: [1, 8], group: 'refute', label: 'Workers per round', hint: 'Parallel subagents searching for a counterexample, each in its own direction.' },
   refuteRounds: { defaultValue: 1, range: [1, 10], group: 'refute', label: 'Rounds', hint: 'Rounds without a counterexample before the loop moves on to planning a proof.' },
   constructWidth: { defaultValue: 3, range: [1, 8], group: 'construct', label: 'Workers per round', hint: 'Parallel subagents proposing constructions, each in its own direction.' },

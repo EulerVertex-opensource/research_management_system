@@ -62,7 +62,7 @@ But: `No counterexample to cusp incompressibility in this round: zero curvature 
 
 ## Autonomous mode
 
-When the researcher turns on autonomous mode in Settings, `next` and `status` say so with the budget spent. The researcher is away until the loop hands back:
+When the researcher chooses *Work on its own* in Settings (autonomous mode), `next` and `status` say so with the budget spent. The researcher is away until the loop hands back:
 
 - Never ask. `ask_researcher` returns at once with `reason: "autonomous"` and no popup, and `report question` is not recorded as a question; follow the returned `auto_action`. Decide yourself, and say in the report summary what you chose and why, so the researcher can follow it later.
 - Each executed plan and each search round spends one attempt of the budget. When a result's attempts run out, `next` asks **you** to decide: read its failed plans and search board, then either `budget allocate <asset> <n> --reason "<what the failures show and what to try instead>"` (the reason becomes the direction your next plans must follow, and the failed plans before it stop counting), or `park <asset> --reason agent_gave_up --note "<the obstruction>"`. Weigh what the other results still need before giving one result much of what is left.

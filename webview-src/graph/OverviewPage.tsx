@@ -106,7 +106,7 @@ function Now({ payload, onAction, onNavigate, onOpenSettings }: Pick<Props, 'onA
       {((payload.autoMode && !payload.autonomy?.active) || !payload.projectApproved) && (
         <div style={{ fontSize: 12, color: COLOR.muted, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
           {!payload.projectApproved && <span style={{ color: COLOR.waiting }}>The goals in project.md are not accepted yet.</span>}
-          {payload.autoMode && !payload.autonomy?.active && <span>Auto mode is on: some results are accepted without asking you. <button style={link} onClick={onOpenSettings}>Settings</button></span>}
+          {payload.autoMode && !payload.autonomy?.active && <span>Routine work is approved without asking you. <button style={link} onClick={onOpenSettings}>Settings</button></span>}
         </div>
       )}
     </Block>

@@ -194,7 +194,7 @@ export class LoopHost implements vscode.Disposable {
       if (next.iterationCap !== previous.iterationCap) await core.setIterationCap(next.iterationCap);
       return next.autoApprove.enabled || next.autonomy.enabled ? core.autoApproveQueued() : [];
     });
-    if (granted.length) this.output.appendLine(`[loop] Auto mode accepted ${granted.length} waiting item(s): ${granted.map((item) => item.split(':')[1]).join(', ')}`);
+    if (granted.length) this.output.appendLine(`[loop] Approved ${granted.length} waiting item(s) automatically: ${granted.map((item) => item.split(':')[1]).join(', ')}`);
   }
 
   /** Requests waiting for the researcher, and the latest approvals auto mode granted; for the Settings view. */
@@ -233,7 +233,7 @@ export class LoopHost implements vscode.Disposable {
     const repaired = { ...settings, autoApprove: { ...settings.autoApprove, enabled: false }, autonomy: { enabled: false } };
     const written = await writeLoopSettings(this.files, repaired);
     await this.memento.update(SETTINGS_HASH_KEY, sha256(written));
-    this.output.appendLine('[loop] Auto mode was enabled outside the dashboard; turned it off.');
+    this.output.appendLine('[loop] Automatic approval was enabled outside the dashboard; turned it off.');
     if (this.core?.current) await this.core.event('auto_mode_reset').catch(() => undefined);
   }
 
