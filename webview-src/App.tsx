@@ -169,6 +169,7 @@ const initialState: State = {
 
 /** Views drawn from the research overview payload. */
 const GRAPH_VIEWS: SidebarView[] = ['graph', 'needs', 'results', 'activity', 'manuscript'];
+const PASTE_KEY = /Mac/i.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
 
 function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -189,6 +190,13 @@ export function App() {
   const [manuscriptTab, setManuscriptTab] = useState<'paper' | 'coverage'>('paper');
   const [coverageSection, setCoverageSection] = useState<string | undefined>();
   const [showProblems, setShowProblems] = useState(false);
+  // `at` restarts the timer when the same kind of prompt is copied again.
+  const [copied, setCopied] = useState<{ prompt: 'instruction' | 'teaching'; at: number } | null>(null);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(null), 10000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   const handleMessage = useCallback((msg: ExtensionMessage) => {
     switch (msg.type) {
@@ -233,6 +241,9 @@ export function App() {
         break;
       case 'problems':
         dispatch({ type: 'PROBLEMS', problems: msg.problems });
+        break;
+      case 'copied':
+        setCopied({ prompt: msg.prompt, at: Date.now() });
         break;
       case 'error':
         dispatch({ type: 'SET_ERROR', message: msg.message });
@@ -511,6 +522,17 @@ export function App() {
             <div style={{ padding: '7px 14px', background: 'var(--vscode-inputValidation-errorBackground)', color: 'var(--vscode-inputValidation-errorForeground)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
               <span>{state.error}</span>
               <button onClick={() => dispatch({ type: 'SET_ERROR', message: null })} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>✕</button>
+            </div>
+          )}
+          {copied && (
+            <div role="status" style={{ padding: '7px 14px', background: 'var(--vscode-editorWidget-background)', borderBottom: '1px solid var(--vscode-panel-border)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <span>
+                <span style={{ color: 'var(--vscode-testing-iconPassed)' }}>✓</span>{' '}
+                {copied.prompt === 'teaching'
+                  ? <>Teaching prompt copied. Start a new chat beside the loop and paste it with <strong>{PASTE_KEY}</strong>.</>
+                  : <>Instruction copied. Paste it into the agent chat with <strong>{PASTE_KEY}</strong> and send it.</>}
+              </span>
+              <button onClick={() => setCopied(null)} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>✕</button>
             </div>
           )}
           {state.notice && (

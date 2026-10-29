@@ -769,6 +769,7 @@ export class WebviewProvider {
 
         case 'graphAction': {
           await this.loopHost.graphAction(msg.request);
+          if (msg.request.action === 'agent' || msg.request.action === 'teach') this.send({ type: 'copied', prompt: msg.request.action === 'teach' ? 'teaching' : 'instruction' });
           if (msg.request.action !== 'agent' && msg.request.action !== 'openNode' && msg.request.action !== 'openTex') await this.sendGraph();
           break;
         }

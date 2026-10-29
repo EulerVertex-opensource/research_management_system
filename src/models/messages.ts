@@ -25,6 +25,8 @@ export type ExtensionMessage =
   | { type: 'notice'; notice: SyncNotice }
   /** Problems in the research files themselves (duplicate IDs, dependency order); shown as a quiet note, not an error banner. */
   | { type: 'problems'; problems: string[] }
+  /** A prompt for the agent chat is on the clipboard: the dashboard says so where the researcher clicked. */
+  | { type: 'copied'; prompt: 'instruction' | 'teaching' }
   | { type: 'error'; message: string };
 
 // Messages sent from the webview to the extension
