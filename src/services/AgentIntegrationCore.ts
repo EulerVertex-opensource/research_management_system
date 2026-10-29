@@ -1,6 +1,6 @@
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import { AgentProvider } from './ResearchLoopModel';
-import { AGENT_PROVIDERS, LOOP_SCRIPT, MCP_SERVER_NAME, PROVIDER_IDS, RETIRED_SKILLS } from './AgentProviders';
+import { AGENT_PROVIDERS, LOOP_SCRIPT, MAINTENANCE_COMMAND, MCP_SERVER_NAME, PROVIDER_IDS, RETIRED_SKILLS } from './AgentProviders';
 
 /**
  * Pure builders for the agent-side configuration the extension generates.
@@ -129,10 +129,11 @@ export function workerAgentName(tier: WorkerTier): string { return `research-wor
 /**
  * A research-loop stage worker as a Claude Code subagent. Light runs the
  * bookkeeping stages on a cheaper model; deep keeps the session's model for
- * the mathematics. A file the researcher edited (no marker) is left alone:
- * returns undefined.
+ * the mathematics, with the one-hour prompt cache: its turns often outlast
+ * the five-minute default, and each lapse writes its whole context again.
+ * A file the researcher edited (no marker) is left alone: returns undefined.
  */
-export function buildWorkerAgent(tier: WorkerTier, existingText: string, skillsDir: string, loopCommand: string): string | undefined {
+export function buildWorkerAgent(tier: WorkerTier, existingText: string, skillsDir: string, loopCommand: string, maintenanceCommand = MAINTENANCE_COMMAND): string | undefined {
   if (existingText.trim() && !existingText.includes(WORKER_MARK)) return undefined;
   const stages = tier === 'light' ? 'scaffold, sources, and search_summary' : 'search, verify_counterexample, verify_construction, plan, execute, and verify_proof';
   return `---
@@ -140,7 +141,7 @@ name: ${workerAgentName(tier)}
 description: Runs one research-loop stage (${stages}) from its compiled context pack and returns a short summary. Used by the research-loop driver only.
 tools: Read, Write, Edit, Bash
 model: ${tier === 'light' ? 'sonnet' : 'inherit'}
----
+${tier === 'deep' ? 'experimental:\n  cacheTtl: 1h\n' : ''}---
 ${WORKER_MARK}
 
 You run exactly one research-loop stage. The driver gives you the stage, the asset, the stage skill, and the context pack path.
@@ -148,7 +149,13 @@ You run exactly one research-loop stage. The driver gives you the stage, the ass
 1. Read the context pack the driver gives you (\`.research-assistant-loop/context/current.md\`, or your own \`search-<slot>.md\` in a search round) and \`${skillsDir}/<stage skill>/SKILL.md\`. Nothing else up front.
 2. Need more? Run \`${loopCommand} show <id> [--section Heading]\` for that one node or section. Do not list or read research folders directly.
 3. Do the stage's work in the files, following the skill. Never set \`status: approved\`; never run \`report\`, \`next\`, or git commands. The driver does that.
-4. Reply with at most five lines (three in a search round): the outcome (for example \`searched\`, \`summarized\`, \`complete --plan <id>\`, \`proved\`, \`failed\`, or \`question: ...\`), the files you wrote, and the key mathematical reason.
+4. Reply with at most five lines (three in a search round): the outcome (for example \`searched\`, \`summarized\`, \`complete --plan <id>\`, \`proved\`, \`failed\`, ${tier === 'deep' ? '`partial: <what remains>`, ' : ''}or \`question: ...\`), the files you wrote, and the key mathematical reason.
+
+Commands you may need (no need to run \`help\`):
+- \`${loopCommand} show <id|paper_slug|project> [--section Heading]...\`: one node or section; a paper slug alone shows its outline.
+- \`${loopCommand} library search <words...> [--type T]\`: known results to reuse.
+- \`${loopCommand} idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]\`: keep a side thought.
+- \`${maintenanceCommand} validate\` and \`${maintenanceCommand} links --file <path> --apply\`: check the files you wrote.
 `;
 }
 

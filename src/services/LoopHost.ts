@@ -365,7 +365,7 @@ export class LoopHost implements vscode.Disposable {
       const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
       return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], args.origin === 'researcher' ? 'researcher' : 'agent', tags, toIdeaKind(args.kind, tags)) }));
     }
-    if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary(), brief: core.briefStatus() }));
+    if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary({ recentParked: 3 }), brief: core.briefStatus() }));
     if (name === 'confirm_publish') return { confirmed: await this.confirmPublish(String(args.detail ?? '')) };
     return { answered: false, reason: `unknown tool ${name}` };
   }

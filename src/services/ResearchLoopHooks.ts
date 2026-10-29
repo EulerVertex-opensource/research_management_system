@@ -16,6 +16,8 @@ export interface HookInput {
   prompt?: string;
   /** SessionStart: startup | resume | clear | compact. */
   source?: string;
+  /** The chat's transcript (JSONL); its last usage record tells how much context the chat carries. */
+  transcript_path?: string;
 }
 
 export interface StopDecision { block: boolean; reason?: string; capReached?: boolean }
@@ -39,6 +41,56 @@ export function stopDecision(state: LoopState | undefined, input: HookInput, ins
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
   const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it; earlier stages are summarized in its context pack, so do not reread their files. ${instruction ?? ''}`.trim();
   return { block: true, reason };
+}
+
+/**
+ * Context the driver's chat may carry before the loop starts the next stage in
+ * a fresh chat. Every request rereads the whole chat, and once it idles past
+ * the prompt cache's lifetime (waiting on the researcher or a long subagent)
+ * all of it is written again; the loop's files rebuild a fresh chat cheaply.
+ */
+export const CONTEXT_RESET_TOKENS = 200_000;
+
+/**
+ * Tokens the chat sent with its latest request, from the transcript's last
+ * lines (oldest first): a Claude Code assistant record's usage, or a Codex
+ * token_count event. Subagent (sidechain) records are skipped.
+ */
+export function contextTokensFrom(lines: string[]): number | undefined {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    let record: any;
+    try { record = JSON.parse(lines[i]); } catch { continue; }
+    const usage = record?.type === 'assistant' && !record.isSidechain ? record.message?.usage : undefined;
+    if (usage && typeof usage.input_tokens === 'number') return usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+    const codex = record?.type === 'event_msg' && record.payload?.type === 'token_count' ? record.payload.info?.last_token_usage : undefined;
+    if (codex && typeof codex.input_tokens === 'number') return codex.input_tokens;
+  }
+  return undefined;
+}
+
+const thousands = (tokens: number) => `~${Math.round(tokens / 1000)}K`;
+
+/**
+ * Whether the driver's `next` should start the stage in a fresh chat instead:
+ * the chat is over CONTEXT_RESET_TOKENS. An autonomous run is left alone (no
+ * one is there to open the fresh chat; the chat compacts itself). Returns the
+ * denial reason; the caller pauses the loop and frees its lock.
+ */
+export function contextResetDecision(state: LoopState | undefined, input: HookInput, tokens: number | undefined): string | undefined {
+  if (!state || state.status !== 'running' || tokens === undefined || tokens < CONTEXT_RESET_TOKENS) return undefined;
+  if (state.autonomy && !state.autonomy.handedOverAt) return undefined;
+  if (!loopCalls(input).some((call) => call.command === 'next')) return undefined;
+  return `Research loop: this chat carries ${thousands(tokens)} tokens of context, so the loop paused before the next stage; it continues more cheaply in a fresh chat, rebuilt from the files. Do not run anything else. Tell the researcher in two lines that the work so far is saved, and that they continue with /clear (Codex: a new thread) and then the research-loop skill.`;
+}
+
+/** Shown to the researcher when the loop hands them a long chat to answer in. */
+export function waitingContextNote(tokens: number): string {
+  return `Research loop: this chat carries ${thousands(tokens)} tokens of context. If you answer more than an hour from now, /clear first (Codex: a new thread) and answer there: the loop resumes from its files, while this chat would be reloaded in full.`;
+}
+
+/** A turn that is a subagent's hand-back or a background task's notice, not the researcher writing. */
+export function isHandbackPrompt(prompt: string | undefined): boolean {
+  return typeof prompt === 'string' && /^\s*(?:Another Claude session sent a message:|<task-notification>)/.test(prompt);
 }
 
 /** The research problems present when the researcher's turn began, and how often Stop has sent the agent back since. */
@@ -328,6 +380,11 @@ export function contextOutput(event: 'SessionStart' | 'UserPromptSubmit', contex
 
 export function stopBlockOutput(reason: string): string {
   return JSON.stringify({ decision: 'block', reason });
+}
+
+/** A note for the researcher's eyes, not the agent's. */
+export function systemMessageOutput(message: string): string {
+  return JSON.stringify({ systemMessage: message });
 }
 
 export function denyOutput(reason: string): string {

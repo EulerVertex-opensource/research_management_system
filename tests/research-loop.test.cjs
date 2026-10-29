@@ -446,6 +446,21 @@ test('ideas remain after conversion to a linked executable plan', async () => {
   assert.match(parsed.content, /2\. \[ \] Apply equality/);
 });
 
+test('the brief status names only the latest parked results; the compact one only what changes', async () => {
+  const f = fixture();
+  await f.core.start('claude');
+  for (let i = 0; i < 5; i++) f.core.current.parked[`result_${i}`] = { reason: `why_${i}`, at: `2026-01-0${i + 1}T00:00:00.000Z` };
+  const brief = f.core.briefStatus();
+  assert.match(brief, /Parked \(5\): result_4 \(why_4\), result_3 \(why_3\), result_2 \(why_2\), and 2 earlier/);
+  assert.doesNotMatch(brief, /result_0/);
+  const compact = f.core.briefStatus({ compact: true });
+  assert.match(compact, /^Research loop: running/);
+  assert.doesNotMatch(compact, /Parked|Continue with/);
+  assert.deepEqual(Object.keys(f.core.statusSummary({ recentParked: 3 }).parked), ['result_4', 'result_3', 'result_2']);
+  assert.equal(f.core.statusSummary({ recentParked: 3 }).parkedCount, 5);
+  assert.equal(Object.keys(f.core.statusSummary().parked).length, 5, 'scripts still get every parked result');
+});
+
 test('late answers are kept and a stopped loop clears the pending question', async () => {
   const f = fixture();
   await f.core.start('claude');

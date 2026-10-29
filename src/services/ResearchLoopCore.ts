@@ -74,6 +74,8 @@ function isConstructionSpec(raw: string): boolean {
 const searchPackPath = (slot: number) => `${STATE_DIR}/context/search-${slot}.md`;
 
 const LOCK_TTL_MS = 10 * 60 * 1000;
+/** Parked results named in the brief status; the rest are counted. */
+const BRIEF_PARKED = 3;
 /** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
 const MAX_AUTO_PASSES = 16;
 const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
@@ -2788,27 +2790,43 @@ export class ResearchLoopCore {
 
   // ---------- status ----------
 
-  statusSummary(): Record<string, unknown> {
+  /** `recentParked` keeps only that many of the latest parked results (an agent's view); the full map is for scripts and the researcher. */
+  statusSummary(options: { recentParked?: number } = {}): Record<string, unknown> {
     const state = this.state;
     if (!state) return { status: 'idle' };
+    const parked = options.recentParked === undefined ? state.parked : Object.fromEntries(this.recentParked(options.recentParked));
     return {
       status: state.status, stage: state.stage, provider: state.provider, assetId: state.current.assetId, planId: state.current.planId,
       counterexampleId: state.current.counterexampleId, waitingForHuman: isWaitingForHuman(state), pendingQuestion: state.pendingQuestion,
-      approvalQueue: state.approvalQueue, parked: state.parked, lock: state.lock, lastSummary: state.lastSummary, lastError: state.lastError,
+      approvalQueue: state.approvalQueue, parked, parkedCount: Object.keys(state.parked).length, lock: state.lock, lastSummary: state.lastSummary, lastError: state.lastError,
       unreadAnswers: state.answers.filter((answer) => !answer.consumed), autonomy: state.autonomy, updatedAt: state.updatedAt,
     };
   }
 
-  briefStatus(): string {
+  /** The latest parked results, newest first. */
+  private recentParked(limit: number): Array<[string, LoopState['parked'][string]]> {
+    return Object.entries(this.state?.parked ?? {}).sort(([, a], [, b]) => (b.at ?? '').localeCompare(a.at ?? '')).slice(0, limit);
+  }
+
+  /**
+   * The loop's state for the agent's context. The hooks send it every turn, so
+   * it names only the latest parked results. `compact` is for turns that are
+   * a subagent's hand-back rather than the researcher's: only what changes.
+   */
+  briefStatus(options: { compact?: boolean } = {}): string {
     const state = this.state;
     if (!state) return `Research loop: not started. Start it with \`${LOOP_COMMAND} start --provider claude|codex\` or the VS Code command "Research Assistant: Start research loop".`;
     const lines = [`Research loop: ${state.status}, stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}${state.current.planId ? `, plan ${state.current.planId}` : ''}.`];
     if (state.pendingQuestion) lines.push(`Pending question (${state.pendingQuestion.kind}): ${state.pendingQuestion.prompt}`);
-    if (state.approvalQueue.length) lines.push(`Waiting for researcher approval: ${state.approvalQueue.map((item) => `${item.kind} ${item.target}`).join(', ')}.`);
-    const parked = Object.entries(state.parked);
-    if (parked.length) lines.push(`Parked: ${parked.map(([id, info]) => `${id} (${info.reason})`).join(', ')}.`);
     const unread = state.answers.filter((answer) => !answer.consumed);
     if (unread.length) lines.push(`Late researcher answers: ${unread.map((answer) => `"${answer.text.slice(0, 120)}"`).join(' | ')}`);
+    if (options.compact) return lines.join('\n');
+    if (state.approvalQueue.length) lines.push(`Waiting for researcher approval: ${state.approvalQueue.map((item) => `${item.kind} ${item.target}`).join(', ')}.`);
+    const parkedCount = Object.keys(state.parked).length;
+    if (parkedCount) {
+      const recent = this.recentParked(BRIEF_PARKED);
+      lines.push(`Parked (${parkedCount}): ${recent.map(([id, info]) => `${id} (${info.reason})`).join(', ')}${parkedCount > recent.length ? `, and ${parkedCount - recent.length} earlier (${LOOP_COMMAND} status --json lists them)` : ''}.`);
+    }
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
     if (state.autonomy && !state.autonomy.handedOverAt) lines.push(this.autonomyNote(state.autonomy));
     const auto = this.lastSettings?.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : this.lastSettings?.autoApprove;

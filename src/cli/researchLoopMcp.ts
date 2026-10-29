@@ -92,7 +92,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
     const ideaId = await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], args.origin === 'researcher' ? 'researcher' : 'agent', tags, toIdeaKind(args.kind, tags));
     return { ok: true, idea_id: ideaId, path: `${paths.ideas}/${ideaId}.md` };
   }
-  if (name === 'loop_status') return { ok: true, state: core.statusSummary(), brief: core.briefStatus() };
+  if (name === 'loop_status') return { ok: true, state: core.statusSummary({ recentParked: 3 }), brief: core.briefStatus() };
   throw new Error(`Unknown tool ${name}`);
 }
 

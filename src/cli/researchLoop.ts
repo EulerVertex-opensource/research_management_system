@@ -5,8 +5,8 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
-import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, denyOutput, guardDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, teachingToolDecision, withSessionRole } from '../services/ResearchLoopHooks';
+import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, isWaitingForHuman, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole } from '../services/ResearchLoopHooks';
 import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
@@ -87,6 +87,25 @@ async function readStdin(): Promise<string> {
     process.stdin.on('error', () => resolve(data));
     if (process.stdin.isTTY) resolve('');
   });
+}
+
+/** Transcript tail read for the latest usage record; a page image can make one line hundreds of KB. */
+const TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
+
+/** How much context the hook's chat carries, from the end of its transcript; undefined when unknown. */
+function chatContextTokens(input: HookInput): number | undefined {
+  if (!input.transcript_path) return undefined;
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(input.transcript_path, 'r');
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, TRANSCRIPT_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, size - length);
+    const lines = buffer.toString('utf8').split('\n');
+    // The first line may start mid-record when the tail is cut.
+    return contextTokensFrom(length < size ? lines.slice(1) : lines);
+  } catch { return undefined; } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already closed */ } }
 }
 
 /**
@@ -311,6 +330,13 @@ async function runHook(event: string, args: Args): Promise<void> {
         process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
         return;
       }
+      // A subagent's hand-back is not the researcher's turn: the full status already sits in this chat.
+      if (event === 'UserPromptSubmit' && isHandbackPrompt(input.prompt)) {
+        process.stdout.write(contextOutput(event, core.briefStatus({ compact: true })) + '\n');
+        await core.consumeAnswers();
+        await core.touch(session);
+        return;
+      }
       let brief = `${core.briefStatus()}\n${LINK_HINT}`;
       try {
         const sync = JSON.parse(fs.readFileSync(path.join(root, SYNC_PATH), 'utf8')) as { phase?: string; conflicted?: string[] };
@@ -338,7 +364,15 @@ async function runHook(event: string, args: Args): Promise<void> {
       await note({ kind: 'active', sessionId: session, tool: toolPhase('start'), throttle: true });
       const paths = await loadProjectPaths(root);
       const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
-      if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
+      if (decision.deny) { process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n'); return; }
+      // The driver starts the next stage in a fresh chat once this one has grown large.
+      const reset = state?.lock?.sessionId === session ? contextResetDecision(state, input, chatContextTokens(input)) : undefined;
+      if (reset && session) {
+        await note({ kind: 'ended', by: 'stop', sessionId: session });
+        await core.pause('Paused to continue in a fresh chat: the previous chat had grown large. Resume with /clear (Codex: a new thread) and the research-loop skill; the loop rebuilds from the files.');
+        await core.releaseLock(session);
+        process.stdout.write(denyOutput(reset) + '\n');
+      }
       return;
     }
     case 'Stop': {
@@ -364,7 +398,18 @@ async function runHook(event: string, args: Args): Promise<void> {
         return;
       }
       // The agent hands control back: say so, rather than counting its last breath as activity.
-      if (!decision.block) { await core.touch(session); await note({ kind: 'ended', by: 'stop', sessionId: session }); return; }
+      if (!decision.block) {
+        await core.touch(session);
+        await note({ kind: 'ended', by: 'stop', sessionId: session });
+        // Handing a long chat to the researcher: a fresh chat may answer, so free the lock for it.
+        const tokens = chatContextTokens(input);
+        const current = core.current;
+        if (session && current && tokens !== undefined && tokens >= CONTEXT_RESET_TOKENS && (isWaitingForHuman(current) || current.stage === 'review_project')) {
+          await core.releaseLock(session);
+          process.stdout.write(systemMessageOutput(waitingContextNote(tokens)) + '\n');
+        }
+        return;
+      }
       const key = session ?? 'unknown';
       const record = state.autopilot.sessions[key] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
       record.blocks += 1; record.lastSignature = stageSignature(state); record.lastBlockAt = new Date().toISOString();
