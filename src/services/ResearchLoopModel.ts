@@ -36,6 +36,8 @@ export const BRIDGE_PATH = `${STATE_DIR}/bridge.json`;
 /** The current stage's compiled context pack and its manifest (files it covers, token estimate). */
 export const CONTEXT_PACK_PATH = `${STATE_DIR}/context/current.md`;
 export const CONTEXT_MANIFEST_PATH = `${STATE_DIR}/context/current.json`;
+/** The full gap report of an autonomous reassessment of the goals; the instruction carries only its lead. */
+export const ASSESSMENT_PATH = `${STATE_DIR}/context/assessment.md`;
 /** Local sync bookkeeping (conflict in progress, last prepare); never committed. */
 export const SYNC_PATH = `${STATE_DIR}/sync.json`;
 /**
@@ -112,6 +114,12 @@ export interface ApprovalRequest { id: string; kind: ApprovalKind; target: strin
 export interface ResearcherInput { kind: string; text: string; at: string }
 /** A new goal added to an approved project; baselineRequired are the required results that must be kept, except retired ones (since deprecated or archived). */
 export interface LoopExtension { goal: string; at: string; baselineRequired: string[]; retired?: string[]; projectApproved?: boolean; newResults?: string[] }
+/**
+ * An autonomous reassessment of the goals: what was proved and set aside (`id@parkedAt`) when it
+ * began, the leading set-aside results it offered, the results the agent brought back, and the
+ * agent's first `report none`, which the loop answers by asking about each leading result.
+ */
+export interface GoalAssessment { at: string; proved: string[]; setAside: string[]; candidates?: string[]; broughtBack?: string[]; declined?: string }
 export interface LoopLock { sessionId: string; provider?: AgentProvider; acquiredAt: string; heartbeatAt: string }
 export interface StageSummary { stage: LoopStage; assetId?: string; outcome: ReportOutcome; summary: string; files: string[]; at: string }
 /** One reason the loop has nothing actionable (stage `waiting`); the dashboard lists each one. */
@@ -150,10 +158,13 @@ export interface LoopState {
   /**
    * An autonomous run, while the researcher's setting has autonomous mode on: when it began, the
    * attempts it spent (an executed plan or a search round each), the asset whose allotment ran out
-   * and waits on the agent's own decision, the goal revisions it made and the set-aside results
-   * that prompted them, and when it handed the loop back.
+   * and waits on the agent's own decision, the reassessments of the goals it made, what was proved
+   * and set aside at the latest one (`id@parkedAt`) and the results it brought back there, and
+   * when it handed the loop back.
    */
-  autonomy?: { startedAt: string; spent: number; deciding?: string; revisions?: number; revisedFor?: string[]; handedOverAt?: string };
+  autonomy?: { startedAt: string; spent: number; deciding?: string; revisions?: number; assessment?: GoalAssessment; handedOverAt?: string };
+  /** The required results the researcher wants first: selection works toward them before the rest, and an autonomous reassessment weighs them alone. */
+  focus?: string[];
   startedAt: string;
   /** When status last became running (start, resume, or an extension of a stopped loop); an agent silent since then has not picked it up. */
   runningSince?: string;
@@ -174,6 +185,8 @@ export interface StageReport {
   counterexampleId?: string;
   question?: string;
   assumedDefinitions?: string[];
+  /** `report none --confirm`: the agent went through the leading set-aside results and still finds none to bring back. */
+  confirm?: boolean;
 }
 
 export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; library?: string; checks?: string; decisions?: string; handoffs?: string; candidates?: string }

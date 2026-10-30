@@ -149,7 +149,7 @@ function Autonomy({ payload, onShowInResults, onOpenActivity }: Pick<Props, 'onS
         </span>
         <span>{run.spent} of {plural(run.budget, 'attempt')} spent</span>
         {run.deadline && run.active && <span style={{ color: COLOR.muted }}>· hands back by {clock(run.deadline)} at the latest</span>}
-        <span style={{ color: COLOR.muted }}>· {run.revisions} of {plural(run.revisionLimit, 'goal revision')}</span>
+        <span style={{ color: COLOR.muted }}>· {run.revisions} of {plural(run.revisionLimit, 'goal reassessment')}</span>
       </div>
       {run.proved.length > 0 && row('Proved', names(run.proved))}
       {run.setAside.length > 0 && row('Set aside by the agent', (

@@ -180,14 +180,18 @@ async function setAside(f, id = 'main_theorem', attempt = 'attempt_1') {
   return f.core.next();
 }
 
-test('with results set aside, the agent rethinks the goals itself: it adds a weaker goal and keeps the original', async () => {
+test('with results set aside, the agent reassesses the goals itself: it adds a weaker goal and keeps the original', async () => {
   const f = fixture();
   await driveToPlan(f);
   const revise = await setAside(f);
   assert.equal(revise.stage, 'draft_project');
   assert.equal(f.core.current.status, 'running');
   assert.equal(f.core.current.researcherInput.kind, 'autonomous_revision');
-  assert.match(revise.instruction, /Set aside: main_theorem \(agent gave up: No route past the base case\.\)/);
+  assert.match(revise.instruction, /^Stage draft_project: an autonomous reassessment of the goals\.\nAutonomous reassessment 1 of 2 \(the researcher is away\): nothing is actionable, but 1 required result\(s\) are open\./, 'the reassessment leads the instruction');
+  assert.match(revise.instruction, /Only 1 set-aside result\(s\) stand in the way, the whole frontier/);
+  assert.ok(revise.instruction.indexOf('report none') < revise.instruction.indexOf('keep every existing required_results entry'), 'the choice comes before the extension rules');
+  assert.match(f.map.get('.research-assistant-loop/context/assessment.md'), /- main_theorem \(agent gave up: No route past the base case\.\); blocks itself/, 'the full report is in a file');
+  assert.match(revise.instruction, /- main_theorem \(agent gave up: No route past the base case\.\); blocks itself; set aside \d{4}-\d\d-\d\d, nothing proved since/);
   assert.match(revise.instruction, /keep every existing required_results entry \(main_theorem\)/);
   assert.deepEqual(f.core.current.extension.baselineRequired, ['main_theorem']);
 
@@ -204,10 +208,11 @@ test('with results set aside, the agent rethinks the goals itself: it adds a wea
   assert.deepEqual([next.stage, next.brief.assetId], ['plan', 'weaker_theorem']);
   assert.ok(f.core.current.parked.main_theorem, 'the original stays set aside for the researcher');
 
-  // Setting the new goal aside too uses the second revision; the third time the loop hands back.
+  // Setting the new goal aside too is something new, so it uses the second reassessment; the third time the loop hands back.
   const second = await setAside(f, 'weaker_theorem', 'attempt_w1');
   assert.deepEqual([second.stage, f.core.current.autonomy.revisions], ['draft_project', 2]);
-  assert.doesNotMatch(second.instruction, /Set aside: main_theorem/, 'a result already revised for is not offered again');
+  assert.match(second.instruction, /Since the last reassessment: set aside weaker_theorem\./);
+  assert.match(second.instruction, /Only 2 set-aside result\(s\) stand in the way[^\n]*\n- [a-z_]+ \([^\n]*\n- [a-z_]+ \(/, 'every set-aside result in the way is offered again');
   f.map.set(paths.projectMd, weaker.replace('  - id: weaker_theorem\n', '  - id: weaker_theorem\n  - id: special_case\n'));
   await f.core.report({ outcome: 'complete', summary: 'Added a special case.' });
   await f.core.next();
@@ -217,15 +222,94 @@ test('with results set aside, the agent rethinks the goals itself: it adds a wea
   await f.core.next();
   const last = await setAside(f, 'special_case', 'attempt_s1');
   assert.match(last.instruction, /Autonomous run finished: nothing is left/);
-  assert.match([...f.map.entries()].filter(([file]) => file.startsWith('research/handoffs/')).map(([, raw]) => raw).join('\n'), /added goals of its own 2 time\(s\)/);
+  assert.match([...f.map.entries()].filter(([file]) => file.startsWith('research/handoffs/')).map(([, raw]) => raw).join('\n'), /reassessed what the goals still need 2 time\(s\)/);
+});
+
+async function addWeakerGoal(f, deps = []) {
+  f.map.set(paths.projectMd, weaker);
+  await f.core.report({ outcome: 'complete', summary: 'Added the weaker theorem for n >= 1.' });
+  await f.core.next();
+  f.map.set('research/assets/weaker_theorem.md', asset('weaker_theorem', { depends_on: deps }));
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  return f.core.next();
+}
+
+test('after its new goal is proved, the agent reassesses again and brings back a set-aside result with its own direction', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  await setAside(f);
+  await addWeakerGoal(f);
+  f.map.set('research/plans/attempt_w1.md', plan('attempt_w1', 'weaker_theorem', 'pending'));
+  await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_w1' });
+  f.map.set('research/plans/attempt_w1.md', plan('attempt_w1', 'weaker_theorem', 'succeeded') + '\n## Outcome\n\nProved.\n');
+  f.map.set('research/assets/weaker_theorem.md', asset('weaker_theorem') + '\n## Proof\n\nBy induction from n = 1.\n');
+  await f.core.report({ outcome: 'proved', summary: 'Proved it' });
+  // A helper the original turns out to need, set aside too: bringing back the original alone is not enough.
+  f.map.set('research/assets/helper.md', asset('helper'));
+  f.map.set('research/assets/main_theorem.md', asset('main_theorem', { depends_on: ['helper'] }));
+  await f.core.park('helper', 'agent_gave_up', 'Needs the base case.');
+
+  const again = await f.core.next();
+  assert.deepEqual([again.stage, f.core.current.status, f.core.current.autonomy.revisions], ['draft_project', 'running', 2], 'something was proved since, so the second reassessment runs');
+  assert.match(again.instruction, /- main_theorem \(agent gave up: No route past the base case\.\); blocks itself; set aside [\d-]+, proved since: weaker_theorem\n- helper \(agent gave up: Needs the base case\.\); blocks main_theorem; set aside [\d-]+, nothing proved since/, 'what something new may get past comes first');
+  assert.match(again.instruction, /Since the last reassessment: proved weaker_theorem; set aside helper\./);
+
+  await assert.rejects(f.core.report({ outcome: 'complete', summary: 'Thought about it' }), /Nothing changed: bring back a set-aside result/);
+  assert.match(await f.core.allocate('main_theorem', 2, 'The weaker theorem covers n >= 1; only n = 0 is left.'), /comes back with 2 more proof attempt\(s\)/);
+  assert.equal(f.core.current.stage, 'draft_project', 'the reassessment goes on until its report');
+  await assert.rejects(f.core.report({ outcome: 'complete', summary: 'Brought back the original' }), /still depend on set-aside helper/);
+  await f.core.allocate('helper', 1, 'n = 0 is a direct check.');
+  const { message } = await f.core.report({ outcome: 'complete', summary: 'The original needs only n = 0 now; brought it back with its helper.' });
+  assert.match(message, /Brought back main_theorem, helper\./);
+  assert.deepEqual([f.core.current.extension, f.core.current.researcherInput, f.core.current.parked.main_theorem], [undefined, undefined, undefined]);
+  assert.equal(f.map.get(paths.projectMd), weaker, 'the goals are unchanged');
+  const next = await f.core.next();
+  assert.deepEqual([next.stage, next.brief.assetId], ['plan', 'helper'], 'the dependency goes first');
+});
+
+test('with a focus, the reassessment weighs only what stands in its way, and a narrow frontier points to a supplying lemma', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  await setAside(f);
+  await addWeakerGoal(f);
+  await assert.rejects(f.core.setFocus(['nowhere']), /not under required_results: nowhere/);
+  assert.deepEqual(await f.core.setFocus(['main_theorem']), ['main_theorem']);
+  assert.match(f.core.briefStatus(), /Focus \(set by the researcher\): main_theorem/);
+  const next = await setAside(f, 'weaker_theorem', 'attempt_w1');
+  assert.equal(next.stage, 'draft_project');
+  assert.match(next.instruction, /the researcher's focus main_theorem is open \(1 other open required result\(s\) lie outside it\)/);
+  assert.match(next.instruction, /Only 1 set-aside result\(s\) stand in the way, the whole frontier/);
+  assert.match(next.instruction, /The frontier is narrow: unless an obstruction above is false, the way on is \(b\)/);
+  assert.doesNotMatch(next.instruction, /- weaker_theorem \(/, 'a result outside the focus is not offered');
+  const asked = await f.core.report({ outcome: 'none', summary: 'No route.' });
+  assert.match(asked.message, /one by one: main_theorem\. .*whether a new lemma could supply its missing step/);
+  await f.core.setFocus([]);
+  assert.equal(f.core.current.focus, undefined);
+});
+
+test('with nothing proved or set aside since the last reassessment, the loop hands back even with reassessments left', async () => {
+  const f = fixture({ autonomyRevisions: 3 });
+  await driveToPlan(f);
+  await setAside(f);
+  const ended = await addWeakerGoal(f, ['main_theorem']);
+  assert.match(ended.instruction, /Autonomous run finished: nothing is left that it can do on its own/);
+  assert.deepEqual([f.core.current.status, f.core.current.autonomy.revisions], ['paused', 1]);
 });
 
 test('when no sound revision is in sight the agent says so and the loop hands back, goals unchanged', async () => {
   const f = fixture();
   await driveToPlan(f);
   assert.equal((await setAside(f)).stage, 'draft_project');
-  const { message } = await f.core.report({ outcome: 'none', summary: 'Every weakening is either trivial or already known.' });
-  assert.match(message, /no sound revision of the goals \(Every weakening is either trivial or already known\.\)/);
+  await assert.rejects(f.core.report({ outcome: 'none', summary: 'main_theorem: no route.', confirm: true }), /without --confirm first/);
+  const asked = await f.core.report({ outcome: 'none', summary: 'Every weakening is either trivial or already known.' });
+  assert.equal(asked.stage, 'draft_project', 'a first none does not hand back');
+  assert.match(asked.message, /go through the leading set-aside results one by one: main_theorem\./);
+  assert.equal(f.core.current.status, 'running');
+  await assert.rejects(f.core.report({ outcome: 'none', summary: 'Still nothing.' }), /Add --confirm/);
+  await assert.rejects(f.core.report({ outcome: 'none', summary: 'Nothing new.', confirm: true }), /does not mention main_theorem/);
+  const { message } = await f.core.report({ outcome: 'none', summary: 'main_theorem: nothing proved since reaches n = 0, and every weakening is trivial.', confirm: true });
+  assert.match(message, /no sound revision of the goals \(Every weakening is either trivial or already known\.\)/, 'the hand-back gives the first reason');
   assert.equal(f.core.current.status, 'paused');
   assert.equal(f.core.current.extension, undefined);
   assert.equal(f.core.current.researcherInput, undefined);
@@ -252,7 +336,7 @@ test('the Overview sees the run: budget while it works, and after hand-back what
   f.map.set('research/assets/weaker_theorem.md', asset('weaker_theorem') + '\n## Proof\n\nBy induction from n = 1.\n');
   await f.core.report({ outcome: 'proved', summary: 'Proved it' });
   const ended = await f.core.next();
-  assert.match(ended.instruction, /Autonomous run finished/, 'only the original is left, and it was revised for already');
+  assert.match(ended.instruction, /Autonomous run finished/, 'its one reassessment is used');
 
   const run = await f.core.autonomySummary();
   assert.equal(run.active, false);

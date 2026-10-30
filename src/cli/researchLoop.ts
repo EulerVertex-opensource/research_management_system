@@ -47,11 +47,12 @@ const USAGE = `Usage: research-loop <command> [options]
   status [--brief] [--json]
   start --provider claude|codex [--goal "..."] [--session ID] [--force]
   extend --goal "..." [--provider claude|codex] [--session ID] [--force]   (add a new goal to an approved project)
-  resume [--session ID] [--provider claude|codex] [--force] | pause | stop
+  resume [--session ID] [--provider claude|codex] [--force] [--focus id,id] | pause | stop
+  focus [<required id>...] | focus clear   (the required results the researcher wants first)
   next [--json]
   context [--json] [--budget N]   (compile the current stage's context pack; next does this too)
   show <id|paper_slug|project> [--section Heading]... [--full]   (one node or paper part on request)
-  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b]
+  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm]
   search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
   teach list [--json]   (verified results, those new to the researcher first, each after what it rests on)
@@ -510,6 +511,11 @@ function text(value: string | true | undefined, name: string): string {
   return value;
 }
 
+/** A comma- or space-separated list of IDs. */
+function ids(value: string): string[] {
+  return value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const [command, sub, third] = args.positional;
@@ -558,7 +564,7 @@ async function main(): Promise<void> {
       out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Extending the project. ${next.instruction}`);
       return;
     }
-    case 'resume': { await core.resume({ sessionId: session, provider: args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined, force: args.flags.force === true }); await alive(); const next = await core.next(); out(json ? { ...core.statusSummary(), instruction: next.instruction } : next.instruction); return; }
+    case 'resume': { await core.resume({ sessionId: session, provider: args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined, force: args.flags.force === true, focus: typeof args.flags.focus === 'string' ? ids(args.flags.focus) : undefined }); await alive(); const next = await core.next(); out(json ? { ...core.statusSummary(), instruction: next.instruction } : next.instruction); return; }
     case 'pause': { await core.pause(); out('Paused.'); return; }
     case 'stop': { await core.stop(); out('Stopped.'); return; }
     case 'next': {
@@ -593,6 +599,7 @@ async function main(): Promise<void> {
         counterexampleId: typeof args.flags.counterexample === 'string' ? args.flags.counterexample : undefined,
         question: typeof args.flags.question === 'string' ? args.flags.question : undefined,
         assumedDefinitions: typeof args.flags['assumed-definitions'] === 'string' ? args.flags['assumed-definitions'].split(',').map((item) => item.trim()).filter(Boolean) : undefined,
+        confirm: args.flags.confirm === true || undefined,
       };
       if (outcome !== 'question' && !report.summary.trim()) throw new Error('--summary is required');
       const result = await core.report(report);
@@ -615,6 +622,11 @@ async function main(): Promise<void> {
       return;
     }
     case 'unpark': { await core.unpark(text(sub, 'asset')); out(`Unparked ${sub}.`); return; }
+    case 'focus': {
+      const focus = sub === 'clear' ? await core.setFocus([]) : sub ? await core.setFocus(ids([sub, ...args.positional.slice(2)].join(','))) : core.current?.focus ?? [];
+      out(json ? { focus } : focus.length ? `Focus: ${focus.join(', ')}. The loop works toward these first.` : 'No focus: the loop works toward every required result.');
+      return;
+    }
     case 'budget': {
       if (sub === 'status') {
         const run = core.current?.autonomy;

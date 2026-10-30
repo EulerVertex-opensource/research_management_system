@@ -74,7 +74,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'autonomy_decided': return entry(`The agent decided a question itself${name ? ` about ${name}` : ''}; it is kept as an idea for you.`);
     case 'autonomy_deciding': return entry(`The attempts for ${name} ran out; the agent decides itself whether to go on.`, 'warning');
     case 'budget_allocated': return entry(`The agent gave ${name} ${plural(Number(event.attempts) || 0, 'more attempt')} with a new approach of its own.`, 'info');
-    case 'autonomy_revision': return entry(`With ${plural(Array.isArray(event.setAside) ? event.setAside.length : 0, 'result')} set aside, the agent is rethinking the goals on its own; yours stay.`, 'warning');
+    case 'autonomy_revision': return entry(`With ${plural(Array.isArray(event.setAside) ? event.setAside.length : 0, 'set-aside result')} in the way, the agent is reassessing what the goals still need; yours stay.`, 'warning');
     case 'autonomy_handover': return entry(`The autonomous run ended: ${text(event.reason)}. Over to you.`, 'warning');
     case 'recheck_flagged': { const id = text(event.id); return { text: `${title(id)} needs a re-check: ${title(text(event.because))} changed.`, tone: 'warning', target: id }; }
     case 'recheck_cleared': { const id = text(event.id); return { text: `You confirmed ${title(id)} still holds.`, tone: 'success', target: id }; }

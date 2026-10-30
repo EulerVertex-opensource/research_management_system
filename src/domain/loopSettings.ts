@@ -104,7 +104,7 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   requestedSearchRounds: { defaultValue: 2, range: [1, 10], group: 'search', label: 'Rounds for a requested search', hint: 'Default rounds when you ask for a deeper counterexample search.' },
   autonomyBudget: { defaultValue: 30, range: [1, 1000], group: 'autonomy', unit: 'attempts', label: 'Budget', hint: 'Proof attempts and search rounds the agent may spend on its own before it hands the loop back to you.' },
   autonomyHours: { defaultValue: 0, range: [0, 168], group: 'autonomy', unit: 'hours', label: 'Time limit', hint: 'Hands the loop back after this long even with budget left; 0 means no time limit.' },
-  autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal revisions', hint: 'Times the agent may add a weaker or alternative goal of its own when results are set aside. It never drops your goals; you decide about them at hand-back.' },
+  autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal reassessments', hint: 'Times the agent may judge what the goals still need when only set-aside results remain: it brings back a set-aside result that something new gets past, or adds a weaker or alternative goal of its own. Each one after the first needs something proved or set aside since the last. It never drops your goals; you decide about them at hand-back.' },
   studyAhead: { defaultValue: 0, range: [0, 50], group: 'teaching', unit: 'results', label: 'How far the loop may get ahead of you', hint: 'Verified results you have not studied yet (with the teach skill, or marked in Results) before the loop waits for you instead of starting new proofs. 0 means it never waits; working on its own ignores this.' },
 };
 

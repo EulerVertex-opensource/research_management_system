@@ -7,7 +7,7 @@ import { renderImpact } from '../domain/manuscriptImpact';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
-  AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, LoopFiles, LoopQuestion, LoopStage, LoopState,
+  AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, ASSESSMENT_PATH, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, GoalAssessment, LoopFiles, LoopQuestion, LoopStage, LoopState,
   LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
@@ -76,6 +76,12 @@ const searchPackPath = (slot: number) => `${STATE_DIR}/context/search-${slot}.md
 const LOCK_TTL_MS = 10 * 60 * 1000;
 /** Parked results named in the brief status; the rest are counted. */
 const BRIEF_PARKED = 3;
+/** Set-aside results a reassessment of the goals leads with; the rest are in its report file. */
+const GAP_BRIEF = 8;
+/** Set-aside results few enough to be the whole frontier of a reassessment, described in full. */
+const GAP_FRONTIER = 3;
+/** Required results an extension instruction names; past this it counts them. */
+const EXTENSION_LISTED = 10;
 /** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
 const MAX_AUTO_PASSES = 16;
 const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
@@ -308,8 +314,9 @@ export class ResearchLoopCore {
     if (state.status === 'running') { state.status = 'paused'; state.lastError = reason ?? null; await this.save(); await this.event('paused', { reason }); }
   }
 
-  async resume(options: { sessionId?: string; provider?: AgentProvider; force?: boolean } = {}): Promise<void> {
+  async resume(options: { sessionId?: string; provider?: AgentProvider; force?: boolean; focus?: string[] } = {}): Promise<void> {
     const state = this.require();
+    if (options.focus) await this.setFocus(options.focus);
     if (options.provider) state.provider = options.provider;
     if (options.sessionId && !this.heartbeat(options.sessionId, options.force)) throw new Error(`Another session (${state.lock?.sessionId}) is driving this loop. Pass --force to take over.`);
     if (state.status !== 'running') state.runningSince = this.now();
@@ -950,6 +957,18 @@ export class ResearchLoopCore {
     await this.files.writeFile(AUTO_HOLDS_PATH, JSON.stringify(holds, null, 2) + '\n');
   }
 
+  /** Set the researcher's focus to required results (none clears it); returns the focus now. */
+  async setFocus(ids: string[]): Promise<string[]> {
+    const state = this.require();
+    const required = requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => ''));
+    const unknown = ids.filter((id) => !required.includes(id));
+    if (unknown.length) throw new Error(`The focus can only name required results; not under required_results: ${unknown.join(', ')}.`);
+    if (ids.length) state.focus = [...new Set(ids)]; else delete state.focus;
+    await this.save();
+    await this.event('focus_set', { ids: state.focus ?? [] });
+    return state.focus ?? [];
+  }
+
   async park(assetId: string, reason: string, note?: string): Promise<void> {
     const state = this.require();
     state.parked[assetId] = { reason, at: this.now(), note };
@@ -1462,7 +1481,8 @@ export class ResearchLoopCore {
       state.researcherInput = { kind: 'project', text: `Required result(s) ${inactive.join(', ')} were deprecated or archived. Revise the goals and required results; give a revised statement a new asset ID.`, at: this.now() };
       return { stage: 'draft_project', note: state.researcherInput.text };
     }
-    const { order, missing, cycle } = assetClosure(required, assets);
+    // The researcher's focus is visited first, so its results are selected before the rest.
+    const { order, missing, cycle } = assetClosure([...(state.focus ?? []).filter((id) => required.includes(id)), ...required], assets);
     if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.`, waitingOn: [{ kind: 'cycle', target: cycle }] };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
     const incomplete = order.filter((id) => !assets.get(id)!.origin && assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
@@ -1739,7 +1759,7 @@ export class ResearchLoopCore {
       if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete, ...(selection.missingDefinitions?.length ? { missingDefinitions: selection.missingDefinitions } : {}) };
       if (selection.stage === 'waiting') { state.lastError = selection.reason; state.waitingOn = selection.waitingOn; }
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
-      if (selection.stage === 'waiting' && run && !(await this.reviseGoals(run))) return this.result(await this.handOver(`nothing is left that it can do on its own (${selection.reason})`));
+      if (selection.stage === 'waiting' && run && !(await this.assessGoals(run))) return this.result(await this.handOver(`nothing is left that it can do on its own (${selection.reason})`));
     }
     const result = this.result();
     if (state.stage === 'ready') {
@@ -1924,7 +1944,9 @@ export class ResearchLoopCore {
   private extensionInstruction(extension: LoopExtension): string {
     const retired = extension.retired ?? [];
     const kept = extension.baselineRequired.filter((id) => !retired.includes(id));
-    const keep = kept.length ? `keep every existing required_results entry (${kept.join(', ')}) and leave approved statements unchanged` : 'leave approved statements unchanged';
+    // A long project is not listed in full: the list would crowd out the rest of the instruction, and the report checks it anyway.
+    const entries = kept.length > EXTENSION_LISTED ? `all ${kept.length} existing required_results entries` : `every existing required_results entry (${kept.join(', ')})`;
+    const keep = kept.length ? `keep ${entries} and leave approved statements unchanged` : 'leave approved statements unchanged';
     const replace = retired.length ? ` The required result(s) ${retired.join(', ')} were deprecated or archived: drop them from required_results, and give any revised statement a new asset ID.` : '';
     return ` This extends an approved project: ${keep}; add the new goal as new asset ID(s) and update ## Intended Contribution.${replace}`;
   }
@@ -1937,6 +1959,7 @@ export class ResearchLoopCore {
       case 'discuss_goals':
         return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: ${LOOP_COMMAND} question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
+        if (state.researcherInput?.kind === 'autonomous_revision') return `Stage draft_project: an autonomous reassessment of the goals.\n${state.researcherInput.text}\nIf you add goals, edit only ${this.paths.projectMd}.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}`;
         return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}${input}${report('complete|question')}`;
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
@@ -2233,19 +2256,48 @@ export class ResearchLoopCore {
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
-        if (run && state.researcherInput?.kind === 'autonomous_revision' && report.outcome === 'none') {
-          // The agent found no sound revision: the goals stay as they were, and the run ends.
-          delete state.extension;
-          state.researcherInput = undefined;
-          await this.setStage('select', { assetId: undefined });
-          return { stage: 'select', message: await this.handOver(`it found no sound revision of the goals (${report.summary.split('\n')[0]})`) };
+        const assessment = run && state.researcherInput?.kind === 'autonomous_revision' ? run.assessment ?? { at: this.now(), proved: [], setAside: [] } : undefined;
+        const added = assessment && state.extension ? requiredAssetIds(project).filter((id) => !state.extension!.baselineRequired.includes(id)) : [];
+        if (assessment) {
+          const broughtBack = (assessment.broughtBack ?? []).filter((id) => !state.parked[id]);
+          if (report.outcome === 'none' && !broughtBack.length) {
+            // A first `none` is answered with the leading candidates: the run ends only once the agent has said why each stays set aside.
+            const candidates = assessment.candidates ?? [];
+            if (candidates.length && !assessment.declined) {
+              if (report.confirm) throw new Error(`Run ${LOOP_COMMAND} report none --summary "<why>" without --confirm first; the loop then names the results to go through.`);
+              assessment.declined = report.summary.trim();
+              await this.save();
+              await this.event('autonomy_none_questioned', { candidates });
+              return { stage, message: `Before the loop hands back, go through the leading set-aside results one by one: ${candidates.join(', ')}. Read each (${LOOP_COMMAND} show <id>; their obstructions are in ${ASSESSMENT_PATH}) and judge whether something proved since it was set aside, or a different idea, gets past its obstruction, and whether a new lemma could supply its missing step (option b). If one can be brought back, run ${LOOP_COMMAND} budget allocate <id> <n> --reason "..."; if a lemma can supply a step, add it to project.md; then report complete. Otherwise run: ${LOOP_COMMAND} report none --confirm --summary "<one line per result: <id>: why it stays set aside, and why no lemma can supply its missing step now>"` };
+            }
+            if (candidates.length) {
+              if (!report.confirm) throw new Error(`Add --confirm once you have gone through ${candidates.join(', ')}, or bring one back with ${LOOP_COMMAND} budget allocate.`);
+              const missing = candidates.filter((id) => !report.summary.includes(id));
+              if (missing.length) throw new Error(`Say for each leading result why it stays set aside; the summary does not mention ${missing.join(', ')}.`);
+            }
+            // The agent found nothing sound to do: the goals stay as they were, and the run ends.
+            const why = (assessment.declined || report.summary).split('\n')[0];
+            delete state.extension;
+            state.researcherInput = undefined;
+            await this.setStage('select', { assetId: undefined });
+            return { stage: 'select', message: await this.handOver(`it found no sound revision of the goals (${why})`) };
+          }
+          if (!added.length && !broughtBack.length) throw new Error(`Nothing changed: bring back a set-aside result (${LOOP_COMMAND} budget allocate <id> <n> --reason "..."), add a goal under a new asset ID in required_results, or run ${LOOP_COMMAND} report none --summary "<why>".`);
+          const blocked = await this.setAsideDependencies(broughtBack);
+          if (blocked.length) throw new Error(`The results you brought back still depend on set-aside ${blocked.join(', ')}: bring those back too, or set a result aside again (${LOOP_COMMAND} park <id> --reason agent_gave_up --note "...").`);
+          delete assessment.broughtBack;
+          if (!added.length) {
+            // Only brought back: there is nothing to extend, and an untouched project needs no approval.
+            delete state.extension;
+            if (await this.isProjectApproved(project)) {
+              state.researcherInput = undefined;
+              return finish(`Brought back ${broughtBack.join(', ')}. Continue with ${LOOP_COMMAND} next.`, 'select');
+            }
+          }
         }
         const extensionProblems = await this.extensionProblems(project);
         if (extensionProblems.length) throw new Error(`Stage draft_project validation failed:\n- ${extensionProblems.join('\n- ')}`);
-        if (run && state.researcherInput?.kind === 'autonomous_revision' && state.extension) {
-          const baseline = state.extension.baselineRequired;
-          await this.event('autonomy_goals_added', { ids: requiredAssetIds(project).filter((id) => !baseline.includes(id)) });
-        }
+        if (added.length) await this.event('autonomy_goals_added', { ids: added });
         await this.enqueueApproval('project', 'project', report.summary || 'Project goals drafted.');
         state.researcherInput = undefined;
         if ((await this.autoApproveQueued()).includes('project:project')) return finish('project.md drafted and approved automatically (auto mode). Continue with next.', 'select');
@@ -2638,7 +2690,7 @@ export class ResearchLoopCore {
     delete run.deciding;
     const text = `Autonomous run finished: ${reason}.`;
     await this.event('autonomy_handover', { reason, spent: run.spent });
-    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent added goals of its own ${run.revisions} time(s), keeping yours` : ''}.`);
+    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent reassessed what the goals still need ${run.revisions} time(s), keeping yours` : ''}.`);
     await this.pause(text);
     return `${text} The loop is handed back to the researcher: stop working now and tell them briefly what was proved, what was set aside, and what waits for their review.`;
   }
@@ -2650,27 +2702,135 @@ export class ResearchLoopCore {
   }
 
   /**
-   * Nothing is left that the agent can do alone, but results it could not prove are set aside:
-   * while revisions remain, it rethinks the goals itself. The revision is an extension of the
-   * approved project, so it can only add results (a weaker statement, a special case, another
-   * route) and never drops the researcher's. Returns whether a revision started.
+   * Nothing is left that the agent can do alone, but results it could not prove are set aside on
+   * the way to the goals: while reassessments remain, it judges what still separates the project
+   * from its goals and acts on that itself. It brings back a set-aside result that something new
+   * gets past (`budget allocate`), adds goals of its own (an extension of the approved project, so
+   * it never drops the researcher's), or both. A later reassessment needs something proved or set
+   * aside since the last one, so the run cannot circle. Returns whether a reassessment started.
    */
-  private async reviseGoals(run: NonNullable<LoopState['autonomy']>): Promise<boolean> {
+  private async assessGoals(run: NonNullable<LoopState['autonomy']>): Promise<boolean> {
     const state = this.require();
     const settings = await this.loopSettings();
     if ((run.revisions ?? 0) >= settings.autonomyRevisions || !(await this.isProjectApproved())) return false;
-    const setAside = Object.entries(state.parked).filter(([id, info]) => info.reason !== 'counterexample_pending' && !(run.revisedFor ?? []).includes(id));
-    if (!setAside.length) return false;
+    const progress = await this.progress();
+    const gap = await this.goalGap(progress, run.assessment);
+    if (!gap.blockers.length || (run.assessment && !gap.changed)) return false;
     run.revisions = (run.revisions ?? 0) + 1;
-    run.revisedFor = [...(run.revisedFor ?? []), ...setAside.map(([id]) => id)];
-    const list = setAside.map(([id, info]) => `${id} (${info.reason.replace(/_/g, ' ')}${info.note ? `: ${info.note}` : ''})`).join('; ');
-    const goal = `Autonomous revision ${run.revisions} of ${settings.autonomyRevisions} (the researcher is away). Set aside: ${list}. From what is proved so far and what the failed plans and searches showed, judge whether a weaker statement, a special case, or another route to the Main Problem is within reach. If so, add it under new asset ID(s) and say in ## Intended Contribution what changed and why; the researcher decides at hand-back whether to keep the originals. If no sound revision is in sight, run: ${LOOP_COMMAND} report none --summary "<why>", and the loop hands back.`;
+    run.assessment = { at: this.now(), proved: [...progress.proved.keys()], setAside: progress.setAside.map(([id, info]) => `${id}@${info.at}`), candidates: gap.candidates };
+    await this.files.writeFile(ASSESSMENT_PATH, gap.full);
+    const left = Math.max(0, settings.autonomyBudget - run.spent);
+    // The lead and the choice come first and stay short: an agent may see only the head of a long instruction.
+    const goal = [
+      `Autonomous reassessment ${run.revisions} of ${settings.autonomyRevisions} (the researcher is away): nothing is actionable, but ${gap.focus.length ? `the researcher's focus ${gap.focus.join(', ')} is open${gap.outside ? ` (${gap.outside} other open required result(s) lie outside it)` : ''}` : `${gap.open} required result(s) are open`}. Before you stop, judge what still separates ${gap.focus.length ? 'the focus' : 'the project'} from its goals and act on it.`,
+      gap.brief,
+      gap.narrow ? 'The frontier is narrow: unless an obstruction above is false, the way on is (b), a result that supplies it.' : '',
+      'Read a candidate before you judge it (show <id>), then do either or both:',
+      `(a) Bring back a set-aside result when something proved since it was set aside, or a genuinely different idea, gets past its recorded obstruction: ${LOOP_COMMAND} budget allocate <id> <n> --reason "<what changed and how it gets past the obstruction>" (${left} attempt(s) of the budget left; the reason becomes the direction its plans must follow). Bring back the set-aside results it depends on too.`,
+      '(b) Add the missing step as a new result under new asset ID(s): a lemma that supplies an obstruction above, or a weaker form of it that still serves the goal; or a weaker statement, a special case, or another route to the goal. Say in ## Intended Contribution what changed and why; once it is proved, the next reassessment can bring back what it unblocks, and the researcher decides at hand-back whether to keep the originals.',
+      `Then run: ${LOOP_COMMAND} report complete --summary "<the gap as you see it, and what you chose>". Only if neither is sound, run: ${LOOP_COMMAND} report none --summary "<why>"; the loop then asks you about each leading candidate before it hands back.`,
+    ].filter(Boolean).join('\n');
     await this.markExtension(goal);
     state.researcherInput = { kind: 'autonomous_revision', text: goal, at: this.now() };
     state.lastError = null;
-    await this.event('autonomy_revision', { revision: run.revisions, setAside: setAside.map(([id]) => id) });
+    await this.event('autonomy_revision', { revision: run.revisions, setAside: gap.blockers });
     await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined });
     return true;
+  }
+
+  /** Results proved (approved with a matching record), with when, and the results the agent may bring back. */
+  private async progress(): Promise<{ assets: Map<string, AssetInfo>; proved: Map<string, string>; setAside: Array<[string, LoopState['parked'][string]]> }> {
+    const state = this.require();
+    const assets = await this.collectKind('asset');
+    const records = (await this.approvals()).records;
+    const proved = new Map<string, string>();
+    for (const [id, asset] of assets) {
+      if (asset.data.status !== 'approved' || !isApproved(records, 'asset', id, asset.raw)) continue;
+      proved.set(id, records.filter((record) => record.kind === 'asset' && record.target === id).map((record) => record.approvedAt).sort().pop() ?? '');
+    }
+    return { assets, proved, setAside: Object.entries(state.parked).filter(([, info]) => info.reason !== 'counterexample_pending') };
+  }
+
+  /**
+   * What still separates the project from its goals: the set-aside results on the paths of the open
+   * required results (below a proved result nothing is in the way), those with something proved
+   * since they were set aside first, each with its recorded obstruction and the goals it blocks;
+   * and what changed since the last reassessment. `brief` leads with the first few, `full` (written
+   * to ASSESSMENT_PATH) has them all with their whole notes.
+   */
+  private async goalGap(progress: Awaited<ReturnType<ResearchLoopCore['progress']>>, before?: GoalAssessment): Promise<{ open: number; focus: string[]; outside: number; narrow: boolean; brief: string; full: string; candidates: string[]; blockers: string[]; changed: boolean }> {
+    const state = this.require();
+    const { assets, proved } = progress;
+    const parked = new Map(progress.setAside);
+    const required = requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => '')).filter((id) => !proved.has(id));
+    // With a focus, only its open goals count; once all of it is proved, the whole project does again.
+    const focus = (state.focus ?? []).filter((id) => required.includes(id));
+    const open = focus.length ? focus : required;
+    const blocks = new Map<string, string[]>();
+    const unblocked: string[] = [];
+    for (const goal of open) {
+      const seen = new Set<string>();
+      const visit = (id: string) => {
+        if (seen.has(id) || proved.has(id)) return;
+        seen.add(id);
+        const deps = assets.get(id)?.data.depends_on;
+        for (const dep of Array.isArray(deps) ? deps as string[] : []) visit(dep);
+        if (parked.has(id)) blocks.set(id, [...(blocks.get(id) ?? []), goal]);
+      };
+      visit(goal);
+      if (![...blocks.values()].some((goals) => goals.includes(goal))) unblocked.push(goal);
+    }
+    const recent = [...proved].sort(([, a], [, b]) => b.localeCompare(a));
+    const provedSince = (id: string) => recent.filter(([, at]) => at > parked.get(id)!.at).map(([result]) => result);
+    const blockers = [...blocks.keys()].sort((a, b) => Number(provedSince(b).length > 0) - Number(provedSince(a).length > 0) || blocks.get(b)!.length - blocks.get(a)!.length || parked.get(b)!.at.localeCompare(parked.get(a)!.at));
+    const few = (ids: string[], n: number) => `${ids.slice(0, n).join(', ')}${ids.length > n ? ` and ${ids.length - n} more` : ''}`;
+    const describe = (id: string, noteLength: number, shown: number) => {
+      const info = parked.get(id)!;
+      const note = info.note ? `: ${info.note.length > noteLength ? `${info.note.slice(0, noteLength)}…` : info.note}` : '';
+      const since = provedSince(id);
+      const goals = blocks.get(id)!;
+      return `- ${id} (${info.reason.replace(/_/g, ' ')}${note}); blocks ${goals.length === 1 && goals[0] === id ? 'itself' : few(goals, shown)}; set aside ${info.at.slice(0, 10)}, ${since.length ? `proved since: ${few(since, shown)}` : 'nothing proved since'}`;
+    };
+    const others = progress.setAside.length - blockers.length;
+    const fresh = before ? [...proved.keys()].filter((id) => !before.proved.includes(id)) : [];
+    const newlySetAside = before ? progress.setAside.filter(([id, info]) => !before.setAside.includes(`${id}@${info.at}`)).map(([id]) => id) : [];
+    const changed = fresh.length || newlySetAside.length ? `Since the last reassessment: ${[fresh.length ? `proved ${fresh.join(', ')}` : '', newlySetAside.length ? `set aside ${newlySetAside.join(', ')}` : ''].filter(Boolean).join('; ')}.` : '';
+    const candidates = blockers.slice(0, GAP_BRIEF);
+    // A few blockers are the whole frontier: they get their notes in full.
+    const narrow = blockers.length > 0 && blockers.length <= GAP_FRONTIER;
+    const brief = [
+      narrow ? `Only ${blockers.length} set-aside result(s) stand in the way, the whole frontier (${ASSESSMENT_PATH} has the rest of the report):` : `${blockers.length} set-aside result(s) stand in their way. The leading ones (something proved since they were set aside first; all of them with their whole notes: ${ASSESSMENT_PATH}):`,
+      ...candidates.map((id) => narrow ? describe(id, 800, 3) : describe(id, 160, 2)),
+      changed,
+    ];
+    const full = [
+      `# Reassessment of the goals\n\n${open.length} required result(s) are open; ${blockers.length} set-aside result(s) stand in their way, with the obstruction as recorded:\n`,
+      ...blockers.map((id) => describe(id, Number.MAX_SAFE_INTEGER, 10)),
+      unblocked.length ? `\nOpen with nothing set aside in the way (they wait on the researcher): ${unblocked.join(', ')}.` : '',
+      others ? `\n${others} other set-aside result(s) lie on no path to an open goal: ${progress.setAside.map(([id]) => id).filter((id) => !blocks.has(id)).join(', ')}.` : '',
+      changed ? `\n${changed}` : '',
+      state.approvalQueue.length ? `\nWaiting for the researcher: ${state.approvalQueue.map((item) => `${item.kind} ${item.target}`).join(', ')}.` : '',
+    ];
+    return { open: open.length, focus, outside: focus.length ? required.length - focus.length : 0, narrow, brief: brief.filter(Boolean).join('\n'), full: full.filter(Boolean).join('\n') + '\n', candidates, blockers, changed: Boolean(changed) };
+  }
+
+  /** Set-aside results that the given results depend on, directly or through other results. */
+  private async setAsideDependencies(ids: string[]): Promise<string[]> {
+    const state = this.require();
+    const assets = await this.collectKind('asset');
+    const found: string[] = [];
+    const seen = new Set<string>();
+    const visit = (id: string) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const deps = assets.get(id)?.data.depends_on;
+      for (const dep of Array.isArray(deps) ? deps as string[] : []) {
+        if (state.parked[dep] && !found.includes(dep)) found.push(dep);
+        visit(dep);
+      }
+    };
+    ids.forEach(visit);
+    return found;
   }
 
   /** The current or last autonomous run for the Overview; undefined when there has been none since the loop last resumed. */
@@ -2759,6 +2919,13 @@ export class ResearchLoopCore {
     await this.writeDecision('direction', assetId, reason.trim(), { reason: 'autonomous', rounds: attempts, failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
     delete state.parked[assetId];
     await this.event('budget_allocated', { assetId, attempts });
+    // Brought back while reassessing the goals: the reassessment's report settles what comes next.
+    const assessment = state.researcherInput?.kind === 'autonomous_revision' ? run.assessment : undefined;
+    if (assessment) {
+      assessment.broughtBack = [...new Set([...(assessment.broughtBack ?? []), assetId])];
+      await this.save();
+      return `${assetId} comes back with ${attempts} more ${construct ? 'search round(s)' : 'proof attempt(s)'} and your direction. Bring back others or add goals, then run: ${LOOP_COMMAND} report complete --summary "<the gap as you see it, and what you chose>"`;
+    }
     if (run.deciding === assetId) {
       delete run.deciding;
       if (construct) await this.setStage('select', { assetId: undefined });
@@ -2799,7 +2966,7 @@ export class ResearchLoopCore {
       status: state.status, stage: state.stage, provider: state.provider, assetId: state.current.assetId, planId: state.current.planId,
       counterexampleId: state.current.counterexampleId, waitingForHuman: isWaitingForHuman(state), pendingQuestion: state.pendingQuestion,
       approvalQueue: state.approvalQueue, parked, parkedCount: Object.keys(state.parked).length, lock: state.lock, lastSummary: state.lastSummary, lastError: state.lastError,
-      unreadAnswers: state.answers.filter((answer) => !answer.consumed), autonomy: state.autonomy, updatedAt: state.updatedAt,
+      unreadAnswers: state.answers.filter((answer) => !answer.consumed), autonomy: state.autonomy, focus: state.focus, updatedAt: state.updatedAt,
     };
   }
 
@@ -2828,6 +2995,7 @@ export class ResearchLoopCore {
       lines.push(`Parked (${parkedCount}): ${recent.map(([id, info]) => `${id} (${info.reason})`).join(', ')}${parkedCount > recent.length ? `, and ${parkedCount - recent.length} earlier (${LOOP_COMMAND} status --json lists them)` : ''}.`);
     }
     if (state.lastError) lines.push(`Note: ${state.lastError}`);
+    if (state.focus?.length) lines.push(`Focus (set by the researcher): ${state.focus.join(', ')}; the loop works toward these first.`);
     if (state.autonomy && !state.autonomy.handedOverAt) lines.push(this.autonomyNote(state.autonomy));
     const auto = this.lastSettings?.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : this.lastSettings?.autoApprove;
     if (auto?.enabled) lines.push(`Auto mode (set by the researcher): approves ${AUTO_APPROVE_RULES.filter((rule) => auto[rule]).join(', ') || 'nothing'} without asking.`);
