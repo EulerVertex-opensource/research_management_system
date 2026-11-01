@@ -161,6 +161,12 @@ test('Claude gets a PostToolUse read audit and worker subagents; researcher-edit
   assert.match(light, /^---\nname: research-worker-light\n/);
   assert.match(light, /model: sonnet/);
   assert.match(buildWorkerAgent('deep', '', '.claude/skills', 'node loop.cjs'), /model: inherit/);
+  const deep = buildWorkerAgent('deep', '', '.claude/skills', 'node loop.cjs', 'node maint.cjs');
+  assert.match(deep, /\nexperimental:\n  cacheTtl: 1h\n---\n/, 'deep workers keep the one-hour cache through long turns');
+  assert.doesNotMatch(light, /cacheTtl/);
+  assert.match(deep, /`node loop\.cjs library search/);
+  assert.match(deep, /`node maint\.cjs validate`/);
+  assert.match(deep, /`partial: <what remains>`/);
   assert.equal(buildWorkerAgent('light', light, '.claude/skills', 'node loop.cjs'), light);
   assert.equal(buildWorkerAgent('light', '---\nname: research-worker-light\n---\nmine', '.claude/skills', 'node loop.cjs'), undefined);
 });

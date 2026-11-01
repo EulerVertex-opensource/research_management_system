@@ -1,8 +1,9 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { ProjectPaths, ResearchAssistantConfig, SyncConfig } from '../models/types';
-import { LoopFiles } from '../services/ResearchLoopModel';
+import { LoopFiles, isLoopStatePath } from '../services/ResearchLoopModel';
 import { PROJECT_CONFIG_PATH, defaultLatexCommand, normalizeConfig, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
 
 /** Node `fs` implementation of the small file interface used by the research loop. */
@@ -20,7 +21,22 @@ export class NodeLoopFiles implements LoopFiles {
   async writeFile(relativePath: string, content: string): Promise<void> {
     const full = this.resolve(relativePath);
     await fs.mkdir(path.dirname(full), { recursive: true });
-    await fs.writeFile(full, content, 'utf8');
+    if (!isLoopStatePath(relativePath)) { await fs.writeFile(full, content, 'utf8'); return; }
+    // A reader in another process sees the old file or the new one, never a truncated one.
+    const temp = `${full}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    await fs.writeFile(temp, content, 'utf8');
+    try { await fs.rename(temp, full); } catch (error) {
+      await fs.rm(temp, { force: true });
+      // Windows refuses to replace a file another process holds open; fall back to an in-place write.
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM' && (error as NodeJS.ErrnoException).code !== 'EACCES') throw error;
+      await fs.writeFile(full, content, 'utf8');
+    }
+  }
+
+  async appendFile(relativePath: string, content: string): Promise<void> {
+    const full = this.resolve(relativePath);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.appendFile(full, content, 'utf8');
   }
 
   async deleteFile(relativePath: string): Promise<void> {

@@ -83,6 +83,26 @@ test('shell commands may still read, move, and delete a misplaced file that alre
   assert.equal(deny(bash('mv research/notes/raw.md research/notes/new.md'), exists).deny, true);
 });
 
+test('shell copies and moves are checked where they land, folders included', () => {
+  const exists = (relative) => ['research/library/tromba_2012', 'research/handoffs', 'research/ideas', 'research/notes'].includes(relative);
+  for (const command of [
+    'cp -r raw research/library/tromba_2012/sources',
+    'mv research-local/raw research/library/tromba_2012/',
+    'git mv notes_migration.json research/handoffs/',
+    'mkdir -p tmp && cp -t research/ideas notes.txt',
+  ]) {
+    const decision = deny(bash(command), exists);
+    assert.equal(decision.deny, true, command);
+    assert.match(decision.reason, /^Research layout: /);
+  }
+  for (const command of [
+    'mv research/notes research-local/old_notes',
+    'cp draft.md research/ideas/',
+    'git mv research/ideas/a.md research/ideas/b.md',
+    'rsync -a research/ backup:research/',
+  ]) assert.equal(deny(bash(command), exists).deny, false, command);
+});
+
 test('with the legacy root `.` only the configured folders are governed', () => {
   const legacy = pathsFromConfigText(JSON.stringify({ layout: 'legacy' }));
   const check = (input) => preToolUseDecision(legacy, input, '/repo').deny;

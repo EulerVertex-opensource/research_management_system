@@ -1,4 +1,4 @@
-import { AUTO_APPROVE_RULES, AutoApprovePolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, RIGOR_KEYS, RIGOR_OPTIONS, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch } from '../models/settings';
+import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutonomyPolicy, LOOP_NUMBER_KEYS, LoopNumberKey, LoopSettings, RIGOR_KEYS, RIGOR_OPTIONS, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch } from '../models/settings';
 
 /**
  * Pure defaults, normalization, and validation for the Settings view and the
@@ -9,17 +9,51 @@ export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
   enabled: false, proofs: true, supporting: true, citations: true, definitions: true, counterexamples: false, specifications: false, project: false,
 };
 
-/** Rigor or speed: Careful is the default; Fast trades checks for progress. */
-export const RIGOR_PRESETS: Record<'careful' | 'fast', RigorPolicy> = {
-  careful: { refuteSearch: 'all', agreeDefinitions: 'main', onDependencyChange: 'revert', missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' },
-  fast: { refuteSearch: 'main', agreeDefinitions: 'off', onDependencyChange: 'flag', missingDefinitions: 'continue', whenStuck: 'retry', unansweredQuestions: 'default' },
-};
-export const DEFAULT_RIGOR: RigorPolicy = RIGOR_PRESETS.careful;
+/** What autonomous mode approves: every rule, each still judged from the file itself. */
+export const AUTONOMOUS_AUTO_APPROVE: AutoApprovePolicy = { enabled: true, ...Object.fromEntries(AUTO_APPROVE_RULES.map((rule) => [rule, true])) } as AutoApprovePolicy;
+export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
 
-/** The preset a policy matches, or `custom`. */
+/**
+ * Where each rigor policy appears in the Settings view: `checks` under "How thorough" (what the loop
+ * verifies before building on a result), `away` under "How involved are you" (what happens when the
+ * researcher does not respond). A Record so a new policy without a place does not compile.
+ */
+export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away'> = {
+  refuteSearch: 'checks', verifyProofs: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks',
+  missingDefinitions: 'away', whenStuck: 'away', unansweredQuestions: 'away',
+};
+export const CHECK_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'checks');
+export const AWAY_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'away');
+type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'verifyProofs' | 'agreeDefinitions' | 'onDependencyChange'>;
+
+/** How thorough: Careful is the default; Fast trades checks for progress. Presets cover the checks only. */
+export const RIGOR_PRESETS: Record<'careful' | 'fast', CheckPolicy> = {
+  careful: { refuteSearch: 'all', verifyProofs: 'agent', agreeDefinitions: 'main', onDependencyChange: 'revert' },
+  fast: { refuteSearch: 'main', verifyProofs: 'off', agreeDefinitions: 'off', onDependencyChange: 'flag' },
+};
+export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' };
+
+/** The preset a policy's checks match, or `custom`. */
 export function rigorPreset(policy: RigorPolicy): 'careful' | 'fast' | 'custom' {
-  for (const name of ['careful', 'fast'] as const) if (RIGOR_KEYS.every((key) => RIGOR_PRESETS[name][key] === policy[key])) return name;
+  for (const name of ['careful', 'fast'] as const) if (CHECK_KEYS.every((key) => RIGOR_PRESETS[name][key as keyof CheckPolicy] === policy[key])) return name;
   return 'custom';
+}
+
+/**
+ * How involved the researcher is: one choice in the Settings view over the two switches the
+ * settings file stores. `routine` is auto-approval by the rules; `alone` is autonomous mode.
+ */
+export type Involvement = 'review' | 'routine' | 'alone';
+type InvolvementSwitches = Pick<LoopSettings, 'autoApprove' | 'autonomy'>;
+
+export function involvement(settings: InvolvementSwitches): Involvement {
+  return settings.autonomy.enabled ? 'alone' : settings.autoApprove.enabled ? 'routine' : 'review';
+}
+
+/** The switches for a level; the rule checkboxes are kept, so returning to `routine` restores them. */
+export function withInvolvement<T extends InvolvementSwitches>(settings: T, level: Involvement): T {
+  const enabled = level === 'review' ? false : level === 'routine' ? true : settings.autoApprove.enabled;
+  return { ...settings, autoApprove: { ...settings.autoApprove, enabled }, autonomy: { enabled: level === 'alone' } };
 }
 
 export interface RigorField { label: string; hint: string; options: Record<string, string> }
@@ -27,20 +61,24 @@ export interface RigorField { label: string; hint: string; options: Record<strin
 /** Every "How careful" setting, in display order, with the words for each choice. */
 export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(typeof RIGOR_OPTIONS)[K][number], string> } } = {
   refuteSearch: { label: 'Look for counterexamples before proving', hint: 'A search for a counterexample before each proof catches false statements early, at a cost in tokens.', options: { all: 'Every result', main: 'Main results only', off: 'Never' } },
+  verifyProofs: { label: 'Check each proof', hint: 'The agent that planned a proof also writes it. An independent check catches gaps before the proof is approved. If you check them yourself, proofs are never approved automatically, whatever the level above allows.', options: { agent: 'An independent agent verifies it', researcher: 'I verify every proof myself', off: 'No separate check' } },
   agreeDefinitions: { label: 'Agree on definitions before proving', hint: 'The definitions a main result’s statement uses decide what the goal means.', options: { main: 'Main results’ definitions first', off: 'Check them at the end' } },
   onDependencyChange: { label: 'When something a result rests on changes', hint: 'A changed definition or statement can make the proofs built on it be about something else.', options: { revert: 'Everything downstream back to review', flag: 'Mark it for re-check' } },
   missingDefinitions: { label: 'When a definition is used but missing', hint: 'The agent drafts it in either case; it never accepts it for you.', options: { wait: 'Draft it, then wait for me', continue: 'Draft it and go on' } },
   whenStuck: { label: 'When a result is stuck and you give no direction', hint: 'After the failed-attempt limit, or when a construction search runs out.', options: { park: 'Set it aside', retry: 'Agent tries one new approach itself' } },
-  unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout below.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
+  unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
 };
 
 /** Where a numeric loop setting appears in the Settings view. */
-export type LoopFieldGroup = 'general' | 'refute' | 'construct' | 'search';
+export type LoopFieldGroup = 'general' | 'away' | 'refute' | 'construct' | 'search' | 'autonomy' | 'teaching';
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   general: 'Search & effort',
+  away: 'When you don’t respond',
   refute: 'Object search: refute (falsify)',
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
+  autonomy: 'Working on its own',
+  teaching: 'Keeping up with the proofs',
 };
 
 export interface LoopNumberField { defaultValue: number; range: readonly [number, number]; label: string; hint: string; unit?: string; group: LoopFieldGroup }
@@ -52,8 +90,8 @@ export interface LoopNumberField { defaultValue: number; range: readonly [number
  */
 export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   maxFailedPlans: { defaultValue: 3, range: [1, 10], group: 'general', label: 'Proof attempts per asset', hint: 'Failed plans before the loop asks you for a new direction.' },
-  iterationCap: { defaultValue: 10, range: [1, 100], group: 'general', label: 'Autopilot continuations', hint: 'Times the Stop hook sends the agent on per chat session; applies to the running loop too.' },
-  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'general', unit: 'seconds', label: 'Question timeout', hint: 'How long a question waits before “When a question goes unanswered” applies. Reviews never time out; they wait in Needs you.' },
+  iterationCap: { defaultValue: 10, range: [1, 100], group: 'general', label: 'Continuations per chat', hint: 'Times the Stop hook sends the agent on in one chat session; applies to the running loop too. When it works on its own, its budget applies instead.' },
+  questionTimeoutSeconds: { defaultValue: 240, range: [10, 600], group: 'away', unit: 'seconds', label: 'Question timeout', hint: 'How long a question waits before “When a question goes unanswered” applies. Reviews never time out; they wait in Needs you.' },
   refuteWidth: { defaultValue: 1, range: [1, 8], group: 'refute', label: 'Workers per round', hint: 'Parallel subagents searching for a counterexample, each in its own direction.' },
   refuteRounds: { defaultValue: 1, range: [1, 10], group: 'refute', label: 'Rounds', hint: 'Rounds without a counterexample before the loop moves on to planning a proof.' },
   constructWidth: { defaultValue: 3, range: [1, 8], group: 'construct', label: 'Workers per round', hint: 'Parallel subagents proposing constructions, each in its own direction.' },
@@ -64,11 +102,15 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   boardObstructions: { defaultValue: 12, range: [1, 50], group: 'search', label: 'Obstructions shown', hint: 'Latest obstructions on the search board every worker reads.' },
   boardNearMisses: { defaultValue: 3, range: [0, 10], group: 'search', label: 'Near-misses shown', hint: 'Best failed candidates on the search board, with their checks.' },
   requestedSearchRounds: { defaultValue: 2, range: [1, 10], group: 'search', label: 'Rounds for a requested search', hint: 'Default rounds when you ask for a deeper counterexample search.' },
+  autonomyBudget: { defaultValue: 30, range: [1, 1000], group: 'autonomy', unit: 'attempts', label: 'Budget', hint: 'Proof attempts and search rounds the agent may spend on its own before it hands the loop back to you.' },
+  autonomyHours: { defaultValue: 0, range: [0, 168], group: 'autonomy', unit: 'hours', label: 'Time limit', hint: 'Hands the loop back after this long even with budget left; 0 means no time limit.' },
+  autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal reassessments', hint: 'Times the agent may judge what the goals still need when only set-aside results remain: it brings back a set-aside result that something new gets past, or adds a weaker or alternative goal of its own. Each one after the first needs something proved or set aside since the last. It never drops your goals; you decide about them at hand-back.' },
+  studyAhead: { defaultValue: 0, range: [0, 50], group: 'teaching', unit: 'results', label: 'How far the loop may get ahead of you', hint: 'Verified results you have not studied yet (with the teach skill, or marked in Results) before the loop waits for you instead of starting new proofs. 0 means it never waits; working on its own ignores this.' },
 };
 
 const loopNumberDefaults = Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, LOOP_NUMBER_FIELDS[key].defaultValue])) as Record<LoopNumberKey, number>;
 
-export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, rigor: DEFAULT_RIGOR, ...loopNumberDefaults };
+export const DEFAULT_LOOP_SETTINGS: LoopSettings = { version: 1, autoApprove: DEFAULT_AUTO_APPROVE, rigor: DEFAULT_RIGOR, autonomy: DEFAULT_AUTONOMY, ...loopNumberDefaults };
 
 export const LIMITS = {
   autoPullIntervalMinutes: [0, 1440],
@@ -80,7 +122,7 @@ const clampInt = (value: unknown, [min, max]: readonly [number, number], fallbac
 
 /**
  * Read the loop policy leniently, but fail closed: a missing or malformed
- * autoApprove block means auto mode is off.
+ * autoApprove or autonomy block means auto mode or autonomous mode is off.
  */
 export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; problems: string[] } {
   const problems: string[] = [];
@@ -93,6 +135,13 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
       && ['enabled', ...AUTO_APPROVE_RULES].every((key) => (auto as Record<string, unknown>)[key] === undefined || typeof (auto as Record<string, unknown>)[key] === 'boolean');
     if (valid) autoApprove = { ...DEFAULT_AUTO_APPROVE, ...(auto as Partial<AutoApprovePolicy>) };
     else problems.push('autoApprove is malformed; auto mode is off.');
+  }
+  const autonomyInput = input.autonomy;
+  let autonomy: AutonomyPolicy = { ...DEFAULT_AUTONOMY };
+  if (autonomyInput !== undefined) {
+    const enabled = autonomyInput && typeof autonomyInput === 'object' && !Array.isArray(autonomyInput) ? (autonomyInput as Record<string, unknown>).enabled : undefined;
+    if (enabled === undefined || typeof enabled === 'boolean') autonomy = { enabled: enabled === true };
+    else problems.push('autonomy is malformed; autonomous mode is off.');
   }
   const rigorInput = input.rigor && typeof input.rigor === 'object' && !Array.isArray(input.rigor) ? input.rigor as Record<string, unknown> : {};
   if (input.rigor !== undefined && rigorInput !== input.rigor) problems.push('rigor is malformed; using the careful defaults.');
@@ -108,6 +157,7 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
       version: 1,
       autoApprove,
       rigor,
+      autonomy,
       ...Object.fromEntries(LOOP_NUMBER_KEYS.map((key) => [key, clampInt(input[key], LOOP_NUMBER_FIELDS[key].range, LOOP_NUMBER_FIELDS[key].defaultValue)])) as Record<LoopNumberKey, number>,
     },
     problems,
@@ -122,7 +172,7 @@ export function parseLoopSettings(text: string | undefined): { settings: LoopSet
 
 export function applyLoopPatch(settings: LoopSettings, patch: SettingsPatch['loop']): LoopSettings {
   if (!patch) return settings;
-  return normalizeLoopSettings({ ...settings, ...patch, autoApprove: { ...settings.autoApprove, ...patch.autoApprove }, rigor: { ...settings.rigor, ...patch.rigor } }).settings;
+  return normalizeLoopSettings({ ...settings, ...patch, autoApprove: { ...settings.autoApprove, ...patch.autoApprove }, rigor: { ...settings.rigor, ...patch.rigor }, autonomy: { ...settings.autonomy, ...patch.autonomy } }).settings;
 }
 
 /** Git remote and branch names go into git arguments: no options, no ranges, no shell characters. */
@@ -151,6 +201,7 @@ export function validateSettingsPatch(patch: SettingsPatch, budgetStages: readon
   }
   if (patch.loop) {
     for (const key of ['enabled', ...AUTO_APPROVE_RULES] as const) bool(`loop.autoApprove.${key}`, patch.loop.autoApprove?.[key]);
+    bool('loop.autonomy.enabled', patch.loop.autonomy?.enabled);
     for (const key of LOOP_NUMBER_KEYS) intIn(`loop.${key}`, patch.loop[key], LOOP_NUMBER_FIELDS[key].range);
     for (const key of RIGOR_KEYS) oneOf(`loop.rigor.${key}`, patch.loop.rigor?.[key], RIGOR_OPTIONS[key]);
   }

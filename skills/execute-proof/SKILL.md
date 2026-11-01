@@ -5,11 +5,13 @@ description: Execute one pending proof plan for a draft asset; on success put th
 
 # Execute a proof plan
 
-Input: the context pack from `research-loop next` (the plan, the frozen target statement, dependency statements, definitions). Read only the pack; for anything else run `research-loop show <id> [--section Heading]`, for example a dependency's proof only when a step genuinely needs its argument.
+Input: the context pack from `research-loop next` (the plan, the frozen target statement, dependency statements, definitions, the full text of each result the plan `adapts`, and the project's proof style when the researchers recorded one). Write the proof the way the proof style asks. Read only the pack; for anything else run `research-loop show <id> [--section Heading]`, for example a dependency's proof only when a step genuinely needs its argument.
 
 - Follow the checklist in order; tick a box only when the step is established in writing.
+- A step "as in <id>" follows that result's proof in the pack: carry it over with the changes `## Adapted from` names, check every hypothesis it uses in the new setting, and write the adapted argument out in full. An adapted proof is reproved here, not cited.
 - Success: put the complete proof under `## Proof` in the target asset (statement unchanged, status stays `draft`), then set the plan `status: succeeded` and add `## Outcome` naming where the proof lives and what is still assumed. The loop stamps `proof_digest` on the plan when you report; do not write it. Run `check-notation` and `research-maintenance links --file <asset path> --apply`. Report `proved --assumed-definitions a,b` when draft definitions were used.
 - Obstruction: leave the asset untouched, set the plan `status: failed`, write `## Failure` with the exact obstruction (which step, why it cannot be completed, what would be needed). Report `failed`.
 - Unclear statement or missing definition: report `question --question "..."`.
+- Long proof: if about 30 tool calls in the proof is not complete, stop at a clean point. Write every finished step out in full under `## Progress` in the plan (which checklist items it settles, and the argument itself), and reply `partial: <what remains>`. A fresh worker continues from there with a small context. When you continue a partial execution, read the plan's `## Progress` first (`show <plan id> --section Progress`) and build on it; do not redo it. When the proof is complete, put the whole of it under `## Proof` and delete `## Progress`.
 
 A failed plan says nothing about the truth of the statement. Only the plan file and the target's `## Proof` may change. Never set `status: approved`.

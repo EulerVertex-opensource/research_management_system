@@ -6,6 +6,7 @@
  */
 
 import type { NodeProgress } from '../domain/copy';
+import type { UnderstandingLevel, UnderstandingState } from '../domain/understandingLevels';
 export type { NodeProgress } from '../domain/copy';
 
 /** Why a node needs a look; the webview colors and filters by these. */
@@ -50,6 +51,8 @@ export interface GraphNodeView {
   progress: NodeProgress;
   /** Short state label, e.g. "Set aside" or "Needs your review". */
   progressLabel: string;
+  /** A required result the agent added in autonomous mode, beside the researcher's own goals. */
+  agentGoal?: boolean;
   /** One line under the title, e.g. "3 proof attempts failed" or "Needs Key bound first". */
   progressDetail: string;
   /** Taken from the literature rather than proved here: a paper or textbook source, or a library result. */
@@ -60,6 +63,8 @@ export interface GraphNodeView {
   statement: string;
   /** For a required result: how many of the results it rests on (itself included) are done. */
   closure?: { done: number; total: number };
+  /** A verified result: where the researcher stands on it (their own local mark) and the level the teaching chat aims for. */
+  understanding?: { state: UnderstandingState; level?: UnderstandingLevel; suggested: UnderstandingLevel };
 }
 
 export type GraphEdgeType = 'depends_on' | 'uses_definition' | 'refutes';
@@ -83,9 +88,13 @@ export type GraphAction =
   | { action: 'loop'; op: 'start' | 'resume' | 'extend' | 'openChat' }
   | { action: 'syncPull' }
   /** The researcher read a result marked for re-check again, and it still holds. */
-  | { action: 'confirmRecheck'; id: string };
+  | { action: 'confirmRecheck'; id: string }
+  /** The researcher's own mark of how well they know a verified result; `none` forgets it. */
+  | { action: 'understand'; id: string; level: UnderstandingLevel | 'none' }
+  /** Copy a teaching prompt (for one result, or for everything new) and open the agent chat. */
+  | { action: 'teach'; id?: string };
 
-export interface AttentionButton { label: string; action: GraphAction; kind?: 'primary' | 'secondary'; needsText?: string }
+export interface AttentionButton { label: string; action: GraphAction; kind?: 'primary' | 'secondary'; needsText?: string; /** Tooltip saying what the button does. */ hint?: string }
 
 export interface AttentionItem {
   key: string;
@@ -134,8 +143,10 @@ export interface SectionView {
 /**
  * What the loop is doing and whose turn it is, for the status card on top of
  * the Overview, the status bar, and the popups. Derived, never stored.
+ * `agent_idle`: the loop runs but no agent is in a turn (none picked it up,
+ * it handed back, or it went quiet); `stalled`: quiet for far longer.
  */
-export type LoopHealthKey = 'idle' | 'goals' | 'working' | 'needs_you' | 'set_aside' | 'stopped' | 'stalled' | 'paused' | 'done';
+export type LoopHealthKey = 'idle' | 'goals' | 'working' | 'needs_you' | 'set_aside' | 'stopped' | 'stalled' | 'agent_idle' | 'paused' | 'done';
 export type LoopTone = 'neutral' | 'info' | 'warning' | 'error' | 'success';
 
 /** One numbered reason the loop cannot continue. */
@@ -156,12 +167,40 @@ export interface LoopHealth {
   buttons: AttentionButton[];
   /** The agent's last reported step. */
   last?: { at: string; text: string };
+  /** The agent's last sign of life while the loop runs (its own hooks, commands, and tool calls). */
+  agentAt?: string;
   statusBar: { text: string; level: 'normal' | 'warning' | 'error' };
   /** Stable while the situation is the same; a change in it may deserve a popup. */
   signature: string;
 }
 
-/** One line of the "What happened" timeline. */
+/** An autonomous run as the Overview shows it, derived from the loop state and its events. */
+export interface AutonomyView {
+  /** Working on its own now; false once it handed back. */
+  active: boolean;
+  startedAt: string;
+  handedOverAt?: string;
+  /** Why it handed back. */
+  reason?: string;
+  spent: number;
+  budget: number;
+  /** When the time limit hands back; absent without one. */
+  deadline?: string;
+  revisions: number;
+  revisionLimit: number;
+  /** Attempts per result in this run, most first. */
+  spending: Array<{ id: string; attempts: number }>;
+  /** Results it proved in this run. */
+  proved: string[];
+  /** Results it set aside in this run and that are still set aside, with its note. */
+  setAside: Array<{ id: string; note?: string }>;
+  /** Required results it added in this run's revisions of the goals. */
+  addedGoals: string[];
+  /** Questions it decided itself; each is kept as an idea. */
+  decided: number;
+}
+
+/** One line of the Activity timeline. */
 export interface HistoryEntry { at: string; text: string; tone: LoopTone; target?: string }
 
 export interface GraphPayload {
@@ -172,6 +211,8 @@ export interface GraphPayload {
   loop?: { status: string; stage: string; assetId?: string };
   /** Auto mode is on: some approvals are granted without the researcher. */
   autoMode?: boolean;
+  /** The autonomous run: its budget while it works, and what it did once it handed back. */
+  autonomy?: AutonomyView;
   manuscriptState?: string;
   nodes: GraphNodeView[];
   edges: GraphEdgeView[];
@@ -181,4 +222,6 @@ export interface GraphPayload {
   health: LoopHealth;
   /** Newest first. */
   history: HistoryEntry[];
+  /** Verified results, and how many of them are new to the researcher or changed since they studied them. */
+  study?: { behind: number; total: number };
 }

@@ -2,6 +2,7 @@ import { LoopStage } from './ResearchLoopModel';
 import { projectSection, requiredAssetIds, requiredResults } from '../domain/project';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 import { SearchMode, SearchSlot } from '../domain/search';
+import { searchFields, searchScore, searchSummary, searchWords } from '../domain/registry';
 
 /**
  * Deterministic context packs for the research loop. For each stage the loop
@@ -57,6 +58,8 @@ export interface ContextSources {
   checks: Map<string, ContextNode>;
   /** Object-search candidates; absent in callers that predate the search. */
   candidates?: Map<string, ContextNode>;
+  /** The project's proof style (research/style.md), which a proof the loop writes follows; absent when none is recorded. */
+  style?: string;
   /** Earlier stage reports, oldest first; the pack keeps those for the current asset. */
   reports: Array<{ stage?: string; outcome?: string; summary?: string; assetId?: string; at?: string }>;
 }
@@ -71,6 +74,8 @@ export interface ContextFocus {
   researcherInput?: string;
   changesRequested?: string;
   direction?: string;
+  /** The direction is the agent's own, given in autonomous mode with `budget allocate`. */
+  ownDirection?: boolean;
   /** Object search: the round, this worker's slot (search) or the round's results (search_summary), and the board. */
   search?: { mode: SearchMode; round: number; slot?: SearchSlot; board: string; roundDigest?: string; requested?: boolean };
 }
@@ -79,12 +84,12 @@ export interface RenderedContext { text: string; tokens: number; included: Conte
 
 export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
-  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000,
+  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
-  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep',
+  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }
@@ -145,7 +150,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
   const target = focus.assetId;
   if (focus.researcherInput) notes.push(`Researcher input: ${focus.researcherInput}`);
   if (focus.changesRequested) notes.push(`The researcher requested changes: ${focus.changesRequested}`);
-  if (focus.direction) notes.push(`Latest researcher direction: ${focus.direction}`);
+  if (focus.direction) notes.push(`${focus.ownDirection ? 'Your own latest direction (autonomous mode), which this plan must follow' : 'Latest researcher direction'}: ${focus.direction}`);
 
   switch (focus.stage) {
     case 'discuss_goals':
@@ -229,6 +234,8 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
       asset(target, 'statement', 0, 'the statement to prove (frozen)');
       const current = focus.planId ? sources.plans.get(focus.planId) : undefined;
       if (current) add('plan', current.id, current.file, 'all', 0, focus.stage === 'execute' ? 'the plan to execute' : 'the pending plan to execute instead of writing a new one');
+      // Before dependencies, so a result both used and adapted shows its proof.
+      for (const id of list(current?.data.adapts)) asset(id, 'all', 1, 'result whose proof the plan adapts');
       for (const dep of deps(target)) asset(dep, 'statement', 1, 'dependency, used as a black box');
       definitionsOf([target], 1, 2);
       if (focus.stage === 'plan') {
@@ -238,12 +245,28 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
           else if (plan.data.type === 'plan' && plan.data.status === 'succeeded') add('plan', plan.id, plan.file, ['Outcome'], 3, 'earlier successful attempt');
         }
         for (const idea of sources.ideas.values()) if (idea.data.status !== 'archived' && list(idea.data.related_assets).includes(target)) add('idea', idea.id, idea.file, 'summary', 3, 'related idea');
+        const analogues = libraryAnalogues(target, sources);
+        if (analogues.length && !current) {
+          seen.add('text:library_analogues');
+          items.push({ kind: 'text', id: 'library_analogues', view: 'all', priority: 2, reason: 'known results resembling the target', text: renderAnalogues(analogues) });
+        }
         excluded.push('proofs of dependencies', 'full checklists of failed plans (show <plan> for one when needed)');
       } else {
         excluded.push('other plans and ideas', 'proofs of dependencies');
+        if (sources.style?.trim()) {
+          seen.add('text:proof_style');
+          items.push({ kind: 'text', id: 'proof_style', view: 'all', priority: 1, reason: 'how the researchers want proofs written: follow it', text: sources.style.trim() });
+        }
       }
       break;
     }
+    case 'verify_proof':
+      if (!target) break;
+      asset(target, 'all', 0, 'the statement and the proof to verify');
+      for (const dep of deps(target)) asset(dep, 'statement', 1, 'dependency the proof may use as a black box');
+      definitionsOf([target], 1, 2);
+      excluded.push('the plan and its reasoning (verify the proof as written)', 'proofs of dependencies');
+      break;
     default:
       break;
   }
@@ -256,6 +279,64 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
   return { stage: focus.stage, assetId: target, planId: focus.planId, budget, worker: STAGE_WORKERS[focus.stage], items, excluded, notes };
 }
 
+export interface LibraryAnalogue { id: string; collection?: string; status: string; title: string; summary: string; score: number }
+
+/** At most this many analogues, and at most this many from one collection, so one source does not crowd out the rest. */
+export const ANALOGUE_LIMIT = 10;
+const ANALOGUE_PER_COLLECTION = 3;
+
+/**
+ * Library results that resemble the target but that it does not depend on:
+ * the same kind of theorem proved in another setting, whose argument a plan
+ * may adapt. Ranked by the words of the target's title, tags, and the titles
+ * of its definitions, plus the definitions both use (or that the target's
+ * definitions were derived from).
+ */
+export function libraryAnalogues(targetId: string, sources: ContextSources, limit = ANALOGUE_LIMIT): LibraryAnalogue[] {
+  const target = sources.assets.get(targetId);
+  if (!target) return [];
+  const definitionIds = list(target.data.uses_definitions);
+  const definitionTitles = definitionIds.map((id) => String(sources.definitions.get(id)?.data.title ?? id.replace(/_/g, ' ')).replace(/^Definition\s*\((.*)\)\s*$/i, '$1'));
+  // The target's own title and tags say what it is; its definitions only say where it lives, so they count half.
+  const own = new Set(searchWords([String(target.data.title ?? ''), ...list(target.data.tags)].join(' ')));
+  const terms = [...new Set([...own, ...searchWords(definitionTitles.join(' '))])];
+  const shared = new Set(definitionIds.flatMap((id) => { const from = sources.definitions.get(id)?.data.derived_from; return typeof from === 'string' ? [id, from] : [id]; }));
+  const skip = new Set([targetId, ...list(target.data.depends_on)]);
+  const library = [...sources.assets.values()].filter((node) => node.origin === 'library');
+  // Inverse document frequency over the library: a word every result shares ranks nothing.
+  const frequency = new Map<string, number>();
+  for (const node of library) {
+    const fields = searchFields(node);
+    for (const term of new Set([...fields.title, ...fields.tags, ...fields.statement])) frequency.set(term, (frequency.get(term) ?? 0) + 1);
+  }
+  const weight = (term: string) => (own.has(term) ? 2 : 1) * Math.log((library.length + 1) / ((frequency.get(term) ?? 0) + 1));
+  const ranked = library
+    .filter((node) => !skip.has(node.id))
+    .map((node) => ({ node, score: searchScore(node, terms, weight) + 3 * list(node.data.uses_definitions).filter((id) => shared.has(id)).length }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.node.id.localeCompare(b.node.id));
+  const perCollection = new Map<string, number>();
+  const picked: LibraryAnalogue[] = [];
+  for (const { node, score } of ranked) {
+    if (picked.length >= limit) break;
+    const collection = node.collection ?? '';
+    if ((perCollection.get(collection) ?? 0) >= ANALOGUE_PER_COLLECTION) continue;
+    perCollection.set(collection, (perCollection.get(collection) ?? 0) + 1);
+    picked.push({ id: node.id, collection: node.collection, status: String(node.data.status ?? '-'), title: String(node.data.title ?? node.id).replace(/\s+/g, ' '), summary: searchSummary(statementOf(node.body)), score });
+  }
+  return picked;
+}
+
+function renderAnalogues(analogues: LibraryAnalogue[]): string {
+  return [
+    '### Library analogues (not in depends_on)',
+    '',
+    'Known results that resemble the target, ranked by shared words and definitions. A draft one is not yet checked. Read its proof with `show <id> --section Proof` before deciding.',
+    '',
+    ...analogues.map((item) => `- ${item.id} (${item.collection ?? 'library'}, ${item.status}): ${item.title} — ${item.summary}`),
+  ].join('\n');
+}
+
 /** A project section, or the required results from frontmatter (or the legacy section) under that heading. */
 export function projectPart(project: string, heading: string): string {
   if (heading !== 'Required Results') return projectSection(project, heading);
@@ -265,7 +346,7 @@ export function projectPart(project: string, heading: string): string {
 function frontmatterLine(data: Record<string, any>): string {
   const parts: string[] = [];
   for (const key of ['type', 'status', 'idea_kind', 'target_asset', 'refutes', 'outcome']) if (data[key] !== undefined) parts.push(`${key}: ${String(data[key])}`);
-  for (const key of ['depends_on', 'uses_definitions', 'inspired_by']) if (list(data[key]).length) parts.push(`${key}: [${list(data[key]).join(', ')}]`);
+  for (const key of ['depends_on', 'uses_definitions', 'inspired_by', 'adapts']) if (list(data[key]).length) parts.push(`${key}: [${list(data[key]).join(', ')}]`);
   if (data.source?.kind) parts.push(`source: ${data.source.kind}${data.source.paper_id ? ` ${data.source.paper_id}` : ''}${data.source.location ? ` (${data.source.location})` : ''}`);
   return parts.join('; ');
 }

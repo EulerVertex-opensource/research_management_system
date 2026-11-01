@@ -21,6 +21,7 @@ const STAGE_TEXT: Record<string, string> = {
   verify_construction: 'checking a candidate for {result}',
   plan: 'planning a proof of {result}',
   execute: 'proving {result}',
+  verify_proof: 'checking the proof of {result}',
   waiting: 'stopped until you act',
   ready: 'done with every main result',
 };
@@ -41,6 +42,7 @@ export function parkLabel(reason: string): string {
   if (reason === 'search_exhausted') return 'Search ran out';
   if (reason === 'counterexample_pending') return 'On hold';
   if (reason === 'researcher') return 'Set aside by you';
+  if (reason === 'agent_gave_up') return 'Set aside by the agent';
   return 'Set aside';
 }
 
@@ -48,6 +50,7 @@ export function parkClause(reason: string, failedPlans = 0): string {
   if (reason === 'search_exhausted') return 'because its search ran out without a match';
   if (reason === 'counterexample_pending') return 'while a possible counterexample waits for you';
   if (reason === 'researcher') return 'by you';
+  if (reason === 'agent_gave_up') return 'by the agent, working on its own, after its attempts ran out';
   if (reason === 'three_failures') return failedPlans ? `after ${failedPlans} failed proof attempt${failedPlans > 1 ? 's' : ''}` : 'after repeated failed proof attempts';
   return reason ? `(${reason.replace(/_/g, ' ')})` : '';
 }
@@ -149,3 +152,14 @@ export const CONTINUE_PROMPT = 'Continue the research loop: run research-loop ne
 
 /** Tooltip of every button that copies an instruction for the agent chat. */
 export const CHAT_BUTTON_HINT = 'Copies an instruction and opens the agent chat; paste it there.';
+
+/** The two ways on from a set-aside result: the researcher's own idea, or back to the agent unchanged (unpark). */
+export function newIdeaLabel(reason: string): string {
+  return reason === 'search_exhausted' ? 'Discuss a new direction' : 'Give the agent an idea';
+}
+
+export function keepTryingLabel(reason: string): string {
+  return reason === 'search_exhausted' ? 'Let the agent keep searching' : 'Let the agent keep trying';
+}
+
+export const KEEP_TRYING_HINT = 'No new idea from you: it goes back in the agent’s queue, and the agent tries again on its own, knowing what failed before.';

@@ -19,6 +19,8 @@ export const LOOP_NUMBER_KEYS = [
   'refuteWidth', 'refuteRounds',
   'constructWidth', 'constructRounds', 'constructMaxCandidates', 'specialDirectionsFromRound',
   'candidatesPerWorker', 'boardObstructions', 'boardNearMisses', 'requestedSearchRounds',
+  'autonomyBudget', 'autonomyHours', 'autonomyRevisions',
+  'studyAhead',
 ] as const;
 export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
 
@@ -31,6 +33,8 @@ export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
 export const RIGOR_OPTIONS = {
   /** Counterexample search before a proof: every result, main results only, or none. */
   refuteSearch: ['all', 'main', 'off'],
+  /** A proof the loop wrote: an independent agent verifies it before approval, the researcher verifies every one (never approved automatically), or neither. */
+  verifyProofs: ['agent', 'researcher', 'off'],
   /** The definitions main results use must be agreed before any proof work, or are checked at the end. */
   agreeDefinitions: ['main', 'off'],
   /** When a statement or definition a result rests on changes: send everything downstream back to review, or mark it for re-check. */
@@ -46,7 +50,14 @@ export type RigorKey = keyof typeof RIGOR_OPTIONS;
 export const RIGOR_KEYS = Object.keys(RIGOR_OPTIONS) as RigorKey[];
 export type RigorPolicy = { [K in RigorKey]: (typeof RIGOR_OPTIONS)[K][number] };
 
-export type LoopSettings = { version: 1; autoApprove: AutoApprovePolicy; rigor: RigorPolicy } & Record<LoopNumberKey, number>;
+/**
+ * Autonomous mode: the agent never asks the researcher, decides every question
+ * itself, spends `autonomyBudget` attempts (and at most `autonomyHours`), then
+ * hands the loop back. It applies every auto-approve rule while it is on.
+ */
+export interface AutonomyPolicy { enabled: boolean }
+
+export type LoopSettings = { version: 1; autoApprove: AutoApprovePolicy; rigor: RigorPolicy; autonomy: AutonomyPolicy } & Record<LoopNumberKey, number>;
 
 export type ProviderSetting = 'auto' | 'claude' | 'codex';
 export type AutoPullMode = 'pull' | 'notify' | 'off';
@@ -75,7 +86,7 @@ export interface SettingsPayload {
 /** A partial update; `null` clears an optional field (or resets a budget to its default). */
 export interface SettingsPatch {
   agent?: { provider?: ProviderSetting; useDefaultOnStart?: boolean };
-  loop?: { autoApprove?: Partial<AutoApprovePolicy>; rigor?: Partial<RigorPolicy> } & Partial<Record<LoopNumberKey, number>>;
+  loop?: { autoApprove?: Partial<AutoApprovePolicy>; rigor?: Partial<RigorPolicy>; autonomy?: Partial<AutonomyPolicy> } & Partial<Record<LoopNumberKey, number>>;
   sync?: {
     autoPull?: AutoPullMode;
     autoPullIntervalMinutes?: number;

@@ -9,7 +9,8 @@ import { FileService } from './FileService';
 import { ProjectPaths } from '../models/types';
 import { ResearchLoopCore } from './ResearchLoopCore';
 import { AGENT_PROVIDERS, PROVIDER_IDS, allChatHints, chatHint, invocation } from './AgentProviders';
-import { AgentProvider, ApprovalKind, BRIDGE_PATH, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { AGENT_PATH, AgentProvider, ApprovalKind, BRIDGE_PATH, EXTENSION_ID, BRIDGE_REGISTRY, BridgeEntry, LOOP_SETTINGS_PATH, LoopState, QuestionKind, STATE_PATH } from './ResearchLoopModel';
+import { readAgentActivity } from './AgentActivity';
 import { LoopSettings } from '../models/settings';
 import { normalizeLoopSettings } from '../domain/loopSettings';
 import { readLoopSettings, writeLoopSettings } from './LoopSettingsStore';
@@ -24,15 +25,18 @@ import { ResearchNode } from '../models/types';
 import { GraphAction, GraphPayload, LoopHealth } from '../models/graph';
 import { collectGraphPayload } from './GraphViewModel';
 import { computeLoopHealth, HealthNode } from '../domain/loopHealth';
+import { isTimelineEvent } from '../domain/history';
 import { requiredAssetIds } from '../domain/project';
 import { acceptLabel, approvalTitle } from '../domain/copy';
 import { isCited } from '../domain/schema';
 import { bindingPath, loadImpactNodes, loadProjectRevision, readSectionBriefFile, sectionTexPath } from './ManuscriptImpactLoader';
 import { parseWritingOutline } from './ManuscriptWriting';
 import { lockBinding } from '../domain/manuscriptImpact';
+import { Teaching } from './Teaching';
+import { LEVEL_HINT, LEVEL_LABEL, UNDERSTANDING_LEVELS, UNDERSTANDING_PATH, UnderstandingLevel, teachPrompt, toLevel } from '../domain/understandingLevels';
 
 function extensionVersion(): string | undefined {
-  return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === 'tianhao.research-management-system')?.packageJSON?.version;
+  return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === EXTENSION_ID)?.packageJSON?.version;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -58,7 +62,7 @@ const AUTO_SYNC_MIN_GAP_MS = 60_000;
 /** How often the loop's health is re-derived, so an agent that went quiet shows up without any file change. */
 const HEALTH_CHECK_MS = 60_000;
 const HEALTH_ICON: Record<LoopHealth['key'], string> = {
-  idle: '$(beaker)', goals: '$(bell)', working: '$(sync~spin)', needs_you: '$(bell)', set_aside: '$(warning)', stopped: '$(error)', stalled: '$(debug-disconnect)', paused: '$(debug-pause)', done: '$(check)',
+  idle: '$(beaker)', goals: '$(bell)', working: '$(sync~spin)', needs_you: '$(bell)', set_aside: '$(warning)', stopped: '$(error)', stalled: '$(debug-disconnect)', agent_idle: '$(debug-disconnect)', paused: '$(debug-pause)', done: '$(check)',
 };
 
 /**
@@ -74,6 +78,8 @@ export class LoopHost implements vscode.Disposable {
   private readonly statusBar: vscode.StatusBarItem;
   private watcher: vscode.FileSystemWatcher | undefined;
   private settingsWatcher: vscode.FileSystemWatcher | undefined;
+  private agentWatcher: vscode.FileSystemWatcher | undefined;
+  private understandingWatcher: vscode.FileSystemWatcher | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
   private busy: Promise<unknown> = Promise.resolve();
   private readonly interactions = new Map<string, Promise<ToolResult>>();
@@ -108,6 +114,7 @@ export class LoopHost implements vscode.Disposable {
   /** Questions whose popup is still open, so the health check neither shows a second one nor resolves them behind it. */
   private readonly openQuestions = new Set<string>();
   private openOverviewHandler: (() => Promise<void>) | undefined;
+  private showNodeHandler: ((id: string) => Promise<void>) | undefined;
 
   constructor(private readonly files: FileService, private readonly output: vscode.OutputChannel, private readonly memento?: vscode.Memento) {
     this.git = new LoopGit(new NodeGitRunner(files.rootUri.fsPath));
@@ -132,6 +139,15 @@ export class LoopHost implements vscode.Disposable {
     this.settingsWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, LOOP_SETTINGS_PATH));
     const settingsRefresh = () => { void this.guardLoopSettings().then(() => { this.settingsChanged.fire(); this.stateChanged.fire(); }); };
     this.settingsWatcher.onDidChange(settingsRefresh); this.settingsWatcher.onDidCreate(settingsRefresh); this.settingsWatcher.onDidDelete(settingsRefresh);
+    // The agent writes this on its tool calls: redraw only when the health it implies changes.
+    this.agentWatcher?.dispose();
+    this.agentWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, AGENT_PATH));
+    const agentRefresh = () => { void this.refreshStatusBar(); };
+    this.agentWatcher.onDidChange(agentRefresh); this.agentWatcher.onDidCreate(agentRefresh); this.agentWatcher.onDidDelete(agentRefresh);
+    // The researcher's marks, from a popup, the dashboard, or their terminal.
+    this.understandingWatcher?.dispose();
+    this.understandingWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(this.files.rootUri, UNDERSTANDING_PATH));
+    this.understandingWatcher.onDidChange(refresh); this.understandingWatcher.onDidCreate(refresh); this.understandingWatcher.onDidDelete(refresh);
     if (first) void this.migrateLoopSettings().then(() => this.guardLoopSettings());
     void this.startBridge();
     void this.refreshStatusBar();
@@ -141,6 +157,9 @@ export class LoopHost implements vscode.Disposable {
 
   /** Where node titles come from (the dashboard's node index), for the status bar and popups. */
   setNodeSource(source: () => ResearchNode[]): void { this.nodeSource = source; }
+
+  /** How to show one node's page in the dashboard; set by the dashboard. */
+  setNodeHandler(handler: (id: string) => Promise<void>): void { this.showNodeHandler = handler; }
 
   /** How to show the Overview; set by the dashboard. */
   setOverviewHandler(handler: () => Promise<void>): void { this.openOverviewHandler = handler; }
@@ -155,6 +174,8 @@ export class LoopHost implements vscode.Disposable {
     if (this.healthTimer) clearInterval(this.healthTimer);
     this.watcher?.dispose();
     this.settingsWatcher?.dispose();
+    this.agentWatcher?.dispose();
+    this.understandingWatcher?.dispose();
     this.settingsChanged.dispose();
     this.synced.dispose();
     this.statusBar.dispose();
@@ -183,16 +204,16 @@ export class LoopHost implements vscode.Disposable {
       if (!core.current) return [] as string[];
       await core.event('settings_changed', { changed });
       if (next.iterationCap !== previous.iterationCap) await core.setIterationCap(next.iterationCap);
-      return next.autoApprove.enabled ? core.autoApproveQueued() : [];
+      return next.autoApprove.enabled || next.autonomy.enabled ? core.autoApproveQueued() : [];
     });
-    if (granted.length) this.output.appendLine(`[loop] Auto mode accepted ${granted.length} waiting item(s): ${granted.map((item) => item.split(':')[1]).join(', ')}`);
+    if (granted.length) this.output.appendLine(`[loop] Approved ${granted.length} waiting item(s) automatically: ${granted.map((item) => item.split(':')[1]).join(', ')}`);
   }
 
   /** Requests waiting for the researcher, and the latest approvals auto mode granted; for the Settings view. */
   async approvalSummary(): Promise<{ queued: number; recentAuto: Array<{ at: string; kind: string; target: string }> }> {
     if (!this.core) return { queued: 0, recentAuto: [] };
     let state: LoopState | undefined;
-    try { state = await this.core.load(); } catch { state = undefined; }
+    try { state = await this.core.peek(); } catch { state = undefined; }
     const recentAuto = (await this.core.recentEvents(1000)).filter((event) => event.type === 'auto_approved').slice(-10).reverse()
       .map((event) => ({ at: String(event.at ?? ''), kind: String(event.kind ?? ''), target: String(event.target ?? '') }));
     return { queued: state?.approvalQueue.length ?? 0, recentAuto };
@@ -212,19 +233,19 @@ export class LoopHost implements vscode.Disposable {
   }
 
   /**
-   * Auto mode is turned on only from the dashboard. If the file was changed by
-   * something else (an agent bypassing the hook, say) and now enables auto mode, turn it off.
+   * Auto mode and autonomous mode are turned on only from the dashboard. If the file was changed by
+   * something else (an agent bypassing the hook, say) and now enables either, turn it off.
    */
   private async guardLoopSettings(): Promise<void> {
     if (!this.memento) return;
     const text = await this.files.readFile(LOOP_SETTINGS_PATH).catch(() => undefined);
     if (text === undefined || sha256(text) === this.memento.get<string>(SETTINGS_HASH_KEY)) return;
     const { settings } = await readLoopSettings(this.files);
-    if (!settings.autoApprove.enabled) return;
-    const repaired = { ...settings, autoApprove: { ...settings.autoApprove, enabled: false } };
+    if (!settings.autoApprove.enabled && !settings.autonomy.enabled) return;
+    const repaired = { ...settings, autoApprove: { ...settings.autoApprove, enabled: false }, autonomy: { enabled: false } };
     const written = await writeLoopSettings(this.files, repaired);
     await this.memento.update(SETTINGS_HASH_KEY, sha256(written));
-    this.output.appendLine('[loop] Auto mode was enabled outside the dashboard; turned it off.');
+    this.output.appendLine('[loop] Automatic approval was enabled outside the dashboard; turned it off.');
     if (this.core?.current) await this.core.event('auto_mode_reset').catch(() => undefined);
   }
 
@@ -316,6 +337,10 @@ export class LoopHost implements vscode.Disposable {
     const total = (await readLoopSettings(this.files)).settings.questionTimeoutSeconds;
     const slice = sliceSeconds(args.wait_seconds);
     if (name === 'ask_researcher') {
+      // Autonomous mode: the researcher is away, so nothing pops up and the agent decides at once.
+      const alone = await this.withCore(async (core) => (await core.loopSettings()).autonomy.enabled && core.current?.status === 'running'
+        ? core.decideAlone((args.kind as QuestionKind) ?? 'discussion', String(args.question ?? ''), typeof args.asset_id === 'string' ? args.asset_id : undefined) : undefined);
+      if (alone !== undefined) return { status: 'final', answered: false, reason: 'autonomous', auto_action: alone };
       const question = await this.withCore((core) => core.askQuestion((args.kind as QuestionKind) ?? 'discussion', String(args.question ?? ''), { assetId: typeof args.asset_id === 'string' ? args.asset_id : undefined, options: Array.isArray(args.options) ? args.options.map(String) : undefined, timeoutSec: total }));
       this.interactions.set(question.id, this.askResearcher(question.id, question.prompt, question.kind, question.options, total));
       return this.awaitInteraction(question.id, slice);
@@ -325,15 +350,22 @@ export class LoopHost implements vscode.Disposable {
       const outcome = await this.withCore((core) => core.requestApproval(kind, target, summary));
       if (outcome.status !== 'queued' || !outcome.request) return { status: 'final', answered: true, decision: 'approved', auto: outcome.status === 'auto_approved', note: outcome.status === 'auto_approved' ? 'Approved automatically (auto mode, set by the researcher).' : 'Already approved; nothing to do.' };
       const request = outcome.request;
+      // Autonomous mode: nobody reviews it until the loop hands back, so the agent does not wait for it.
+      if ((await readLoopSettings(this.files)).settings.autonomy.enabled) return { status: 'final', answered: false, request_id: request.id, reason: 'autonomous', note: 'Queued for the researcher, who reviews it when the loop hands back; continue with other work.' };
       this.interactions.set(request.id, this.requestApproval(request.id, kind, target, summary, total));
       return this.awaitInteraction(request.id, slice);
     }
     if (name === 'await_answer') return this.awaitInteraction(String(args.id ?? ''), slice);
+    if (name === 'mark_understood') {
+      const id = `understand_${crypto.randomBytes(6).toString('hex')}`;
+      this.interactions.set(id, this.askUnderstanding(String(args.target ?? ''), toLevel(args.suggested), typeof args.note === 'string' ? args.note : undefined));
+      return this.awaitInteraction(id, slice);
+    }
     if (name === 'record_idea') {
       const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
-      return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], 'agent', tags, toIdeaKind(args.kind, tags)) }));
+      return this.withCore(async (core) => ({ ok: true, idea_id: await core.saveIdea(String(args.title ?? ''), String(args.body ?? ''), Array.isArray(args.related_assets) ? args.related_assets.map(String) : [], args.origin === 'researcher' ? 'researcher' : 'agent', tags, toIdeaKind(args.kind, tags)) }));
     }
-    if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary(), brief: core.briefStatus() }));
+    if (name === 'loop_status') return this.withCore(async (core) => ({ ok: true, state: core.statusSummary({ recentParked: 3 }), brief: core.briefStatus() }));
     if (name === 'confirm_publish') return { confirmed: await this.confirmPublish(String(args.detail ?? '')) };
     return { answered: false, reason: `unknown tool ${name}` };
   }
@@ -397,6 +429,45 @@ export class LoopHost implements vscode.Disposable {
     return { answered: true, question_id: question.id, decision: 'answer', text: outcome.text };
   }
 
+  /** The teaching chat asks how well the researcher now knows a result; only their pick is recorded. */
+  private async askUnderstanding(target: string, suggested: UnderstandingLevel | undefined, note: string | undefined): Promise<ToolResult> {
+    const teaching = this.teaching();
+    const item = (await teaching.overview()).items.find((entry) => entry.id === target);
+    if (!item) return { answered: false, reason: `${target} is not a verified result; only verified results are marked.` };
+    const picked = await this.pickLevel(item.title, item.level, suggested ?? item.suggested, note);
+    if (!picked) return { answered: false, reason: 'dismissed', note: 'The researcher did not mark it; carry on teaching.' };
+    await teaching.mark(target, picked, { note, at: new Date().toISOString() });
+    this.stateChanged.fire();
+    return { answered: true, level: picked === 'none' ? 'none' : picked, note: picked === 'none' ? 'The researcher cleared their mark.' : `Recorded: ${LEVEL_LABEL[picked]}.` };
+  }
+
+  private async pickLevel(title: string, current: UnderstandingLevel | undefined, suggested: UnderstandingLevel, note?: string): Promise<UnderstandingLevel | 'none' | undefined> {
+    const items = [
+      ...[suggested, ...UNDERSTANDING_LEVELS.filter((level) => level !== suggested)].map((level) => ({ label: LEVEL_LABEL[level], description: `${LEVEL_HINT[level]}${level === current ? ' (your mark now)' : ''}`, level: level as UnderstandingLevel | 'none' })),
+      ...(current ? [{ label: 'Forget my mark', description: 'Show it as new to me again.', level: 'none' as const }] : []),
+    ];
+    const picked = await vscode.window.showQuickPick(items, { title: `Research Assistant · How well do you know “${title}” now?`, placeHolder: note ? `Your summary: ${note}` : 'Only you decide this; it stays on this computer.', ignoreFocusOut: true });
+    return picked?.level;
+  }
+
+  /** Verified results new to the researcher or changed since they studied them; 0 when that cannot be read. */
+  private async studyBehind(): Promise<number> {
+    if (!this.paths) return 0;
+    try { return (await this.teaching().overview()).behind; } catch { return 0; }
+  }
+
+  private teaching(): Teaching {
+    if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
+    return new Teaching(this.files, this.paths);
+  }
+
+  /** Open the agent chat for a teaching conversation: the prompt is copied, since a new chat is the researcher's to start. */
+  async teachCommand(target?: { id: string; title: string }): Promise<void> {
+    await vscode.env.clipboard.writeText(teachPrompt(target));
+    await this.openChat(this.core?.current?.provider);
+    vscode.window.setStatusBarMessage('$(book) Teaching prompt copied: start a new chat beside the loop and paste it', 10000);
+  }
+
   private autoActionText(kind: QuestionKind): string {
     switch (kind) {
       case 'goals': return 'No goal given. Continue only if project.md already has a Main Problem; otherwise wait.';
@@ -450,7 +521,12 @@ export class LoopHost implements vscode.Disposable {
     const rejectLabel = kind === 'counterexample' ? 'Not a counterexample…' : 'Ask for changes…';
     for (;;) {
       const choice = await vscode.window.showInformationMessage(`${approvalTitle(kind, node?.title || target, node?.type ?? '', node?.origin === 'library')}${summary ? `: ${summary}` : ''}`, 'Open', approveLabel, rejectLabel, 'Later');
-      if (choice === 'Open') { await vscode.window.showTextDocument(this.files.resolve(file)); continue; }
+      if (choice === 'Open') {
+        // A result opens on its dashboard page, like the links in the chat; the project file has none.
+        if (kind !== 'project' && this.showNodeHandler) await this.showNodeHandler(target);
+        else await vscode.window.showTextDocument(this.files.resolve(file));
+        continue;
+      }
       if (choice === approveLabel) return { decision: 'approved', text: '' };
       if (choice === rejectLabel) {
         const text = await vscode.window.showInputBox({ title: `Research Assistant · ${rejectLabel.replace('…', '')}: ${node?.title || target}`, prompt: kind === 'counterexample' ? 'Why is it not a counterexample?' : 'What should change?', ignoreFocusOut: true });
@@ -466,11 +542,27 @@ export class LoopHost implements vscode.Disposable {
     if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
     const paths = this.paths;
     let state: LoopState | undefined;
-    try { state = await this.core?.load(); } catch { state = undefined; }
-    const events = this.core ? await this.core.recentEvents(80) : [];
+    try { state = await this.core?.peek(); } catch { state = undefined; }
+    // Filtered before the limit: a stage that reads many nodes logs a context_request each, which the timeline does not show.
+    const events = this.core ? await this.core.recentEvents(80, isTimelineEvent) : [];
     const recheck = this.core ? await this.core.recheckFlags() : {};
     const payload = await collectGraphPayload(this.files, paths, nodes, state, events, recheck);
-    payload.autoMode = (await readLoopSettings(this.files)).settings.autoApprove.enabled;
+    const loopSettings = (await readLoopSettings(this.files)).settings;
+    payload.autoMode = loopSettings.autoApprove.enabled || loopSettings.autonomy.enabled;
+    if (this.core && state) {
+      payload.autonomy = await this.core.autonomySummary(state);
+      const agentGoals = new Set(await this.core.agentGoals());
+      for (const node of payload.nodes) if (node.required && agentGoals.has(node.id)) node.agentGoal = true;
+    }
+    try {
+      const study = await this.teaching().overview();
+      const items = new Map(study.items.map((item) => [item.id, item]));
+      for (const node of payload.nodes) {
+        const item = items.get(node.id);
+        if (item) node.understanding = { state: item.state, ...(item.level ? { level: item.level } : {}), suggested: item.suggested };
+      }
+      payload.study = { behind: study.behind, total: study.items.length };
+    } catch (error: unknown) { this.output.appendLine(`[teach] Could not read what you studied: ${String(error)}`); }
     if (this.pendingUpstream) {
       const { ref, behind, reason } = this.pendingUpstream;
       payload.attention.push({
@@ -518,6 +610,16 @@ export class LoopHost implements vscode.Disposable {
         const document = await vscode.workspace.openTextDocument(this.files.resolve(sectionTexPath(paths, request.section)));
         const line = Math.max(0, (request.line ?? 1) - 1);
         await vscode.window.showTextDocument(document, { selection: new vscode.Range(line, 0, line, 0) });
+        return;
+      }
+      case 'understand': {
+        await this.teaching().mark(request.id, request.level, { at: new Date().toISOString() });
+        this.stateChanged.fire();
+        return;
+      }
+      case 'teach': {
+        const node = request.id ? this.nodeSource?.().find((item) => item.id === request.id) : undefined;
+        await this.teachCommand(request.id ? { id: request.id, title: node?.title || request.id } : undefined);
         return;
       }
       case 'agent': {
@@ -573,13 +675,14 @@ export class LoopHost implements vscode.Disposable {
     const nodes = new Map<string, HealthNode>(all.map((node) => [node.id, { title: node.title || node.id, type: node.type, ...(typeof node.refutes === 'string' ? { refutes: node.refutes } : {}), counts: { failedPlans: failed.get(node.id) ?? 0 }, ...(node.origin === 'library' || isCited(node.source) ? { cited: true } : {}) }]));
     const edges = all.flatMap((node) => [...(node.depends_on ?? []), ...(node.uses_definitions ?? [])].map((to) => ({ from: node.id, to })));
     const project = this.paths ? await this.files.readFile(this.paths.projectMd).catch(() => '') : '';
-    return computeLoopHealth({ state, nodes, edges, required: requiredAssetIds(project), now: new Date().toISOString() });
+    const agent = await readAgentActivity(this.files);
+    return computeLoopHealth({ state, agent, nodes, edges, required: requiredAssetIds(project), now: new Date().toISOString() });
   }
 
   private async refreshStatusBar(): Promise<void> {
     if (!this.core) { this.statusBar.hide(); return; }
     let state: LoopState | undefined;
-    try { state = await this.core.load(); } catch { state = undefined; }
+    try { state = await this.core.peek(); } catch { state = undefined; }
     if (state?.pendingQuestion && !this.openQuestions.has(state.pendingQuestion.id) && !this.resolving) {
       // A question the loop raised itself (no popup is waiting on it): resolve it once overdue, per the researcher's setting.
       this.resolving = true;
@@ -590,12 +693,22 @@ export class LoopHost implements vscode.Disposable {
     if (this.lastHealthKey !== undefined && this.lastHealthKey !== health.signature) this.stateChanged.fire();
     this.lastHealthKey = health.signature;
     void this.announce(health, state);
-    if (health.key === 'idle') { this.statusBar.hide(); return; }
-    this.statusBar.text = `${HEALTH_ICON[health.key]} ${health.statusBar.text}`;
+    const behind = await this.studyBehind();
+    const study = behind ? `${behind} verified result${behind === 1 ? '' : 's'} new to you: run “Research Assistant: Study Verified Results” to go through them in a teaching chat.` : '';
+    if (health.key === 'idle') {
+      if (!behind) { this.statusBar.hide(); return; }
+      this.statusBar.text = `$(book) ${behind} to study`;
+      this.statusBar.backgroundColor = undefined;
+      this.statusBar.command = 'research-assistant.loop.teach';
+      this.statusBar.tooltip = study;
+      this.statusBar.show();
+      return;
+    }
+    this.statusBar.text = `${HEALTH_ICON[health.key]} ${health.statusBar.text}${behind ? ` · $(book) ${behind} to study` : ''}`;
     this.statusBar.backgroundColor = health.statusBar.level === 'error' ? new vscode.ThemeColor('statusBarItem.errorBackground')
       : health.statusBar.level === 'warning' ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
     this.statusBar.command = 'research-assistant.openOverview';
-    this.statusBar.tooltip = new vscode.MarkdownString([`**${health.headline}**`, health.body, ...health.blockers.map((item, index) => `${index + 1}. ${item.title}`), `*If you do nothing:* ${health.ifIgnored}`, 'Click to open the Overview.'].filter(Boolean).join('\n\n'));
+    this.statusBar.tooltip = new vscode.MarkdownString([`**${health.headline}**`, health.body, ...health.blockers.map((item, index) => `${index + 1}. ${item.title}`), `*If you do nothing:* ${health.ifIgnored}`, study, 'Click to open the Overview.'].filter(Boolean).join('\n\n'));
     this.statusBar.show();
   }
 
@@ -617,7 +730,7 @@ export class LoopHost implements vscode.Disposable {
       await this.withCore((core) => core.answerQuestion(question.id, outcome.decision === 'answer' ? 'answer' : 'skip', outcome.text, 'popup'));
       return;
     }
-    const alerting = health.key === 'stopped' || health.key === 'stalled' || (health.key === 'paused' && /automatic continuations/.test(health.headline));
+    const alerting = health.key === 'stopped' || health.key === 'stalled' || (health.key === 'paused' && /automatic continuations|autonomous run/.test(health.headline));
     if (!alerting) { this.alerted = undefined; return; }
     if (this.alerted === health.signature) return;
     this.alerted = health.signature;
@@ -629,6 +742,11 @@ export class LoopHost implements vscode.Disposable {
         const action = health.buttons[0]?.action;
         if (action) await this.graphAction(action);
       } else if (choice === overview) await this.openOverview();
+      return;
+    }
+    if (health.key === 'paused' && /autonomous run/.test(health.headline)) {
+      const choice = await vscode.window.showWarningMessage(`${health.headline} ${health.body}`, overview, 'Later');
+      if (choice === overview) await this.openOverview();
       return;
     }
     if (health.key === 'paused') {

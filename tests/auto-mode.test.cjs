@@ -26,7 +26,8 @@ const plan = (id, status = 'pending', difference = '') => matter.stringify(`\n##
 const succeeded = (id) => matter.stringify('\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [x] Apply reflexivity.\n\n## Verification\n\nCheck the equality.\n\n## Outcome\n\nProof incorporated into main_theorem.\n', { type: 'plan', title: id, status: 'succeeded', target_asset: 'main_theorem', inspired_by: [], tags: [] });
 const check = (target = 'main_theorem') => matter.stringify('\n## Cases checked\n\n- n = 0 and n = 1\n\n## Limitations\n\nOnly small cases.\n', { type: 'falsification_check', title: `Check ${target}`, target_asset: target, outcome: 'no_counterexample_found' });
 const SETTINGS = '.research-assistant-loop/settings.json';
-const auto = (rules = {}, extra = {}) => JSON.stringify({ version: 1, autoApprove: { enabled: true, ...rules }, ...extra });
+// Proofs go straight to approval here; the independent check has its own tests (verify-proof.test.cjs).
+const auto = (rules = {}, extra = {}) => JSON.stringify({ version: 1, autoApprove: { enabled: true, ...rules }, rigor: { verifyProofs: 'off' }, ...extra });
 
 function memoryFiles(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -42,7 +43,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 function fixture(initial = {}, options = { iterationCap: 5 }) {
-  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', ...initial });
+  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, rigor: { verifyProofs: 'off' } }), ...initial });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, ...options });
   return { files, core, map: files.map };
 }
@@ -146,7 +147,7 @@ test('auto approvals in one selection are followed by a fresh one: supporting re
 test('a kind switched off stays with the researcher', async () => {
   // Checked at the end (Fast): the definition comes to the researcher once the proof is in.
   const f = fixture();
-  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off' } }));
+  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off', verifyProofs: 'off' } }));
   await driveToFalsify(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   await prove(f);
   assert.equal((await f.core.next()).stage, 'waiting');
@@ -181,6 +182,37 @@ test('auto mode on project goals skips review_project; off by default', async ()
   const result = await on.core.report({ outcome: 'complete', summary: 'Drafted' });
   assert.equal(result.stage, 'select');
   assert.equal((await on.core.next()).stage, 'scaffold');
+});
+
+test('a state reload during an auto approval does not re-approve the project forever', async () => {
+  const f = fixture();
+  f.map.set(SETTINGS, auto({ project: true }));
+  await f.core.start('claude', { goal: 'Prove it.' });
+  f.map.set(paths.projectMd, project);
+  // A file watcher in the extension reloads the core mid-approval, while state.json still holds the request.
+  const write = f.files.writeFile;
+  let approvalWrites = 0;
+  let reloaded = false;
+  f.files.writeFile = async (file, content) => {
+    await write(file, content);
+    if (file !== 'research/approvals/project.json') return;
+    if (++approvalWrites > 5) throw new Error('project approval rewritten in a loop');
+    if (!reloaded) { reloaded = true; await f.core.load(); }
+  };
+  const result = await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  assert.equal(reloaded, true);
+  assert.equal(approvalWrites, 1);
+  assert.equal(result.stage, 'select');
+  assert.equal(f.core.current.approvalQueue.length, 0);
+});
+
+test('peek reads the state without replacing the one in use', async () => {
+  const f = fixture();
+  await f.core.start('claude', { goal: 'Prove it.' });
+  const inUse = f.core.current;
+  const peeked = await f.core.peek();
+  assert.equal(peeked.runId, inUse.runId);
+  assert.equal(f.core.current, inUse);
 });
 
 test('counterexamples are confirmed automatically only when switched on', async () => {

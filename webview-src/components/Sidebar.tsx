@@ -1,19 +1,13 @@
 import React from 'react';
 import type { SyncBadge } from '../../src/models/sync';
 
-export type SidebarView = 'project' | 'graph' | 'papers' | 'assets' | 'definitions' | 'library' | 'ideas' | 'plans' | 'manuscript' | 'settings';
+export type SidebarView = 'project' | 'graph' | 'needs' | 'results' | 'activity' | 'papers' | 'assets' | 'definitions' | 'library' | 'ideas' | 'plans' | 'manuscript' | 'settings';
 
-// 'graph' is the Overview tab (attention, progress graph, coverage, impact); the id is kept for saved state.
-const ITEMS: { id: SidebarView; label: string }[] = [
-  { id: 'graph', label: 'Overview' },
-  { id: 'project', label: 'Project' },
-  { id: 'definitions', label: 'Definitions' },
-  { id: 'assets', label: 'Assets' },
-  { id: 'library', label: 'Library' },
-  { id: 'plans', label: 'Plans' },
-  { id: 'ideas', label: 'Ideas' },
-  { id: 'papers', label: 'Papers' },
-  { id: 'manuscript', label: 'Manuscript' },
+// 'graph' is the Overview tab; the id is kept for saved state and the extension's "show the Overview" message.
+const GROUPS: { title: string; items: { id: SidebarView; label: string }[] }[] = [
+  { title: 'Work', items: [{ id: 'graph', label: 'Overview' }, { id: 'needs', label: 'Needs you' }, { id: 'results', label: 'Results' }, { id: 'activity', label: 'Activity' }] },
+  { title: 'Research', items: [{ id: 'definitions', label: 'Definitions' }, { id: 'library', label: 'Library' }, { id: 'assets', label: 'Assets' }, { id: 'ideas', label: 'Ideas' }, { id: 'plans', label: 'Plans' }] },
+  { title: 'Writing', items: [{ id: 'papers', label: 'Papers' }, { id: 'manuscript', label: 'Manuscript' }] },
 ];
 
 interface Props {
@@ -23,6 +17,11 @@ interface Props {
   onRefresh: () => void;
   sync: SyncBadge | null;
   onSync: () => void;
+  /** The number on Needs you. */
+  needsCount?: number;
+  /** Problems in the research files; a click shows them. */
+  problems?: number;
+  onProblems?: () => void;
 }
 
 function itemStyle(selected: boolean): React.CSSProperties {
@@ -60,7 +59,7 @@ function syncTitle(sync: SyncBadge | null): string {
   return `Pull collaborators' changes and share yours with ${sync.remote}/${sync.branch}. You confirm before anything is pushed.`;
 }
 
-export function Sidebar({ active, onChange, refreshing, onRefresh, sync, onSync }: Props) {
+export function Sidebar({ active, onChange, refreshing, onRefresh, sync, onSync, needsCount = 0, problems = 0, onProblems }: Props) {
   const syncDisabled = !sync || sync.busy || !sync.available;
   const pending = !!sync?.available && !sync.busy && (sync.conflict || sync.changed > 0 || sync.ahead > 0 || sync.behind > 0);
   return (
@@ -75,15 +74,28 @@ export function Sidebar({ active, onChange, refreshing, onRefresh, sync, onSync 
         background: 'var(--vscode-sideBar-background)',
       }}
     >
-      <div style={{ padding: '8px 12px 12px', fontWeight: 700, fontSize: 11, opacity: 0.5, letterSpacing: 1, textTransform: 'uppercase' }}>
-        Research
-      </div>
-      {ITEMS.map((item) => (
-        <button key={item.id} onClick={() => onChange(item.id)} style={itemStyle(active === item.id)}>
-          {item.label}
-        </button>
+      {GROUPS.map((group) => (
+        <div key={group.title} style={{ marginBottom: 10 }}>
+          <div style={{ padding: '6px 14px 4px', fontWeight: 700, fontSize: 11, opacity: 0.5, letterSpacing: 1, textTransform: 'uppercase' }}>
+            {group.title}
+          </div>
+          {group.items.map((item) => (
+            <button key={item.id} onClick={() => onChange(item.id)} style={{ ...itemStyle(active === item.id), display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>{item.label}</span>
+              {item.id === 'needs' && needsCount > 0 && (
+                <span style={{ marginLeft: 'auto', fontSize: 11, padding: '0 7px', borderRadius: 9, background: 'var(--vscode-badge-background)', color: 'var(--vscode-badge-foreground)' }}>{needsCount}</span>
+              )}
+            </button>
+          ))}
+        </div>
       ))}
       <div style={{ marginTop: 'auto', borderTop: '1px solid var(--vscode-panel-border)', paddingTop: 4 }}>
+        {problems > 0 && (
+          <button onClick={onProblems} title="Something in the research files does not fit together. Click to see what." style={{ ...itemStyle(false), fontSize: 12, color: 'var(--vscode-editorWarning-foreground)' }}>
+            ⚠ {problems === 1 ? '1 file problem' : `${problems} file problems`}
+          </button>
+        )}
+        <button onClick={() => onChange('project')} style={itemStyle(active === 'project')}>Project goals</button>
         <button
           onClick={onRefresh}
           disabled={refreshing}

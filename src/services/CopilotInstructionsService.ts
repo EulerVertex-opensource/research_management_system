@@ -55,7 +55,7 @@ This repository is an Overleaf-compatible LaTeX project and a shared Research As
 ## Research rules
 
 - Ideas use \`type: idea\`, \`status: ${alternatives(IDEA_STATUS_LIST)}\`, \`idea_kind: ${alternatives(IDEA_KIND_LIST)}\`, optional \`related_assets\`, and freeform prose; they need no target or checklist.
-- Plans use \`type: plan\`, \`status: ${alternatives(PLAN_STATUS_LIST)}\`, one \`target_asset\`, optional \`inspired_by\` idea IDs, and Goal, Plan checkboxes, and Verification. Failed means a documented mathematical obstruction under \`## Failure\`, not that the asset is false. Succeeded means the proof is in the asset and \`## Outcome\` says where.
+- Plans use \`type: plan\`, \`status: ${alternatives(PLAN_STATUS_LIST)}\`, one \`target_asset\`, optional \`inspired_by\` idea IDs, optional \`adapts\` result IDs whose proof the plan follows with changes (named under \`## Adapted from\`), and Goal, Plan checkboxes, and Verification. Failed means a documented mathematical obstruction under \`## Failure\`, not that the asset is false. Succeeded means the proof is in the asset and \`## Outcome\` says where.
 - Create a new plan inspired by an idea instead of replacing that idea.
 - When asked to prove an asset, read its pending linked plans, follow and update one plan's checkboxes, and record any mathematical obstruction under Failure. Put a successful proof in the asset, then set the plan status to succeeded with an Outcome.
 - New or materially edited assets and definitions must have \`status: draft\`. Only a researcher promotes them. New ideas start \`draft\`; new plans start \`pending\`.
@@ -100,6 +100,7 @@ status: ${alternatives(NODE_STATUS_LIST)} (assets/definitions); ${alternatives(I
 idea_kind: ${alternatives(IDEA_KIND_LIST)} (ideas)
 target_asset: asset_id (plans)
 inspired_by: [idea_id, ...] (plans)
+adapts: [asset_or_lib_id, ...] (plans)
 tags: [string, ...]
 source:
   kind: ${alternatives(SOURCE_KIND_LIST)}
@@ -143,6 +144,8 @@ Overleaf-compatible LaTeX project plus a shared research knowledge base. Folder 
 - Organizing materials means extracting them: \`import-math-paper\` for each paper PDF, then \`extract-research-nodes\` for results and definitions; loose notes and questions become ideas. A written manuscript (a main TeX that already holds the paper, or a Markdown draft) is extracted into nodes first, then adopted with \`plan-manuscript\` (adopt scope) and \`draft-latex\`; organizing is not finished at the outline. Keep raw files out of the research folders (PDFs in \`${paths.localSourcePdfs}/\`).
 - After changing assets or definitions: \`research-maintenance\` (validate, links), then \`check-notation\`. Links for the files you changed are also applied when your turn ends; review \`links --preview\` for missing relations.
 - Only approved nodes support manuscript arguments; plan with \`plan-manuscript\` and write one section at a time with \`draft-latex\`, then \`revise-manuscript-prose\`.
+- In chat, write the title of a result, definition, plan, or idea you mention as a dashboard link, \`[Title](.research-assistant-loop/open/<id>.md)\`: exactly this relative path with the node's ID, never an absolute path or \`vscode://\`. A click opens its page in the Research Assistant dashboard. Give file links only when the researcher wants the file itself.
+- When the researcher wants to catch up on what was proved, use the \`teach\` skill, best in a new chat beside the loop: it explains verified results only, reads without driving the loop, and the researcher alone marks what they understood (kept locally in \`research-local/understanding.json\`, which agents never write).
 - Share research through the research loop's \`sync\` commands, not raw git pull/push. Do not rename shared files; never commit source PDFs (\`${paths.localSourcePdfs}/\`) or LaTeX build output.
 
 ## Reading context

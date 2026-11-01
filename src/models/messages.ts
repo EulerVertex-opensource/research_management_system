@@ -14,6 +14,8 @@ export type ExtensionMessage =
   | { type: 'graphData'; payload: GraphPayload }
   /** Switch the dashboard to a view, e.g. the Overview after a status bar click. */
   | { type: 'showView'; view: 'graph' }
+  /** Open one node's page, e.g. from a link in the agent chat. */
+  | { type: 'showNode'; id: string }
   /** Current settings; after an update, `requestId` echoes it and `errors` lists invalid fields (nothing was written then). */
   | { type: 'settingsData'; settings: SettingsPayload; requestId?: string; errors?: SettingsErrors }
   /** Answer to `refreshDashboard`, after every panel's data was re-sent. */
@@ -21,6 +23,10 @@ export type ExtensionMessage =
   | { type: 'syncState'; state: SyncBadge }
   /** Outcome of a dashboard sync that needs the researcher's attention. */
   | { type: 'notice'; notice: SyncNotice }
+  /** Problems in the research files themselves (duplicate IDs, dependency order); shown as a quiet note, not an error banner. */
+  | { type: 'problems'; problems: string[] }
+  /** A prompt for the agent chat is on the clipboard: the dashboard says so where the researcher clicked. */
+  | { type: 'copied'; prompt: 'instruction' | 'teaching' }
   | { type: 'error'; message: string };
 
 // Messages sent from the webview to the extension

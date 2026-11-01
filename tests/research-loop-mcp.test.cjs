@@ -42,11 +42,18 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
     const init = await c.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
     assert.equal(init.result.protocolVersion, '2025-03-26');
     const tools = (await c.request('tools/list', {})).result.tools.map((tool) => tool.name);
-    assert.deepEqual(tools, ['ask_researcher', 'request_approval', 'await_answer', 'record_idea', 'loop_status']);
+    assert.deepEqual(tools, ['ask_researcher', 'request_approval', 'await_answer', 'record_idea', 'mark_understood', 'loop_status']);
     assert.deepEqual(await c.call('ask_researcher', { question: 'Goal?', kind: 'goals' }), { answered: false, reason: 'extension not running' });
     const idea = await c.call('record_idea', { title: 'Hunch', body: 'Try compactness.' });
     assert.equal(idea.ok, true);
     assert.match(fs.readFileSync(path.join(p.root, idea.path), 'utf8'), /origin: agent/);
+    // The teaching chat records the researcher's own doubts as theirs.
+    const doubt = await c.call('record_idea', { title: 'Step 4?', body: 'I do not see why the constant is uniform.', kind: 'risk', origin: 'researcher' });
+    assert.match(fs.readFileSync(path.join(p.root, doubt.path), 'utf8'), /origin: researcher/);
+    // Without VS Code nothing is marked; the researcher is told how to do it themselves.
+    const mark = await c.call('mark_understood', { target: 'key_lemma', suggested: 'idea' });
+    assert.equal(mark.answered, false);
+    assert.match(mark.note, /teach mark key_lemma --level idea --interactive/);
     assert.equal((await c.call('loop_status', {})).state.status, 'idle');
     const unknown = await c.request('nope', {});
     assert.equal(unknown.error.code, -32601);

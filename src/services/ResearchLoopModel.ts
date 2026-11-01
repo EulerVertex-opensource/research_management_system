@@ -17,7 +17,7 @@ export type AgentProvider = 'claude' | 'codex';
 export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
-  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'waiting' | 'ready';
+  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'waiting' | 'ready';
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification';
@@ -27,6 +27,8 @@ export const REPORT_OUTCOMES: readonly ReportOutcome[] = ['complete', 'none', 'c
 export const SEARCH_STAGES: ReadonlySet<LoopStage> = new Set<LoopStage>(['search', 'search_summary', 'verify_counterexample', 'verify_construction']);
 
 export const STATE_DIR = '.research-assistant-loop';
+/** Loop state is rewritten by several processes (extension, MCP bridges, CLI) while others read it, so it is replaced atomically. */
+export const isLoopStatePath = (relativePath: string) => relativePath.replace(/\\/g, '/').startsWith(`${STATE_DIR}/`);
 export const STATE_PATH = `${STATE_DIR}/state.json`;
 export const EVENTS_PATH = `${STATE_DIR}/events.jsonl`;
 export const SNAPSHOT_PATH = `${STATE_DIR}/snapshot.json`;
@@ -34,6 +36,8 @@ export const BRIDGE_PATH = `${STATE_DIR}/bridge.json`;
 /** The current stage's compiled context pack and its manifest (files it covers, token estimate). */
 export const CONTEXT_PACK_PATH = `${STATE_DIR}/context/current.md`;
 export const CONTEXT_MANIFEST_PATH = `${STATE_DIR}/context/current.json`;
+/** The full gap report of an autonomous reassessment of the goals; the instruction carries only its lead. */
+export const ASSESSMENT_PATH = `${STATE_DIR}/context/assessment.md`;
 /** Local sync bookkeeping (conflict in progress, last prepare); never committed. */
 export const SYNC_PATH = `${STATE_DIR}/sync.json`;
 /**
@@ -42,6 +46,8 @@ export const SYNC_PATH = `${STATE_DIR}/sync.json`;
  * because an older engine misreads newer files (e.g. split approvals).
  */
 export const DRIVER_PATH = `${STATE_DIR}/driver.json`;
+/** Whether an agent is in a turn right now; written only from the agent's side (see AgentActivity). */
+export const AGENT_PATH = `${STATE_DIR}/agent.json`;
 /** Local loop policy (auto mode, limits) the researcher sets in the dashboard; the agent may not write it. */
 export const LOOP_SETTINGS_PATH = `${STATE_DIR}/settings.json`;
 /** Results auto mode must leave to the researcher, e.g. after a dependency changed under an approval. */
@@ -49,10 +55,35 @@ export const AUTO_HOLDS_PATH = `${STATE_DIR}/auto-holds.json`;
 /** User-level registry of running extension bridges, so a globally registered MCP server can find the project. */
 export const BRIDGE_REGISTRY = ['.research-assistant', 'bridges.json'];
 export interface BridgeEntry { root: string; port: number; token: string; pid: number; startedAt: string }
+export const EXTENSION_ID = 'tianhao.research-management-system';
+/**
+ * Chat links that open a node's page in the dashboard. Agent chats render only
+ * web links and file paths (Codex drops vscode:// links), so a link points at a
+ * small local file per node; when an editor opens one, the extension closes it
+ * and shows the node in the dashboard. Without the extension, the file names
+ * the node's own file.
+ */
+export const DASHBOARD_LINKS_DIR = `${STATE_DIR}/open`;
+export const dashboardLinkPath = (id: string) => `${DASHBOARD_LINKS_DIR}/${id}.md`;
+export const dashboardLinkStub = (title: string, file: string) =>
+  `# ${title}\n\nOpening this in the Research Assistant dashboard. If nothing happened, the Research Assistant extension is not running in this window; the file itself is ${file}.\n`;
+/** Write the link file of each node that lacks one or names another title or file; returns how many were written. */
+export async function writeDashboardLinks(files: LoopFiles, nodes: Array<{ id: string; title: string; file: string }>): Promise<number> {
+  let written = 0;
+  for (const node of nodes) {
+    const stub = dashboardLinkStub(node.title, node.file);
+    if ((await files.readFile(dashboardLinkPath(node.id)).catch(() => undefined)) === stub) continue;
+    await files.writeFile(dashboardLinkPath(node.id), stub);
+    written++;
+  }
+  return written;
+}
 
 export interface LoopFiles {
   readFile(relativePath: string): Promise<string>;
   writeFile(relativePath: string, content: string): Promise<void>;
+  /** Append without reading the file back, so writers in other processes never lose lines. */
+  appendFile?(relativePath: string, content: string): Promise<void>;
   exists(relativePath: string): Promise<boolean>;
   listFiles(relativeDir: string, extension?: string): Promise<string[]>;
   /** Immediate subfolders (paths relative to the project); used to discover library collections. */
@@ -83,10 +114,17 @@ export interface ApprovalRequest { id: string; kind: ApprovalKind; target: strin
 export interface ResearcherInput { kind: string; text: string; at: string }
 /** A new goal added to an approved project; baselineRequired are the required results that must be kept, except retired ones (since deprecated or archived). */
 export interface LoopExtension { goal: string; at: string; baselineRequired: string[]; retired?: string[]; projectApproved?: boolean; newResults?: string[] }
+/**
+ * An autonomous reassessment of the goals: what was proved and set aside (`id@parkedAt`) when it
+ * began, the leading set-aside results it offered, the results the agent brought back, and the
+ * agent's first `report none`, which the loop answers by asking about each leading result.
+ */
+export interface GoalAssessment { at: string; proved: string[]; setAside: string[]; candidates?: string[]; broughtBack?: string[]; declined?: string }
 export interface LoopLock { sessionId: string; provider?: AgentProvider; acquiredAt: string; heartbeatAt: string }
 export interface StageSummary { stage: LoopStage; assetId?: string; outcome: ReportOutcome; summary: string; files: string[]; at: string }
 /** One reason the loop has nothing actionable (stage `waiting`); the dashboard lists each one. */
-export interface WaitingReason { kind: 'approval' | 'parked' | 'missing_definition' | 'cycle'; target: string; detail?: string }
+/** `study`: the researcher asked the loop not to get further ahead of them; target is the count of verified results they have not studied. */
+export interface WaitingReason { kind: 'approval' | 'parked' | 'missing_definition' | 'cycle' | 'study'; target: string; detail?: string }
 
 export interface LoopState {
   version: 2;
@@ -117,7 +155,19 @@ export interface LoopState {
   lastError?: string | null;
   /** Set with stage `waiting`: what the researcher must resolve; `lastError` holds the same as text for the agent. */
   waitingOn?: WaitingReason[];
+  /**
+   * An autonomous run, while the researcher's setting has autonomous mode on: when it began, the
+   * attempts it spent (an executed plan or a search round each), the asset whose allotment ran out
+   * and waits on the agent's own decision, the reassessments of the goals it made, what was proved
+   * and set aside at the latest one (`id@parkedAt`) and the results it brought back there, and
+   * when it handed the loop back.
+   */
+  autonomy?: { startedAt: string; spent: number; deciding?: string; revisions?: number; assessment?: GoalAssessment; handedOverAt?: string };
+  /** The required results the researcher wants first: selection works toward them before the rest, and an autonomous reassessment weighs them alone. */
+  focus?: string[];
   startedAt: string;
+  /** When status last became running (start, resume, or an extension of a stopped loop); an agent silent since then has not picked it up. */
+  runningSince?: string;
   updatedAt: string;
 }
 
@@ -135,6 +185,8 @@ export interface StageReport {
   counterexampleId?: string;
   question?: string;
   assumedDefinitions?: string[];
+  /** `report none --confirm`: the agent went through the leading set-aside results and still finds none to bring back. */
+  confirm?: boolean;
 }
 
 export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; library?: string; checks?: string; decisions?: string; handoffs?: string; candidates?: string }
@@ -213,6 +265,6 @@ export function newState(provider: AgentProvider, runId: string, now: string, it
   return {
     version: 2, runId, provider, status: 'running', stage: 'select',
     current: { stageStartedAt: now }, progress: {}, parked: {}, answers: [], approvalQueue: [],
-    autopilot: { iterationCap, sessions: {} }, lastError: null, startedAt: now, updatedAt: now,
+    autopilot: { iterationCap, sessions: {} }, lastError: null, startedAt: now, runningSince: now, updatedAt: now,
   };
 }

@@ -12,6 +12,7 @@ import { parseTexBlocks } from '../domain/texBlocks';
 import { statementPart, stripManagedBlocks } from '../domain/sections';
 import { isCited } from '../domain/schema';
 import { LoopFiles, LoopState, isApproved } from './ResearchLoopModel';
+import { AgentActivity, readAgentActivity } from './AgentActivity';
 import { readApprovals } from './ApprovalStore';
 import { ManuscriptModel, loadManuscriptModel } from './ManuscriptImpactLoader';
 
@@ -26,6 +27,8 @@ export interface GraphInputs {
   project: string;
   projectApproved: boolean;
   state?: LoopState;
+  /** The agent's own liveness record, so the Overview tells a running loop from an agent at work. */
+  agent?: AgentActivity;
   manuscript?: ManuscriptModel;
   sectionsDir: string;
   now: string;
@@ -132,7 +135,8 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     if (flags.includes('counterexample') || parked?.reason === 'counterexample_pending') return result('needs_you', needsLabel('counterexample'), 'A possible counterexample waits for you');
     if (parked) {
       const detail = parked.reason === 'three_failures' ? `${failedPlans || 'Several'} proof attempt${failedPlans === 1 ? '' : 's'} failed`
-        : parked.reason === 'search_exhausted' ? 'No match found' : parked.reason === 'researcher' ? 'You set it aside' : '';
+        : parked.reason === 'search_exhausted' ? 'No match found' : parked.reason === 'researcher' ? 'You set it aside'
+        : parked.reason === 'agent_gave_up' ? parked.note || 'The agent, working on its own, gave up on it' : '';
       return result('stuck', parkLabel(parked.reason), detail);
     }
     if (flags.includes('question')) return result('needs_you', needsLabel('question'), 'The agent asked you something');
@@ -227,15 +231,19 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     main.closure = { done: [...seen].filter((item) => byId.get(item)?.progress === 'done').length, total: seen.size };
   }
 
-  const health = computeLoopHealth({ state, nodes: byId, edges, required, now: input.now });
-  if (health.key === 'stalled' && state?.current.assetId) {
+  const health = computeLoopHealth({ state, agent: input.agent, nodes: byId, edges, required, now: input.now });
+  if ((health.key === 'stalled' || health.key === 'agent_idle') && state?.current.assetId) {
     const current = byId.get(state.current.assetId);
-    if (current && current.progress === 'working') Object.assign(current, { progress: 'stalled', progressLabel: 'Agent stopped', progressDetail: 'No activity from the agent' });
+    // Nobody works on it: neither the card nor the graph may say otherwise.
+    if (current) current.flags = current.flags.filter((flag) => flag !== 'active' && flag !== 'searching');
+    if (current && current.progress === 'working') Object.assign(current, health.key === 'stalled'
+      ? { progress: 'stalled', progressLabel: 'Agent stopped', progressDetail: 'No activity from the agent' }
+      : { progress: 'stalled', progressLabel: 'No agent working', progressDetail: 'The loop is on, but no agent is working on it' });
   }
   const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, recheck: input.recheck, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
   // The loop itself can be what waits on the researcher: an agent gone quiet, a pause, or a stopped loop's reasons that are not nodes.
-  if (health.key === 'stalled' || health.key === 'paused') {
-    attention.unshift({ key: `loop:${health.key}`, priority: 0, category: 'loop', title: health.headline.replace(/\.$/, ''), reason: health.body, why: health.key === 'stalled' ? 'No agent is working on the research.' : 'The loop does not move while it is paused.', ifIgnored: health.ifIgnored, blocks: [], sections: [], buttons: health.buttons });
+  if (health.key === 'stalled' || health.key === 'agent_idle' || health.key === 'paused') {
+    attention.unshift({ key: `loop:${health.key}`, priority: 0, category: 'loop', title: health.headline.replace(/\.$/, ''), reason: health.body, why: health.key === 'paused' ? 'The loop does not move while it is paused.' : 'No agent is working on the research.', ifIgnored: health.ifIgnored, blocks: [], sections: [], buttons: health.buttons });
   }
   if (health.key === 'stopped') {
     for (const [index, blocker] of health.blockers.entries()) {
@@ -281,9 +289,10 @@ export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths,
   const project = await files.readFile(paths.projectMd).catch(() => '');
   const approvals = (await readApprovals(files, paths.researchRoot).catch(() => ({ records: [] }))).records;
   const manuscript = await loadManuscriptModel(files, paths).catch(() => undefined);
+  const agent = await readAgentActivity(files);
   return buildGraphPayload({
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
-    state, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck,
+    state, agent, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck,
   });
 }
 

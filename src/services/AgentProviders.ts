@@ -23,6 +23,10 @@ export interface AgentProviderSpec {
   writeToolMatcher: string;
   /** PostToolUse matcher for read tools, to audit reads outside the context pack; absent where the agent has no verified PostToolUse hook. */
   readToolMatcher?: string;
+  /** The shell tool both the PreToolUse and PostToolUse hooks cover, so a long command counts as work in flight; absent where they do not pair. */
+  shellTool?: string;
+  /** Whether the agent has a SessionEnd hook, so a closed chat is seen at once rather than after a silence. */
+  sessionEndHook: boolean;
   /** Subagent definitions folder; absent where the agent has no project-level subagent files. */
   agentsDir?: string;
   /** Where the agent itself keeps research-worker subagents the extension does not write (ignored, never generated). */
@@ -44,6 +48,8 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     hooksFile: '.claude/settings.local.json',
     writeToolMatcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash',
     readToolMatcher: 'Read|Grep|Glob|Bash',
+    shellTool: 'Bash',
+    sessionEndHook: true,
     agentsDir: '.claude/agents',
     hooksFileHasPermissions: true,
     mcp: { kind: 'project-json', file: '.mcp.json' },
@@ -57,6 +63,7 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     skillsDir: '.agents/skills',
     hooksFile: '.codex/hooks.json',
     writeToolMatcher: 'apply_patch|Bash|Write|Edit',
+    sessionEndHook: false,
     externalWorkers: { dir: '.codex/agents', extension: '.toml' },
     hooksFileHasPermissions: false,
     mcp: { kind: 'codex-cli' },
@@ -92,6 +99,8 @@ export function allChatHints(): string { return PROVIDER_IDS.map((id) => `${invo
 export const LOOP_COMMAND = `node ${AGENT_PROVIDERS.codex.skillsDir}/${LOOP_SKILL}/scripts/${LOOP_SCRIPT}`;
 /** The manuscript CLI as the draft-latex skill documents it. */
 export const MANUSCRIPT_COMMAND = `node ${AGENT_PROVIDERS.codex.skillsDir}/draft-latex/scripts/manuscript-writing.cjs`;
+/** The validator as the research-maintenance skill documents it. */
+export const MAINTENANCE_COMMAND = `node ${AGENT_PROVIDERS.codex.skillsDir}/research-maintenance/scripts/research-maintenance.cjs`;
 
 /** Bundled skills that were merged or replaced; installs remove their copies and the generated .gitignore keeps ignoring them. */
 export const RETIRED_SKILLS = [

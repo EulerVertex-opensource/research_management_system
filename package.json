@@ -2,7 +2,7 @@
   "name": "research-management-system",
   "displayName": "Research Assistant",
   "description": "Shared AI-assisted mathematical research context for Overleaf Git projects in VS Code",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "tianhao",
   "repository": {
     "type": "git",
@@ -93,10 +93,28 @@
         "title": "Research Assistant: Open Agent Chat"
       },
       {
+        "command": "research-assistant.showNodeInDashboard",
+        "title": "Research Assistant: Show in Dashboard",
+        "icon": "$(book)"
+      },
+      {
+        "command": "research-assistant.loop.teach",
+        "title": "Research Assistant: Study Verified Results (Teaching Chat)"
+      },
+      {
         "command": "research-assistant.loop.refreshIntegration",
         "title": "Research Assistant: Refresh Agent Hooks and MCP Setup"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "research-assistant.showNodeInDashboard",
+          "when": "resourceExtname == .md && resourcePath =~ /[\\/\\\\](assets|definitions|ideas|plans)[\\/\\\\][^\\/\\\\]+\\.md$/",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Research Assistant",
       "properties": {

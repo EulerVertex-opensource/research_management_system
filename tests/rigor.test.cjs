@@ -12,7 +12,7 @@ function load(file) {
 }
 
 const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
-const { normalizeLoopSettings, applyLoopPatch, validateSettingsPatch, rigorPreset, RIGOR_PRESETS, RIGOR_FIELDS, DEFAULT_LOOP_SETTINGS } = load('../src/domain/loopSettings.ts');
+const { normalizeLoopSettings, applyLoopPatch, validateSettingsPatch, rigorPreset, RIGOR_PRESETS, RIGOR_FIELDS, CHECK_KEYS, AWAY_KEYS, involvement, withInvolvement, DEFAULT_LOOP_SETTINGS } = load('../src/domain/loopSettings.ts');
 const { RIGOR_KEYS, RIGOR_OPTIONS } = load('../src/models/settings.ts');
 
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
@@ -61,10 +61,13 @@ const decisions = (f) => [...f.map.entries()].filter(([file]) => file.startsWith
 
 // ---------- settings ----------
 
-test('how careful: Careful by default, Fast as a preset, every key validated and described', () => {
-  assert.deepEqual(DEFAULT_LOOP_SETTINGS.rigor, RIGOR_PRESETS.careful);
-  assert.equal(rigorPreset(RIGOR_PRESETS.fast), 'fast');
-  assert.equal(rigorPreset({ ...RIGOR_PRESETS.careful, refuteSearch: 'off' }), 'custom');
+test('how thorough: Careful by default, Fast as a preset over the checks, every key validated and described', () => {
+  assert.equal(rigorPreset(DEFAULT_LOOP_SETTINGS.rigor), 'careful');
+  assert.equal(rigorPreset({ ...DEFAULT_LOOP_SETTINGS.rigor, ...RIGOR_PRESETS.fast }), 'fast');
+  assert.equal(rigorPreset({ ...DEFAULT_LOOP_SETTINGS.rigor, refuteSearch: 'off' }), 'custom');
+  // What happens when the researcher does not respond is set apart from the checks, so it never changes the preset.
+  assert.equal(rigorPreset({ ...DEFAULT_LOOP_SETTINGS.rigor, whenStuck: 'retry', unansweredQuestions: 'default' }), 'careful');
+  assert.deepEqual([...CHECK_KEYS, ...AWAY_KEYS].sort(), [...RIGOR_KEYS].sort());
   for (const key of RIGOR_KEYS) {
     assert.deepEqual(Object.keys(RIGOR_FIELDS[key].options).sort(), [...RIGOR_OPTIONS[key]].sort(), key);
     assert.ok(RIGOR_FIELDS[key].label && RIGOR_FIELDS[key].hint, key);
@@ -75,6 +78,18 @@ test('how careful: Careful by default, Fast as a preset, every key validated and
   assert.match(problems[0], /rigor\.refuteSearch/);
   assert.deepEqual(validateSettingsPatch({ loop: { rigor: { onDependencyChange: 'ignore' } } }, []), { 'loop.rigor.onDependencyChange': 'Choose one of: revert, flag.' });
   assert.equal(applyLoopPatch(DEFAULT_LOOP_SETTINGS, { rigor: { refuteSearch: 'main' } }).rigor.agreeDefinitions, 'main', 'a patch keeps the other keys');
+});
+
+test('how involved: one level over the auto-approve and autonomy switches, keeping the rule choices', () => {
+  const base = DEFAULT_LOOP_SETTINGS;
+  assert.equal(involvement(base), 'review');
+  const routine = withInvolvement({ ...base, autoApprove: { ...base.autoApprove, project: true } }, 'routine');
+  assert.deepEqual([routine.autoApprove.enabled, routine.autonomy.enabled, involvement(routine)], [true, false, 'routine']);
+  const alone = withInvolvement(routine, 'alone');
+  assert.deepEqual([alone.autonomy.enabled, involvement(alone)], [true, 'alone']);
+  const back = withInvolvement(alone, 'review');
+  assert.deepEqual([back.autoApprove.enabled, back.autonomy.enabled, involvement(back)], [false, false, 'review']);
+  assert.equal(withInvolvement(back, 'routine').autoApprove.project, true, 'returning to routine restores the rule checkboxes');
 });
 
 // ---------- 1. counterexample search before proving ----------

@@ -72,6 +72,8 @@ function allowedFile(paths: LayoutPaths, file: string): boolean {
   const base = path.posix.basename(file);
   if (file === paths.projectMd || file === paths.paperIndex || file === f.outline) return true;
   if (paths.researchRoot !== '.' && file === `${paths.researchRoot}/README.md`) return true;
+  // The project's proof style, shared by the researchers (see revisions.ts).
+  if (file === (paths.researchRoot === '.' ? 'style.md' : `${paths.researchRoot}/style.md`)) return true;
   if (f.nodes.includes(parent)) return NODE_FILE.test(base);
   if (f.records.includes(parent)) return base.endsWith('.md');
   if (isUnder(file, f.approvals)) return /\.jsonl?$/.test(base);

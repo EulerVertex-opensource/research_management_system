@@ -1,8 +1,9 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
-import { LOOP_COMMAND } from './AgentProviders';
+import { LOOP_COMMAND, MAINTENANCE_COMMAND } from './AgentProviders';
 import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/layout';
+import { UNDERSTANDING_PATH } from '../domain/understandingLevels';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
 export interface HookInput {
@@ -15,6 +16,8 @@ export interface HookInput {
   prompt?: string;
   /** SessionStart: startup | resume | clear | compact. */
   source?: string;
+  /** The chat's transcript (JSONL); its last usage record tells how much context the chat carries. */
+  transcript_path?: string;
 }
 
 export interface StopDecision { block: boolean; reason?: string; capReached?: boolean }
@@ -32,10 +35,91 @@ export function stopDecision(state: LoopState | undefined, input: HookInput, ins
   if (state.stage === 'waiting' || state.stage === 'ready' || state.stage === 'review_project') return { block: false };
   const session = input.session_id ?? 'unknown';
   const record = state.autopilot.sessions[session] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
-  if (record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
+  // An autonomous run is bounded by its budget instead; the chat compacts its own context.
+  const autonomous = Boolean(state.autonomy && !state.autonomy.handedOverAt);
+  if (!autonomous && record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
   const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it; earlier stages are summarized in its context pack, so do not reread their files. ${instruction ?? ''}`.trim();
   return { block: true, reason };
+}
+
+/**
+ * Context the driver's chat may carry before the loop starts the next stage in
+ * a fresh chat. Every request rereads the whole chat, and once it idles past
+ * the prompt cache's lifetime (waiting on the researcher or a long subagent)
+ * all of it is written again; the loop's files rebuild a fresh chat cheaply.
+ */
+export const CONTEXT_RESET_TOKENS = 200_000;
+
+/**
+ * Tokens the chat sent with its latest request, from the transcript's last
+ * lines (oldest first): a Claude Code assistant record's usage, or a Codex
+ * token_count event. Subagent (sidechain) records are skipped.
+ */
+export function contextTokensFrom(lines: string[]): number | undefined {
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    let record: any;
+    try { record = JSON.parse(lines[i]); } catch { continue; }
+    const usage = record?.type === 'assistant' && !record.isSidechain ? record.message?.usage : undefined;
+    if (usage && typeof usage.input_tokens === 'number') return usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+    const codex = record?.type === 'event_msg' && record.payload?.type === 'token_count' ? record.payload.info?.last_token_usage : undefined;
+    if (codex && typeof codex.input_tokens === 'number') return codex.input_tokens;
+  }
+  return undefined;
+}
+
+const thousands = (tokens: number) => `~${Math.round(tokens / 1000)}K`;
+
+/**
+ * Whether the driver's `next` should start the stage in a fresh chat instead:
+ * the chat is over CONTEXT_RESET_TOKENS. An autonomous run is left alone (no
+ * one is there to open the fresh chat; the chat compacts itself). Returns the
+ * denial reason; the caller pauses the loop and frees its lock.
+ */
+export function contextResetDecision(state: LoopState | undefined, input: HookInput, tokens: number | undefined): string | undefined {
+  if (!state || state.status !== 'running' || tokens === undefined || tokens < CONTEXT_RESET_TOKENS) return undefined;
+  if (state.autonomy && !state.autonomy.handedOverAt) return undefined;
+  if (!loopCalls(input).some((call) => call.command === 'next')) return undefined;
+  return `Research loop: this chat carries ${thousands(tokens)} tokens of context, so the loop paused before the next stage; it continues more cheaply in a fresh chat, rebuilt from the files. Do not run anything else. Tell the researcher in two lines that the work so far is saved, and that they continue with /clear (Codex: a new thread) and then the research-loop skill.`;
+}
+
+/** Shown to the researcher when the loop hands them a long chat to answer in. */
+export function waitingContextNote(tokens: number): string {
+  return `Research loop: this chat carries ${thousands(tokens)} tokens of context. If you answer more than an hour from now, /clear first (Codex: a new thread) and answer there: the loop resumes from its files, while this chat would be reloaded in full.`;
+}
+
+/** A turn that is a subagent's hand-back or a background task's notice, not the researcher writing. */
+export function isHandbackPrompt(prompt: string | undefined): boolean {
+  return typeof prompt === 'string' && /^\s*(?:Another Claude session sent a message:|<task-notification>)/.test(prompt);
+}
+
+/** The research problems present when the researcher's turn began, and how often Stop has sent the agent back since. */
+export interface GuardRecord { baseline: string[]; blocks: number }
+export const GUARD_PATH = `${STATE_DIR}/guard.json`;
+/** Consecutive Stop blocks for new problems before the turn may end anyway (the dashboard still shows them). */
+export const GUARD_BLOCK_CAP = 2;
+
+/**
+ * Whether Stop sends the agent back to fix research problems this turn
+ * introduced, however the files were written (a script, a folder move, an
+ * agent without PreToolUse hooks). Problems already present when the turn
+ * began never trap the agent. Pure; the caller persists the record.
+ */
+export function guardDecision(record: GuardRecord | undefined, problems: string[]): { block: boolean; reason?: string; record: GuardRecord } {
+  if (!record) return { block: false, record: { baseline: problems, blocks: 0 } };
+  const before = new Set(record.baseline);
+  const fresh = problems.filter((problem) => !before.has(problem));
+  if (!fresh.length) return { block: false, record: { ...record, blocks: 0 } };
+  if (record.blocks >= GUARD_BLOCK_CAP) return { block: false, record };
+  const shown = fresh.slice(0, 12).map((problem) => `- ${problem}`);
+  if (fresh.length > shown.length) shown.push(`- ... and ${fresh.length - shown.length} more`);
+  const reason = [
+    `Research files: this turn left ${fresh.length} new problem(s) in the research folders:`,
+    ...shown,
+    'Fix them before finishing: move misplaced files into the research layout (raw materials to research-local/), rename clashing IDs, and repair broken references.',
+    `Do not delete research content just to silence a problem; if a fix needs the researcher's decision, say so and stop. Check with: ${MAINTENANCE_COMMAND} validate`,
+  ].join('\n');
+  return { block: true, reason, record: { ...record, blocks: record.blocks + 1 } };
 }
 
 function targetsOf(input: HookInput): string[] {
@@ -96,7 +180,7 @@ interface Creation { target: string; isDir?: boolean; content?: string; fromShel
  * Paths a write-type call would create. Edits and deletes of existing files
  * are not creations: moving content out of a misplaced file stays possible.
  */
-function creationsOf(input: HookInput, isShell: boolean): Creation[] {
+function creationsOf(input: HookInput, isShell: boolean, root: string | undefined, exists: (relative: string) => boolean): Creation[] {
   const tool = input.tool_input ?? {};
   const created: Creation[] = [];
   const name = (input.tool_name ?? '').toLowerCase();
@@ -116,6 +200,44 @@ function creationsOf(input: HookInput, isShell: boolean): Creation[] {
     for (const match of command.matchAll(/[\w./-]+\.[A-Za-z][A-Za-z0-9]*\b/g)) created.push({ target: match[0], fromShell: true });
     for (const match of command.matchAll(/\bmkdir\s+([^;&|<>\n]+)/g)) {
       for (const arg of match[1].trim().split(/\s+/)) if (arg && !arg.startsWith('-')) created.push({ target: arg.replace(/^['"]|['"]$/g, ''), isDir: true, fromShell: true });
+    }
+    created.push(...copyDestinations(command, root, exists));
+  }
+  return created;
+}
+
+const COPY_COMMAND = /^(?:mv|cp|rsync|ln|git\s+mv)$/;
+const looksLikeDir = (target: string) => target.endsWith('/') || !/\.[A-Za-z0-9]+$/.test(path.posix.basename(target));
+
+/**
+ * Where mv, cp, git mv, rsync, and ln put what they copy: the last argument
+ * (or `-t DIR`), or each source's name inside it when it is an existing
+ * folder. Folders count too, so `cp -r raw research/library/x/sources` is
+ * checked although no file name in the command says so.
+ */
+function copyDestinations(command: string, root: string | undefined, exists: (relative: string) => boolean): Creation[] {
+  const created: Creation[] = [];
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    const words = segment.trim().split(/\s+/).map((word) => word.replace(/^['"]|['"]$/g, '')).filter(Boolean);
+    const verb = words[0] === 'git' ? words.slice(0, 2).join(' ') : words[0];
+    if (!verb || !COPY_COMMAND.test(verb)) continue;
+    const args: string[] = [];
+    let into: string | undefined;
+    const rest = words.slice(verb.split(' ').length);
+    for (let i = 0; i < rest.length; i += 1) {
+      if (rest[i] === '-t') into = rest[++i];
+      else if (rest[i].startsWith('--target-directory=')) into = rest[i].slice('--target-directory='.length);
+      else if (!rest[i].startsWith('-')) args.push(rest[i]);
+    }
+    const destination = into ?? (args.length > 1 ? args.pop() : undefined);
+    // Remote rsync targets (host:path) never land in the project.
+    if (!destination || destination.includes(':')) continue;
+    const relative = projectRelative(destination, root);
+    const intoFolder = into !== undefined || (relative !== undefined && looksLikeDir(destination) && exists(relative));
+    if (!intoFolder) { created.push({ target: destination, isDir: looksLikeDir(destination), fromShell: true }); continue; }
+    for (const source of args) {
+      const name = path.posix.basename(source.replace(/\/+$/, ''));
+      if (name) created.push({ target: `${destination.replace(/\/+$/, '')}/${name}`, isDir: looksLikeDir(source), fromShell: true });
     }
   }
   return created;
@@ -140,8 +262,11 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   if (isShell && RAW_GIT.test(text)) {
     return { deny: true, reason: `Research loop: do not run git pull/push/rebase/merge directly. Use ${LOOP_COMMAND} sync status | sync pull | sync prepare; publishing (sync publish) needs the researcher's confirmation.` };
   }
-  const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
+  const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brsync\b|\bln\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
   for (const target of targets) {
+    if (shellWrites && under(target, UNDERSTANDING_PATH, root)) {
+      return { deny: true, reason: `Research loop: ${target} records what the researcher understood, and only the researcher sets it (the mark_understood popup, the dashboard, or ${LOOP_COMMAND} teach mark --interactive in their own terminal).` };
+    }
     if (shellWrites && (under(target, approvalsFile, root) || target.endsWith('/approvals.json') || under(target, shared.approvals, root) || under(target, STATE_DIR, root))) {
       return { deny: true, reason: `Research loop: ${target} is written only by the researcher through the extension. Approvals are never set by the agent.` };
     }
@@ -159,15 +284,88 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
       }
     }
   }
+  // The loop stamps a plan's verified proof after an independent check confirms it; an agent stamping it would skip that check.
+  if (shellWrites && /verified_proof_digest/.test(text) && (isShell || targets.some((target) => under(target, paths.plans, root)))) {
+    return { deny: true, reason: 'Research loop: only the loop records that a proof was verified (verified_proof_digest). Write ## Verdict in the plan and report confirmed or rejected.' };
+  }
   if (isShell && shellWrites && /status:\s*['"]?approved/.test(text) && (text.includes(paths.assets) || text.includes(paths.definitions))) {
     return { deny: true, reason: 'Research loop: shell commands may not set status: approved on assets or definitions.' };
   }
-  for (const creation of isShell && !shellWrites && !/\bmkdir\b/.test(text) ? [] : creationsOf(input, isShell)) {
+  for (const creation of isShell && !shellWrites && !/\bmkdir\b/.test(text) ? [] : creationsOf(input, isShell, root, exists)) {
     const relative = projectRelative(creation.target, root);
     if (!relative || (creation.fromShell && exists(relative))) continue;
     const problem = layoutProblem(paths, relative, creation.isDir) ?? (creation.content !== undefined ? folderNoteProblem(paths, relative, creation.content) : undefined);
     if (problem) return { deny: true, reason: `Research layout: ${problem}` };
   }
+  return { deny: false };
+}
+
+/**
+ * Which chats teach and which drive the loop, by session ID. A teaching chat
+ * (the teach skill, opened beside the loop's own chat) never takes the loop's
+ * lock, is never sent on by the Stop hook, and may only read; a session that
+ * has driven the loop is never taken for a teaching one.
+ */
+export const SESSIONS_PATH = `${STATE_DIR}/sessions.json`;
+export type SessionRole = 'teach' | 'drive';
+export type SessionRoles = Record<SessionRole, Record<string, string>>;
+const ROLES_KEPT = 20;
+
+export function parseSessionRoles(text: string | undefined): SessionRoles {
+  const roles: SessionRoles = { teach: {}, drive: {} };
+  try {
+    const raw = JSON.parse(text ?? '') as Partial<SessionRoles>;
+    for (const role of ['teach', 'drive'] as const) if (raw?.[role] && typeof raw[role] === 'object') roles[role] = { ...raw[role] };
+  } catch { /* none yet */ }
+  return roles;
+}
+
+export function withSessionRole(roles: SessionRoles, role: SessionRole, session: string, at: string): SessionRoles {
+  const entries = Object.entries(roles[role]).filter(([id]) => id !== session);
+  return { ...roles, [role]: Object.fromEntries([...entries, [session, at]].slice(-ROLES_KEPT)) };
+}
+
+export function sessionRole(roles: SessionRoles, session: string | undefined): SessionRole | undefined {
+  if (!session) return undefined;
+  if (roles.drive[session]) return 'drive';
+  return roles.teach[session] ? 'teach' : undefined;
+}
+
+const LOOP_CALL = /research-loop\.cjs["']?\s+([a-z-]+)(?:\s+([a-z-]+))?/g;
+const DRIVING_COMMANDS = new Set(['start', 'resume', 'extend', 'next', 'report']);
+
+/** The research-loop commands a shell call runs, as `command sub`. */
+function loopCalls(input: HookInput): Array<{ command: string; sub?: string }> {
+  const tool = input.tool_input ?? {};
+  const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
+  return [...command.matchAll(LOOP_CALL)].map((match) => ({ command: match[1], sub: match[2] }));
+}
+
+/** What a turn says about its chat: a prompt naming the teach skill, a teach command, or a command that drives the loop. */
+export function roleSignal(event: string, input: HookInput, teachPrompt: RegExp): SessionRole | undefined {
+  if (event === 'UserPromptSubmit') return typeof input.prompt === 'string' && teachPrompt.test(input.prompt) ? 'teach' : undefined;
+  if (event !== 'PreToolUse') return undefined;
+  const calls = loopCalls(input);
+  if (calls.some((call) => DRIVING_COMMANDS.has(call.command))) return 'drive';
+  return calls.some((call) => call.command === 'teach') ? 'teach' : undefined;
+}
+
+/** Commands a teaching chat may run: reading, the teach commands, and recording the researcher's doubts as ideas. */
+function teachingMayRun(call: { command: string; sub?: string }): boolean {
+  if (['status', 'show', 'teach', 'library'].includes(call.command)) return true;
+  if (call.command === 'search') return call.sub === 'status';
+  if (call.command === 'idea') return call.sub === 'add';
+  return false;
+}
+
+/** A teaching chat reads and explains; it never drives the loop or edits the project. */
+export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
+  const tool = (input.tool_name ?? '').toLowerCase();
+  const refused = loopCalls(input).find((call) => !teachingMayRun(call));
+  if (refused) return { deny: true, reason: `This chat is the teaching chat: it explains verified results and never drives the loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there.` };
+  if (/shell|bash/.test(tool) || !/write|edit|patch|notebook/.test(tool)) return { deny: false };
+  const inProject = targetsOf(input).filter((target) => !path.isAbsolute(target) || (root !== undefined && (target === root || target.startsWith(root + path.sep))));
+  if (inProject.length) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (${inProject[0]}). Record a doubt or idea with record_idea; changes are made in the loop's own chat.` };
   return { deny: false };
 }
 
@@ -182,6 +380,11 @@ export function contextOutput(event: 'SessionStart' | 'UserPromptSubmit', contex
 
 export function stopBlockOutput(reason: string): string {
   return JSON.stringify({ decision: 'block', reason });
+}
+
+/** A note for the researcher's eyes, not the agent's. */
+export function systemMessageOutput(message: string): string {
+  return JSON.stringify({ systemMessage: message });
 }
 
 export function denyOutput(reason: string): string {

@@ -1,4 +1,5 @@
 import 'katex/dist/katex.min.css';
+import './components/agent-constellation.css';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
