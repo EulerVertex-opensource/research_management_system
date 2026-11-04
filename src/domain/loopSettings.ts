@@ -6,7 +6,7 @@ import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutonomyPolicy, LOOP_NUMBER_KEYS
  */
 
 export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
-  enabled: false, proofs: true, supporting: true, citations: true, definitions: true, counterexamples: false, specifications: false, project: false,
+  enabled: false, proofs: true, supporting: true, citations: true, definitions: true, conjectures: true, conjectureIdeas: true, counterexamples: false, specifications: false, project: false,
 };
 
 /** What autonomous mode approves: every rule, each still judged from the file itself. */
@@ -105,6 +105,7 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   autonomyBudget: { defaultValue: 30, range: [1, 1000], group: 'autonomy', unit: 'attempts', label: 'Budget', hint: 'Proof attempts and search rounds the agent may spend on its own before it hands the loop back to you.' },
   autonomyHours: { defaultValue: 0, range: [0, 168], group: 'autonomy', unit: 'hours', label: 'Time limit', hint: 'Hands the loop back after this long even with budget left; 0 means no time limit.' },
   autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal reassessments', hint: 'Times the agent may judge what the goals still need when only set-aside results remain: it brings back a set-aside result that something new gets past, or adds a weaker or alternative goal of its own. Each one after the first needs something proved or set aside since the last. It never drops your goals; you decide about them at hand-back.' },
+  autonomyConjectures: { defaultValue: 0, range: [0, 20], group: 'autonomy', label: 'Conjectures to explore', hint: 'Conjectures the agent may take up as goals of its own, best first, once your goals are proved or nothing else is left that it can do. 0 means it never explores; it still recommends them at hand-back. Taking up a conjecture that gets past a set-aside result counts as a goal reassessment instead.' },
   studyAhead: { defaultValue: 0, range: [0, 50], group: 'teaching', unit: 'results', label: 'How far the loop may get ahead of you', hint: 'Verified results you have not studied yet (with the teach skill, or marked in Results) before the loop waits for you instead of starting new proofs. 0 means it never waits; working on its own ignores this.' },
 };
 

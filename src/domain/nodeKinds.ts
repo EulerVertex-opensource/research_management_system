@@ -6,11 +6,19 @@
 /** Current on-disk schema; `research-maintenance migrate` upgrades older projects. */
 export const SCHEMA_VERSION = 2;
 
-export const ASSET_TYPE_LIST = ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark'] as const;
+export const ASSET_TYPE_LIST = ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark', 'conjecture'] as const;
 export type AssetType = (typeof ASSET_TYPE_LIST)[number];
 export const ASSET_TYPES: ReadonlySet<string> = new Set(ASSET_TYPE_LIST);
 /** Asset types the loop falsifies and proves; examples and remarks are not proved. */
 export const PROVABLE_TYPES: ReadonlySet<string> = new Set(['theorem', 'lemma', 'proposition', 'construction']);
+/**
+ * A conjecture is a precise statement the project believes but has not committed to prove: it
+ * lies outside the required results, the loop searches it for counterexamples but never plans a
+ * proof, and it may be stated in the paper. Promotion retypes it to one of these and makes it a
+ * goal; demotion turns a draft result that no goal needs any more back into a conjecture.
+ */
+export const CONJECTURE_TYPE = 'conjecture';
+export const PROMOTED_TYPES = ['theorem', 'lemma', 'proposition'] as const;
 
 export const NODE_TYPE_LIST = [...ASSET_TYPE_LIST, 'definition', 'idea', 'plan'] as const;
 export type NodeType = (typeof NODE_TYPE_LIST)[number];
@@ -25,7 +33,8 @@ export const INACTIVE_STATUSES: ReadonlySet<string> = new Set(['deprecated', 'ar
 export const IDEA_STATUS_LIST = ['draft', 'resolved', 'archived'] as const;
 export type IdeaStatus = (typeof IDEA_STATUS_LIST)[number];
 /** What an idea is for, so context retrieval can tell a question from an approach. */
-export const IDEA_KIND_LIST = ['approach', 'question', 'observation', 'test_case', 'risk'] as const;
+/** `conjecture`: a statement believed true but not yet precise or checked; the loop may turn it into a conjecture asset. */
+export const IDEA_KIND_LIST = ['approach', 'question', 'observation', 'test_case', 'risk', 'conjecture'] as const;
 export type IdeaKind = (typeof IDEA_KIND_LIST)[number];
 
 /** An idea kind from loose input: a valid kind as given, `question` for open-question tags, else `approach`. */

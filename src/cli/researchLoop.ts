@@ -52,7 +52,7 @@ const USAGE = `Usage: research-loop <command> [options]
   next [--json]
   context [--json] [--budget N]   (compile the current stage's context pack; next does this too)
   show <id|paper_slug|project> [--section Heading]... [--full]   (one node or paper part on request)
-  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm]
+  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--asset ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm]
   search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
   teach list [--json]   (verified results, those new to the researcher first, each after what it rests on)
@@ -63,9 +63,13 @@ const USAGE = `Usage: research-loop <command> [options]
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
-  idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
+  idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk|conjecture] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
   idea resolve <ideaId> --by <decision, plan, or asset ID> [--note "..."]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
+  conjecture list [--json]   (conjectures ranked against the goals, best first)
+  conjecture request <ideaId|conjecture>   (the researcher asks: make this conjecture idea precise, or search this conjecture, whatever the settings allow)
+  conjecture promote <id> --as lemma|theorem|proposition   (stage draft_project only: make a conjecture a goal; list it under required_results next)
+  conjecture demote <id> --note "<why it is still believed>" [--serves id,id]   (a draft result no goal needs any more becomes a conjecture)
   question pending | question answer --text "..." | question skip | question poll <id>
   handoff [--note "..."]   (write a shared handoff for the next collaborator)
   library search <words...> [--type T] [--collection C] [--limit N]   (find known results to reuse)
@@ -596,6 +600,7 @@ async function main(): Promise<void> {
       const report: StageReport = {
         outcome, summary: typeof args.flags.summary === 'string' ? args.flags.summary : '',
         planId: typeof args.flags.plan === 'string' ? args.flags.plan : undefined,
+        assetId: typeof args.flags.asset === 'string' ? args.flags.asset : undefined,
         counterexampleId: typeof args.flags.counterexample === 'string' ? args.flags.counterexample : undefined,
         question: typeof args.flags.question === 'string' ? args.flags.question : undefined,
         assumedDefinitions: typeof args.flags['assumed-definitions'] === 'string' ? args.flags['assumed-definitions'].split(',').map((item) => item.trim()).filter(Boolean) : undefined,
@@ -661,6 +666,21 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('idea add|convert|resolve');
+    }
+    case 'conjecture': {
+      if (sub === 'list') {
+        const ranked = await core.conjectureList();
+        out(json ? { conjectures: ranked } : ranked.length ? ranked.map((item) => `${item.id}: ${item.reason}; ${item.agreed ? 'statement agreed' : item.falsified ? 'no counterexample found' : 'not yet checked'}`).join('\n') : 'No active conjectures.');
+        return;
+      }
+      if (sub === 'request') { out(await core.requestConjecture(text(third, 'id'))); return; }
+      if (sub === 'promote') { out(await core.promoteConjecture(text(third, 'id'), text(args.flags.as, 'as'))); await core.touch(session); return; }
+      if (sub === 'demote') {
+        out(await core.demoteToConjecture(text(third, 'id'), typeof args.flags.note === 'string' ? args.flags.note : '', typeof args.flags.serves === 'string' ? ids(args.flags.serves) : []));
+        await core.touch(session);
+        return;
+      }
+      throw new Error('conjecture list|request|promote|demote');
     }
     case 'question': {
       const state = core.current;

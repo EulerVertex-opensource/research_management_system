@@ -1,5 +1,5 @@
 import {
-  ASSET_TYPES, AssetType, CITED_SOURCE_KINDS, IDEA_KIND_LIST, IDEA_STATUS_LIST, IdeaKind, IdeaStatus, LEGACY_SOURCE_KINDS, NODE_STATUS_LIST, NodeKind, NodeStatus,
+  ASSET_TYPES, AssetType, CITED_SOURCE_KINDS, CONJECTURE_TYPE, IDEA_KIND_LIST, IDEA_STATUS_LIST, IdeaKind, IdeaStatus, LEGACY_SOURCE_KINDS, NODE_STATUS_LIST, NodeKind, NodeStatus,
   PLAN_STATUS_LIST, PlanStatus, SOURCE_KIND_LIST, SourceKind,
 } from './nodeKinds';
 import { CHECKLIST_STEP, hasSection, hasSectionContent } from './sections';
@@ -17,6 +17,10 @@ export interface ResultNodeData extends NodeBase {
   derived_from?: string;
   /** Only on a counterexample (`type: example`). */
   refutes?: string;
+  /** Only on a conjecture: the results it would unblock or strengthen, which rank it. */
+  serves?: string[];
+  /** Only on a conjecture: `high` or `low` moves it within its rank; set by the researcher. */
+  priority?: 'high' | 'low';
 }
 export interface DefinitionNodeData extends NodeBase { type: 'definition'; status: NodeStatus; source?: NodeSource; depends_on?: string[]; derived_from?: string }
 export interface IdeaNodeData extends NodeBase {
@@ -37,11 +41,11 @@ export type NodeData = ResultNodeData | DefinitionNodeData | IdeaNodeData | Plan
  * Relation fields each kind may carry. Only forward relations are stored;
  * reverse ones (used in, plans of, refuted by) are derived by `reverseRelations`.
  */
-export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'adapts', 'refutes', 'derived_from'] as const;
+export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'adapts', 'refutes', 'derived_from', 'serves'] as const;
 /** Relations that hold one node ID rather than a list. */
 const SINGLE_RELATIONS = new Set(['target_asset', 'refutes', 'derived_from']);
 export const NODE_RELATIONS: Record<NodeKind, readonly string[]> = {
-  asset: ['depends_on', 'uses_definitions', 'refutes', 'derived_from'],
+  asset: ['depends_on', 'uses_definitions', 'refutes', 'derived_from', 'serves'],
   definition: ['depends_on', 'derived_from'],
   idea: ['related_assets'],
   plan: ['target_asset', 'inspired_by', 'adapts'],
@@ -53,6 +57,7 @@ export const RETIRED_FIELDS = ['used_in', 'kind'] as const;
 export function stripForeignFields(kind: NodeKind, data: Record<string, unknown>, type?: string): Record<string, unknown> {
   const allowed = new Set(NODE_RELATIONS[kind]);
   if (kind === 'asset' && type !== 'example') allowed.delete('refutes');
+  if (kind === 'asset' && type !== CONJECTURE_TYPE) allowed.delete('serves');
   for (const field of [...RELATION_FIELDS, ...RETIRED_FIELDS]) if (!allowed.has(field)) delete data[field];
   return data;
 }
@@ -81,6 +86,8 @@ export function nodeProblems(kind: NodeKind, id: string, data: Record<string, an
       if (!ASSET_TYPES.has(data.type)) problems.push(`${id}: invalid asset type.`);
       if (!statuses.includes(data.status)) problems.push(`${id}: agent-written assets must stay draft; approval is a researcher action.`);
       problems.push(...sourceProblems(id, data.source, options.paperIds));
+      if (data.type === CONJECTURE_TYPE) problems.push(...conjectureProblems(id, data, content));
+      else if (data.serves !== undefined || data.priority !== undefined) problems.push(`${id}: serves and priority belong to conjectures only.`);
       if (data.type === 'example' && data.refutes !== undefined && (typeof data.refutes !== 'string' || !hasSection(content, 'Assumptions') || !hasSection(content, 'Calculation'))) {
         problems.push(`${id}: counterexample needs refutes, Assumptions, and Calculation.`);
       }
@@ -98,6 +105,15 @@ export function nodeProblems(kind: NodeKind, id: string, data: Record<string, an
       problems.push(...planProblems(id, data, content));
       break;
   }
+  return problems;
+}
+
+/** A conjecture states precisely what it claims and why it is worth stating; it has no proof while it is one. */
+export function conjectureProblems(id: string, data: Record<string, any>, content: string): string[] {
+  const problems: string[] = [];
+  if (!hasSectionContent(content, 'Motivation')) problems.push(`${id}: a conjecture needs ## Motivation: why it is believed (evidence, special cases) and what it would give (the results in serves).`);
+  if (hasSection(content, 'Proof')) problems.push(`${id}: a conjecture has no ## Proof; promote it to a goal first (research-loop conjecture promote).`);
+  if (data.priority !== undefined && data.priority !== 'high' && data.priority !== 'low') problems.push(`${id}: priority must be high or low.`);
   return problems;
 }
 

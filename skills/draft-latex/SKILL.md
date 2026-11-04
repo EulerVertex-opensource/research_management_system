@@ -30,7 +30,7 @@ node .agents/skills/draft-latex/scripts/manuscript-writing.cjs adopt --preview
    ```
 
    `sources` names each node and the components the passage presents (`statement`, `proof`, `source`; a bare ID means all), so a later change points at this block alone. Block IDs are stable lowercase words with hyphens; never rename a locked block. Keep motivation and transitions outside blocks. Only the block's own lines count; blocks do not nest. The older one-line `% [node_id]` tag is still read, as a section-level use. Cite a paper-sourced result with its `source.paper_id` as the `\cite{...}` key; reference internal results with LaTeX labels. Do not print node IDs in the PDF.
-6. Mark unresolved steps with `% TODO` and describe the gap. Do not silently supply a proof, invent a citation, or change notation.
+6. Present a `type: conjecture` node in a `conjecture` environment (add `\newtheorem{conjecture}` beside the existing theorem environments when the preamble lacks one), with its statement only (`sources=<id>@statement`) and its motivation as prose outside the block; never write a proof for it or state it as a result. Mark unresolved steps with `% TODO` and describe the gap. Do not silently supply a proof, invent a citation, or change notation.
 7. Run `check-notation` and `revise-manuscript-prose`, review the Git diff, and compile when a local TeX build is available.
 
 ## Writing for the paper

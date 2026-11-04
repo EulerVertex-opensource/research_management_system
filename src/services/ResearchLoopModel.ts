@@ -17,7 +17,7 @@ export type AgentProvider = 'claude' | 'codex';
 export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
-  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'waiting' | 'ready';
+  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'conjecture' | 'waiting' | 'ready';
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification';
@@ -134,7 +134,10 @@ export interface LoopState {
   stage: LoopStage;
   resumeStage?: LoopStage;
   current: {
-    assetId?: string; planId?: string; counterexampleId?: string; stageStartedAt: string; baseCommit?: string; statementDigest?: string;
+    assetId?: string; planId?: string; counterexampleId?: string;
+    /** Stage `conjecture`: the conjecture idea being made precise. */
+    ideaId?: string;
+    stageStartedAt: string; baseCommit?: string; statementDigest?: string;
     /** The object-search round in progress: its mode, number, and the direction each worker slot was given. */
     search?: { mode: SearchMode; round: number; slots: SearchSlot[]; candidateId?: string; properties?: string[]; requested?: boolean };
   };
@@ -162,7 +165,11 @@ export interface LoopState {
    * and set aside at the latest one (`id@parkedAt`) and the results it brought back there, and
    * when it handed the loop back.
    */
-  autonomy?: { startedAt: string; spent: number; deciding?: string; revisions?: number; assessment?: GoalAssessment; handedOverAt?: string };
+  autonomy?: { startedAt: string; spent: number; deciding?: string; revisions?: number; assessment?: GoalAssessment; handedOverAt?: string; explored?: number };
+  /** Conjecture ideas the agent already tried to make precise (stage `conjecture`), so none is tried twice. */
+  conjectureTried?: string[];
+  /** Conjecture ideas the researcher asked the agent to make precise, whatever the settings allow. */
+  conjectureRequests?: string[];
   /** The required results the researcher wants first: selection works toward them before the rest, and an autonomous reassessment weighs them alone. */
   focus?: string[];
   startedAt: string;

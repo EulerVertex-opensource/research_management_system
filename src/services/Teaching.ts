@@ -98,6 +98,8 @@ export class Teaching {
     const usable = (node: Node) => !node.origin && !INACTIVE_STATUSES.has(node.data.status);
     const approvedAt = (kind: 'asset' | 'definition', id: string) => approvals.find((record) => record.kind === kind && record.target === id)?.approvedAt;
     for (const node of [...assets.values()].filter(usable)) {
+      // A conjecture has an agreed statement, not a proof: there is nothing verified to study yet.
+      if (node.data.type === 'conjecture') continue;
       const approved = node.data.status === 'approved' && isApproved(approvals, 'asset', node.id, node.raw);
       const proof = sectionContent(node.body, 'Proof').trim() ? proofDigest(node.raw) : undefined;
       const statement = statementDigest(node.raw);

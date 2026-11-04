@@ -147,13 +147,14 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     if (cited && status === 'draft') return result('waiting', 'Not checked', cited.kind === 'library' ? 'Known result · check before you finish' : `${citationText(cited)} · check before you finish`);
     if (flags.includes('awaiting_approval')) {
       const kind = approvalKinds.get(node.id);
-      const detail = kind === 'definition' ? 'Definition written' : kind === 'citation' ? 'Quoted from a paper' : kind === 'specification' ? 'Properties written'
+      const detail = kind === 'definition' ? 'Definition written' : node.type === 'conjecture' ? 'Conjecture stated' : kind === 'citation' ? 'Quoted from a paper' : kind === 'specification' ? 'Properties written'
         : node.origin ? 'Known result to accept' : isProvable(node.type) ? 'Proof written' : 'Waiting for you';
       return result('needs_you', needsLabel(kind), detail);
     }
     if (status === 'approved') {
       if (kind === 'definition') return result('done', cited ? 'Cited' : 'Agreed', cited ? citationText(cited) : '');
       if (node.origin) return result('done', 'Known result', 'From the literature');
+      if (node.type === 'conjecture') return result('done', 'Agreed', 'Conjecture · statement agreed, not proved');
       return cited ? result('done', 'Cited', citationText(cited)) : result('done', 'Done');
     }
     if (flags.includes('active')) {
@@ -164,6 +165,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     const unfinished = [...(node.depends_on ?? []), ...(node.uses_definitions ?? [])].filter((id) => ids.has(id) && statusOf.get(id) !== 'approved');
     if (unfinished.length) return result('waiting', 'Waiting', unfinished.length === 1 ? `Needs ${titleOf.get(unfinished[0]) ?? unfinished[0]} first` : `Needs ${unfinished.length} results first`);
     if (kind === 'definition') return result('waiting', 'Not agreed yet', 'Agree on it before you finish');
+    if (node.type === 'conjecture') return result('waiting', 'Conjecture', 'Not a goal; the loop only searches it for counterexamples');
     return result('waiting', 'Not started', 'Ready to start');
   }
 

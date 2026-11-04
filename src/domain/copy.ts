@@ -22,6 +22,7 @@ const STAGE_TEXT: Record<string, string> = {
   plan: 'planning a proof of {result}',
   execute: 'proving {result}',
   verify_proof: 'checking the proof of {result}',
+  conjecture: 'making a conjecture precise',
   waiting: 'stopped until you act',
   ready: 'done with every main result',
 };
@@ -88,7 +89,8 @@ export const URGENCY_HINT: Record<0 | 1 | 2 | 3 | 4, string> = {
   4: 'Tidying up; nothing depends on it.',
 };
 
-const PROVABLE = new Set(['theorem', 'lemma', 'proposition', 'corollary', 'claim', 'conjecture']);
+/** Results whose review is a proof review; a conjecture's review is of its statement. */
+const PROVABLE = new Set(['theorem', 'lemma', 'proposition', 'corollary', 'claim']);
 
 /** "Theorem", "Lemma", …; a node's type as a capitalized noun. */
 export function kindLabel(type: string): string {

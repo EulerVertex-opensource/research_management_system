@@ -45,7 +45,8 @@ If the researcher wants to be asked before you reveal a step ("how would you do 
 
 - Name the weakest point: a step the verifier closed with a small argument of its own, a hypothesis of a cited result that is checked only briefly, a constant whose uniformity matters. Do not oversell a proof, and do not invent steps or references.
 - When the researcher doubts a step, take it seriously. Check the step against the pack with them. If it does not hold up, or you cannot settle it, record the doubt: `record_idea({title, body, kind: "risk", related_assets: [id], origin: "researcher"})`, with the body in their words and naming the step. Tell them the loop will see it. Never repair the proof here.
-- An idea they have for another route or a stronger statement: `record_idea` with kind `approach` and origin `researcher`.
+- An idea they have for another route: `record_idea` with kind `approach` and origin `researcher`.
+- A statement they believe or wonder about that is not a goal now (a stronger form, a generalization, a question the discussion raised): `record_idea` with kind `conjecture`, origin `researcher`, and `related_assets` naming the results it would strengthen or serve; the body in their words, with why they believe it. Tell them the loop may make it a precise conjecture and search it for a counterexample later; never state it as true here.
 
 ## Reword a proof
 

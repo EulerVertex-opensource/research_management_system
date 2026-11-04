@@ -4,8 +4,13 @@
  */
 
 /** Kinds of approval that auto mode may grant without the researcher's click. */
-export type AutoApproveRule = 'proofs' | 'supporting' | 'citations' | 'definitions' | 'counterexamples' | 'specifications' | 'project';
-export const AUTO_APPROVE_RULES: readonly AutoApproveRule[] = ['proofs', 'supporting', 'citations', 'definitions', 'counterexamples', 'specifications', 'project'];
+/**
+ * `conjectures` agrees on a conjecture's statement (so it may be stated in the paper);
+ * `conjectureIdeas` is not an approval but a permission: when nothing else is actionable, the agent
+ * turns conjecture ideas into conjectures and searches them for counterexamples on its own.
+ */
+export type AutoApproveRule = 'proofs' | 'supporting' | 'citations' | 'definitions' | 'conjectures' | 'conjectureIdeas' | 'counterexamples' | 'specifications' | 'project';
+export const AUTO_APPROVE_RULES: readonly AutoApproveRule[] = ['proofs', 'supporting', 'citations', 'definitions', 'conjectures', 'conjectureIdeas', 'counterexamples', 'specifications', 'project'];
 
 export type AutoApprovePolicy = { enabled: boolean } & Record<AutoApproveRule, boolean>;
 
@@ -19,7 +24,7 @@ export const LOOP_NUMBER_KEYS = [
   'refuteWidth', 'refuteRounds',
   'constructWidth', 'constructRounds', 'constructMaxCandidates', 'specialDirectionsFromRound',
   'candidatesPerWorker', 'boardObstructions', 'boardNearMisses', 'requestedSearchRounds',
-  'autonomyBudget', 'autonomyHours', 'autonomyRevisions',
+  'autonomyBudget', 'autonomyHours', 'autonomyRevisions', 'autonomyConjectures',
   'studyAhead',
 ] as const;
 export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];

@@ -23,6 +23,8 @@ const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?
   supporting: { label: 'Supporting assets', hint: 'remarks and examples a required result uses' },
   citations: { label: 'Citations & library', hint: 'results citing an indexed paper with a location, and library results' },
   definitions: { label: 'Definitions', hint: 'definitions the results use' },
+  conjectures: { label: 'Conjecture statements', hint: 'conjectures to state in the paper, once a counterexample search found nothing' },
+  conjectureIdeas: { label: 'Turn ideas into conjectures', hint: 'when nothing else is actionable, the agent makes conjecture ideas precise and searches them for counterexamples (spends tokens)' },
   counterexamples: { label: 'Counterexamples', hint: 'verified counterexamples', warning: 'Confirming a counterexample deprecates the result it refutes.' },
   specifications: { label: 'Construction specifications', hint: 'the required properties P1…Pn a construction search looks for', warning: 'The loop will search against a specification you have not reviewed.' },
   project: { label: 'Project goals', hint: 'project.md and its required results', warning: 'The loop will pursue goals you have not reviewed.' },

@@ -18,6 +18,24 @@ const NODE_TEMPLATES: Record<string, string> = {
   example: statementTemplate('example', 'Describe the example here.', 'original'),
   construction: statementTemplate('construction', 'Describe the construction here.', 'original'),
   remark: statementTemplate('remark', 'Write the remark here.', undefined),
+  conjecture: `---
+type: conjecture
+title: {title}
+status: draft
+source:
+  kind: original
+depends_on: []
+uses_definitions: []
+serves: []
+tags: []
+---
+
+Write the conjecture statement here.
+
+## Motivation
+
+Why it is believed (evidence, special cases) and what it would give.
+`,
   definition: `---
 type: definition
 title: {title}

@@ -11,7 +11,8 @@ import {
   LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
-import { INACTIVE_STATUSES, IdeaKind, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { RankedConjecture, describeConjectures, rankConjectures } from '../domain/conjectures';
 import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
 import type { AutonomyView } from '../models/graph';
 import { readLoopSettings } from './LoopSettingsStore';
@@ -61,6 +62,7 @@ type Selection =
   | { stage: 'plan'; assetId: string }
   | { stage: 'verify_proof'; assetId: string; planId: string }
   | { stage: 'search'; assetId: string; mode: SearchMode }
+  | { stage: 'conjecture'; ideaId: string }
   | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
 type Finish = (message: string, next: LoopStage, patch?: Partial<LoopState['current']>) => Promise<{ stage: LoopStage; message: string }>;
 type SearchRound = NonNullable<LoopState['current']['search']>;
@@ -80,6 +82,8 @@ const BRIEF_PARKED = 3;
 const GAP_BRIEF = 8;
 /** Set-aside results few enough to be the whole frontier of a reassessment, described in full. */
 const GAP_FRONTIER = 3;
+/** Conjectures an instruction or a handoff names; the rest are counted. */
+const CONJECTURES_LISTED = 5;
 /** Required results an extension instruction names; past this it counts them. */
 const EXTENSION_LISTED = 10;
 /** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
@@ -875,6 +879,12 @@ export class ResearchLoopCore {
     }
     // A citation request for a result that cites nothing is not a citation.
     if (request.kind === 'citation') return undefined;
+    if (data.type === CONJECTURE_TYPE) {
+      // An agreed statement, not a proof: only once a counterexample search found nothing, unless the researcher turned that search off.
+      if (!policy.conjectures) return undefined;
+      const searched = this.isFalsified(request.target, raw, await this.checks());
+      return searched || (await this.loopSettings()).rigor.refuteSearch !== 'all' ? 'conjectures' : undefined;
+    }
     if (!PROVABLE_TYPES.has(data.type)) return policy.supporting ? 'supporting' : undefined;
     return policy.proofs && (await this.proofIsVouched(request.target, raw, parsed)) ? 'proofs' : undefined;
   }
@@ -1111,7 +1121,8 @@ export class ResearchLoopCore {
     const raw = await this.files.readFile(file).catch(() => '');
     if (!raw) throw new Error(`Unknown asset ${assetId}.`);
     const data = parseMarkdown(raw).data;
-    if (data.status !== 'draft' || !PROVABLE_TYPES.has(data.type)) throw new Error(`${assetId} is not a draft theorem, lemma, proposition, or construction; there is nothing to refute.`);
+    const conjecture = data.type === CONJECTURE_TYPE && ['draft', 'approved'].includes(data.status);
+    if (!conjecture && (data.status !== 'draft' || !PROVABLE_TYPES.has(data.type))) throw new Error(`${assetId} is not a draft theorem, lemma, proposition, or construction, nor a conjecture; there is nothing to refute.`);
     if (isConstructionSpec(raw)) throw new Error(`${assetId} is a construction search; give it a new direction instead (answer its blocked question, or ask the researcher for one).`);
     const field = LOOP_NUMBER_FIELDS.requestedSearchRounds;
     const count = rounds ?? (await this.loopSettings()).requestedSearchRounds;
@@ -1225,7 +1236,16 @@ export class ResearchLoopCore {
       return { stage: this.require().stage, message: `${result.message} ${await this.exhaustConstructionSearch(assetId)}` };
     }
     await this.finishRefuteSearch(assetId);
+    if (await this.isConjecture(assetId)) {
+      this.dropConjectureRequest(assetId);
+      return finish(`No counterexample found for the conjecture ${assetId} in ${search.round} round(s); its statement goes to the researcher to agree on. Continue with next.`, 'select', { assetId: undefined, counterexampleId: undefined });
+    }
     return finish(`No counterexample found for ${assetId} in ${search.round} round(s). Next: plan.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
+  }
+
+  private async isConjecture(assetId: string): Promise<boolean> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+    try { return Boolean(raw) && parseMarkdown(raw).data.type === CONJECTURE_TYPE; } catch { return false; }
   }
 
   private async failuresSinceDirection(assetId: string): Promise<number> {
@@ -1485,6 +1505,12 @@ export class ResearchLoopCore {
     const { order, missing, cycle } = assetClosure([...(state.focus ?? []).filter((id) => required.includes(id)), ...required], assets);
     if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.`, waitingOn: [{ kind: 'cycle', target: cycle }] };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
+    // A goal never rests on a conjecture: the loop does not prove conjectures, so it must be promoted first.
+    const conjecturesInGoals = order.filter((id) => assets.get(id)!.data.type === CONJECTURE_TYPE);
+    if (conjecturesInGoals.length) {
+      state.researcherInput = { kind: 'project', text: `The goals rest on the conjecture(s) ${conjecturesInGoals.join(', ')}, which the loop does not prove. For each, either make it a goal (${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition, and list it under required_results) or change the goals so that they do not depend on it (a new asset ID for a revised statement).`, at: this.now() };
+      return { stage: 'draft_project', note: state.researcherInput.text };
+    }
     const incomplete = order.filter((id) => !assets.get(id)!.origin && assets.get(id)!.data.status === 'draft' && PROVABLE_TYPES.has(assets.get(id)!.data.type) && statementIncomplete(assets.get(id)!.body));
     if (incomplete.length) return { stage: 'scaffold', missing: [], incomplete };
     const rigor = (await this.loopSettings()).rigor;
@@ -1581,6 +1607,9 @@ export class ResearchLoopCore {
     const definitionIds = definitionClosure(order, assets, definitions);
     const unapproved = definitionIds.filter((id) => !(definitions.get(id)?.data.status === 'approved' && isApproved(approvals, 'definition', id, definitions.get(id)!.raw)));
     for (const id of unapproved) if (definitions.has(id)) await this.enqueueApproval('definition', id, 'Definition used by an approved or proved result.');
+    // Nothing on the way to the goals is actionable: work on conjectures, when the researcher allows it.
+    const conjectureWork = await this.conjectureWork({ assets, approvals, checks, examples, refuteSearch: rigor.refuteSearch });
+    if (conjectureWork) return conjectureWork;
     const allApproved = order.every((id) => settled.has(id) && assets.get(id)!.data.status === 'approved');
     if (allApproved && !unapproved.length && !order.some((id) => state.parked[id]) && !examples.some((example) => example.data.status === 'draft' && order.includes(example.data.refutes))) {
       if (state.extension) {
@@ -1601,6 +1630,224 @@ export class ResearchLoopCore {
       ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
     ];
     return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
+  }
+
+  // ---------- conjectures ----------
+
+  /** The agent may make conjecture ideas precise and search conjectures on its own: in autonomous mode, or in auto mode with the researcher's rule. */
+  private async conjectureWorkAllowed(): Promise<boolean> {
+    const settings = await this.loopSettings();
+    return settings.autonomy.enabled || (settings.autoApprove.enabled && settings.autoApprove.conjectureIdeas);
+  }
+
+  /**
+   * Work on conjectures once nothing on the way to the goals is actionable. A conjecture whose
+   * statement no search has checked is searched for a counterexample (never planned or proved);
+   * a checked one goes to the researcher to agree on its statement; then a conjecture idea is made
+   * precise. Searching and making ideas precise need the researcher's permission (or their request
+   * for that idea or conjecture); asking them to agree on a statement does not.
+   */
+  private async conjectureWork(input: { assets: Map<string, AssetInfo>; approvals: ApprovalRecord[]; checks: CheckInfo[]; examples: AssetInfo[]; refuteSearch: string }): Promise<Selection | undefined> {
+    const state = this.require();
+    const allowed = await this.conjectureWorkAllowed();
+    const requests = state.conjectureRequests ?? [];
+    let search: Selection | undefined;
+    for (const [id, asset] of input.assets) {
+      if (asset.origin || asset.data.type !== CONJECTURE_TYPE || !['draft', 'approved'].includes(asset.data.status)) continue;
+      if (input.examples.some((example) => example.data.refutes === id && example.data.status === 'approved')) continue;
+      const pending = input.examples.find((example) => example.data.refutes === id && example.data.status === 'draft');
+      if (pending) {
+        await this.enqueueApproval('counterexample', pending.id, `Candidate counterexample to the conjecture ${id}: confirm or reject.`);
+        if (!state.parked[id]) state.parked[id] = { reason: 'counterexample_pending', at: this.now() };
+        continue;
+      }
+      if (state.parked[id] || statementIncomplete(asset.body)) continue;
+      if (asset.data.status === 'approved' && isApproved(input.approvals, 'asset', id, asset.raw)) continue;
+      const falsified = this.isFalsified(id, asset.raw, input.checks);
+      // A deeper search the researcher asked for (search request) runs even on a checked statement, like a goal's.
+      const deeper = Boolean(await this.searchRequest(id));
+      const requested = requests.includes(id);
+      if (deeper || (!falsified && (input.refuteSearch === 'all' || requested) && (allowed || requested))) { search ??= { stage: 'search', assetId: id, mode: 'refute' }; continue; }
+      await this.enqueueApproval('asset', id, falsified
+        ? 'Conjecture: a counterexample search found nothing; agree on the statement so the paper may state it.'
+        : 'Conjecture: agree on the statement so the paper may state it (no counterexample search has checked it).');
+    }
+    if (search) return search;
+    const ideas = await this.conjectureIdeas();
+    const next = ideas.find((idea) => requests.includes(idea.id)) ?? (allowed ? ideas[0] : undefined);
+    return next ? { stage: 'conjecture', ideaId: next.id } : undefined;
+  }
+
+  /** Draft conjecture ideas not yet tried, the researcher's first. */
+  private async conjectureIdeas(): Promise<AssetInfo[]> {
+    const tried = new Set(this.require().conjectureTried ?? []);
+    return [...(await this.collect(this.paths.ideas)).values()]
+      .filter((idea) => idea.data.type === 'idea' && idea.data.status === 'draft' && idea.data.idea_kind === 'conjecture' && !tried.has(idea.id))
+      .sort((a, b) => Number(b.data.origin === 'researcher') - Number(a.data.origin === 'researcher') || a.id.localeCompare(b.id));
+  }
+
+  /** The researcher asks for a conjecture idea to be made precise, or a conjecture to be searched, whatever the settings allow. */
+  async requestConjecture(id: string): Promise<string> {
+    const state = this.require();
+    const idea = await this.files.readFile(`${this.paths.ideas}/${id}.md`).catch(() => '');
+    const asset = idea ? '' : await this.files.readFile(`${this.paths.assets}/${id}.md`).catch(() => '');
+    const data = idea ? parseMarkdown(idea).data : asset ? parseMarkdown(asset).data : undefined;
+    if (!data) throw new Error(`Unknown idea or conjecture ${id}.`);
+    if (idea && (data.idea_kind !== 'conjecture' || data.status !== 'draft')) throw new Error(`${id} is not a draft conjecture idea (idea_kind: conjecture).`);
+    if (asset && data.type !== CONJECTURE_TYPE) throw new Error(`${id} is not a conjecture.`);
+    state.conjectureRequests = [...new Set([...(state.conjectureRequests ?? []), id])];
+    if (idea) state.conjectureTried = (state.conjectureTried ?? []).filter((item) => item !== id);
+    await this.save();
+    await this.event('conjecture_requested', { id });
+    return idea
+      ? `The agent makes ${id} precise once nothing on the way to the goals is actionable.`
+      : `The agent searches ${id} for a counterexample once nothing on the way to the goals is actionable.`;
+  }
+
+  /** A conjecture is settled for now: take it off the researcher's requests. */
+  private dropConjectureRequest(id: string): void {
+    const state = this.require();
+    if (!state.conjectureRequests?.includes(id)) return;
+    state.conjectureRequests = state.conjectureRequests.filter((item) => item !== id);
+    if (!state.conjectureRequests.length) delete state.conjectureRequests;
+  }
+
+  /** A retyped node keeps its falsification: the check is carried over to the new statement digest when only the type or the motivation changed. */
+  private async carryChecks(id: string, before: string, after: string, change: string): Promise<void> {
+    const checks = await this.checks();
+    if (this.isFalsified(id, after, checks)) return;
+    const digest = statementDigest(before);
+    const old = checks.filter((check) => check.target === id && check.statementDigest === digest).pop();
+    if (!old) return;
+    const outcome = old.outcome === 'counterexample_rejected' ? 'counterexample_rejected' : 'no_counterexample_found';
+    await this.writeCheck(id, outcome, `- Carried over from ${old.id}: only ${change} changed, not the mathematical statement.`, `See ${old.id} for the cases searched and the limitations of that search.`);
+  }
+
+  /**
+   * Make a conjecture a goal. Only while the goals are drafted (an extension the researcher asked
+   * for, or an autonomous reassessment or exploration), because project.md must list it next. The
+   * status returns to draft, so an agreed statement is never taken for a proof.
+   */
+  async promoteConjecture(id: string, as: string): Promise<string> {
+    const state = this.require();
+    if (state.stage !== 'draft_project') throw new Error(`A conjecture becomes a goal while the goals are drafted: run ${LOOP_COMMAND} extend --goal "Take up the conjecture ${id}" (at the researcher's request), then promote it in that stage.`);
+    if (!(PROMOTED_TYPES as readonly string[]).includes(as)) throw new Error(`--as must be one of ${PROMOTED_TYPES.join(', ')}.`);
+    const file = `${this.paths.assets}/${id}.md`;
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw) throw new Error(`Unknown asset ${id}.`);
+    const parsed = parseMarkdown(raw);
+    if (parsed.data.type !== CONJECTURE_TYPE) throw new Error(`${id} is a ${String(parsed.data.type)}, not a conjecture.`);
+    if (!['draft', 'approved'].includes(parsed.data.status)) throw new Error(`${id} is ${String(parsed.data.status)}; only an active conjecture becomes a goal.`);
+    const examples = [...(await this.collectKind('asset')).values()].filter((asset) => asset.data.type === 'example' && asset.data.refutes === id && ['draft', 'approved'].includes(asset.data.status));
+    if (examples.length) throw new Error(`${id} has a counterexample (${examples.map((item) => item.id).join(', ')}); it cannot become a goal.`);
+    parsed.data.type = as;
+    parsed.data.status = 'draft';
+    delete parsed.data.serves;
+    delete parsed.data.priority;
+    const promoted = stringifyMarkdown(parsed.content, parsed.data);
+    await this.writeOwned(file, promoted);
+    await this.carryChecks(id, raw, promoted, 'the type');
+    this.dropConjectureRequest(id);
+    await this.save();
+    await this.event('conjecture_promoted', { id, as });
+    return `${id} is now a draft ${as}. List it under required_results in ${this.paths.projectMd} and say in ## Intended Contribution what it adds; then report as the stage asks.`;
+  }
+
+  /**
+   * Turn a draft result that no goal needs any more (a new route got past it) into a conjecture,
+   * instead of leaving it set aside: its failed plans and search records stay with it. Its pending
+   * plans are abandoned and the park is lifted. Between stages only, never for the current asset.
+   */
+  async demoteToConjecture(id: string, note: string, serves: string[] = []): Promise<string> {
+    const state = this.require();
+    if (state.current.assetId === id && !['select', 'waiting', 'ready', 'draft_project'].includes(state.stage)) throw new Error(`${id} is the asset of the current stage ${state.stage}; finish the stage first.`);
+    const file = `${this.paths.assets}/${id}.md`;
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw) throw new Error(`Unknown asset ${id}.`);
+    const parsed = parseMarkdown(raw);
+    if (!(PROMOTED_TYPES as readonly string[]).includes(parsed.data.type)) throw new Error(`Only a theorem, lemma, or proposition becomes a conjecture; ${id} is a ${String(parsed.data.type)}.`);
+    if (parsed.data.status !== 'draft') throw new Error(`${id} is ${String(parsed.data.status)}; only a draft result becomes a conjecture.`);
+    if (proofText(parsed.content)) throw new Error(`${id} has a proof waiting for review; review it instead.`);
+    const assets = await this.collectKind('asset');
+    const required = requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => ''));
+    const { order } = assetClosure(required, assets);
+    if (order.includes(id)) throw new Error(`${id} is still on the way to the goals${required.includes(id) ? ' (it is a required result)' : ''}; change the goals first so that none depends on it.`);
+    for (const target of serves) if (!assets.has(target)) throw new Error(`serves names an unknown result: ${target}.`);
+    const motivation = sectionContent(parsed.content, 'Motivation');
+    if (!note.trim() && !motivation) throw new Error('Say in --note why it is still believed and what it would give; it becomes the ## Motivation.');
+    const content = note.trim()
+      ? motivation ? parsed.content.replace(/^## Motivation[ \t]*$/m, `## Motivation\n\n${note.trim()}\n`) : `${parsed.content.trimEnd()}\n\n## Motivation\n\n${note.trim()}\n`
+      : parsed.content;
+    parsed.data.type = CONJECTURE_TYPE;
+    if (serves.length) parsed.data.serves = serves;
+    const demoted = stringifyMarkdown(content, parsed.data);
+    await this.writeOwned(file, demoted);
+    await this.carryChecks(id, raw, demoted, 'the type and the motivation');
+    const abandoned = await this.abandonPlans(id, 'Abandoned: the result became a conjecture, since no goal needs it any more.');
+    await this.clearPark(id, 'It became a conjecture: no goal needs it any more.');
+    await this.save();
+    await this.event('conjecture_demoted', { id, abandoned });
+    return `${id} is now a conjecture${abandoned.length ? `; its pending plan(s) ${abandoned.join(', ')} were abandoned` : ''}. Its failed plans and search records stay with it.`;
+  }
+
+  /** Conjectures ranked against the goals (see rankConjectures). */
+  private async rankedConjectures(): Promise<RankedConjecture[]> {
+    const state = this.require();
+    const { assets, proved } = await this.progress();
+    const required = requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => ''));
+    const open = new Set<string>(assetClosure(required.filter((id) => !proved.has(id)), assets).order.filter((id) => !proved.has(id)));
+    for (const id of Object.keys(state.parked)) open.add(id);
+    const checks = await this.checks();
+    const approvals = (await this.approvals()).records;
+    const examples = [...assets.values()].filter((asset) => asset.data.type === 'example' && typeof asset.data.refutes === 'string');
+    const raisedBy = new Set([...(await this.collect(this.paths.ideas)).values()].filter((idea) => idea.data.origin === 'researcher' && idea.data.idea_kind === 'conjecture' && typeof idea.data.resolved_by === 'string').map((idea) => String(idea.data.resolved_by)));
+    const conjectures = [...assets.values()].filter((asset) => !asset.origin && asset.data.type === CONJECTURE_TYPE).map((asset) => ({
+      id: asset.id,
+      status: asset.data.status === 'approved' && !isApproved(approvals, 'asset', asset.id, asset.raw) ? 'draft' : String(asset.data.status),
+      serves: Array.isArray(asset.data.serves) ? asset.data.serves.map(String) : [],
+      priority: asset.data.priority === 'high' || asset.data.priority === 'low' ? asset.data.priority : undefined,
+      researcher: raisedBy.has(asset.id),
+      falsified: this.isFalsified(asset.id, asset.raw, checks),
+      refuted: examples.some((example) => example.data.refutes === asset.id && example.data.status === 'approved'),
+    }));
+    return rankConjectures(conjectures, { open, proved: new Set(proved.keys()) });
+  }
+
+  /** Every active conjecture, ranked; for `conjecture list`. */
+  async conjectureList(): Promise<RankedConjecture[]> { return this.rankedConjectures(); }
+
+  /** The conjectures worth taking up next, for the researcher: at the end of the goals and at hand-back. */
+  async conjectureRecommendation(): Promise<string | undefined> {
+    const ranked = (await this.rankedConjectures()).filter((item) => item.agreed || item.falsified);
+    if (!ranked.length) return undefined;
+    return `Conjectures worth taking up next, best first:\n${describeConjectures(ranked, CONJECTURES_LISTED)}\nRecommend them to the researcher. If they want one as a goal, run ${LOOP_COMMAND} extend --goal "Take up the conjecture <id>" and promote it there (${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition).`;
+  }
+
+  /**
+   * Autonomous mode, with the researcher's permission (autonomyConjectures): the goals are proved,
+   * or nothing else is left that the agent can do, so it takes up a conjecture as a goal of its
+   * own, best first. An extension like a reassessment's: it never drops the researcher's goals.
+   * Returns whether an exploration started.
+   */
+  private async exploreConjecture(run: NonNullable<LoopState['autonomy']>, why: string): Promise<boolean> {
+    const state = this.require();
+    const settings = await this.loopSettings();
+    if ((run.explored ?? 0) >= settings.autonomyConjectures || !(await this.isProjectApproved())) return false;
+    const ranked = (await this.rankedConjectures()).filter((item) => item.agreed || item.falsified);
+    if (!ranked.length) return false;
+    run.explored = (run.explored ?? 0) + 1;
+    const left = Math.max(0, settings.autonomyBudget - run.spent);
+    const goal = [
+      `Autonomous exploration ${run.explored} of ${settings.autonomyConjectures} (the researcher is away and allowed it): ${why}. Take up one conjecture as a goal of your own; the leading ones, best first:`,
+      describeConjectures(ranked, CONJECTURES_LISTED),
+      `Read the leading ones (show <id>) and judge which is worth the budget (${left} attempt(s) left). To take one up: ${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition, list it under required_results, and say in ## Intended Contribution what it adds. Then run: ${LOOP_COMMAND} report complete --summary "<what you took up and why>". If none is worth it now, run: ${LOOP_COMMAND} report none --summary "<why>"; the loop then hands back.`,
+    ].join('\n');
+    await this.markExtension(goal);
+    state.researcherInput = { kind: 'autonomous_conjecture', text: goal, at: this.now() };
+    state.lastError = null;
+    await this.event('autonomy_exploration', { explored: run.explored, candidates: ranked.slice(0, CONJECTURES_LISTED).map((item) => item.id) });
+    await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined, ideaId: undefined });
+    return true;
   }
 
   // ---------- rewordings from the teaching chat ----------
@@ -1734,12 +1981,20 @@ export class ResearchLoopCore {
       const file = `${this.paths.assets}/${state.current.assetId}.md`;
       const data = (await this.files.exists(file)) ? parseMarkdown(await this.files.readFile(file)).data : undefined;
       if (!data || data.status !== 'draft' || state.parked[state.current.assetId]) recompute = true;
+      if (data?.type === CONJECTURE_TYPE && !SEARCH_STAGES.has(state.stage)) recompute = true;
+    }
+    if (state.stage === 'conjecture') {
+      const idea = state.current.ideaId ? await this.files.readFile(`${this.paths.ideas}/${state.current.ideaId}.md`).catch(() => '') : '';
+      let draft = false;
+      try { draft = Boolean(idea) && parseMarkdown(idea).data.status === 'draft'; } catch { /* unreadable: choose again */ }
+      if (!draft) recompute = true;
     }
     // Between stages, a rewording from the teaching chat goes first: its check is short and the researcher is waiting on it.
     if (recompute && await this.startRevision()) recompute = false;
     if (recompute) {
       const selection = await this.computeSelection();
-      const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined };
+      const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined, ideaId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined, ideaId: undefined };
+      if (selection.stage === 'conjecture') patch.ideaId = selection.ideaId;
       if (selection.stage === 'plan' && 'assetId' in selection) patch.planId = await this.pendingPlan(selection.assetId);
       if (selection.stage === 'verify_proof') patch.planId = selection.planId;
       if (selection.stage === 'search') {
@@ -1759,12 +2014,15 @@ export class ResearchLoopCore {
       if (selection.stage === 'scaffold') state.scaffoldBrief = { missing: selection.missing, incomplete: selection.incomplete, ...(selection.missingDefinitions?.length ? { missingDefinitions: selection.missingDefinitions } : {}) };
       if (selection.stage === 'waiting') { state.lastError = selection.reason; state.waitingOn = selection.waitingOn; }
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
-      if (selection.stage === 'waiting' && run && !(await this.assessGoals(run))) return this.result(await this.handOver(`nothing is left that it can do on its own (${selection.reason})`));
+      if (selection.stage === 'waiting' && run && !(await this.assessGoals(run)) && !(await this.exploreConjecture(run, `nothing else is left that it can do on its own (${selection.reason})`))) return this.result(await this.handOver(`nothing is left that it can do on its own (${selection.reason})`));
+      if (selection.stage === 'ready' && run) await this.exploreConjecture(run, 'every goal is proved');
     }
     const result = this.result();
     if (state.stage === 'ready') {
       const manuscript = await this.manuscriptStatus();
       if (manuscript) result.instruction += `\n${manuscript}`;
+      const conjectures = await this.conjectureRecommendation();
+      if (conjectures) result.instruction += `\n${conjectures}`;
     }
     if (!hasContextPack(state.stage)) return result;
     const pack = await this.contextPack();
@@ -1959,6 +2217,7 @@ export class ResearchLoopCore {
       case 'discuss_goals':
         return `Stage discuss_goals. Ask the researcher for the research goal, the main claim, and constraints with ask_researcher(kind: "goals"). If they answer, the loop moves to draft_project automatically. Without the MCP tool, ask in chat and record the answer with: ${LOOP_COMMAND} question answer --text "..." (or report complete --summary "<their goal>").${input}`;
       case 'draft_project':
+        if (state.researcherInput?.kind === 'autonomous_conjecture') return `Stage draft_project: an autonomous exploration.\n${state.researcherInput.text}\nIf you take one up, edit only ${this.paths.projectMd} (the promote command retypes the conjecture).${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}`;
         if (state.researcherInput?.kind === 'autonomous_revision') return `Stage draft_project: an autonomous reassessment of the goals.\n${state.researcherInput.text}\nIf you add goals, edit only ${this.paths.projectMd}.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}`;
         return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}${input}${report('complete|question')}`;
       case 'review_project':
@@ -1998,6 +2257,10 @@ export class ResearchLoopCore {
         return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. A result the plan adapts comes with its proof in the pack: follow it and check each changed step, rather than proving the step anew. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft), then set the plan status succeeded and add ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
       case 'verify_proof':
         return `Stage verify_proof for asset ${asset} (plan ${state.current.planId}). Use the verify-proof skill. Check the ## Proof in the pack against the statement, step by step, as a referee would: every step follows, every hypothesis of a cited result holds, nothing is assumed that the statement does not give. Do not read the plan's reasoning. Add ## Verdict to ${this.paths.plans}/${state.current.planId}.md: first line confirmed or rejected; for rejected, name the first step that fails and why. Change nothing else; never edit ${asset}.${report('confirmed|rejected|question')}`;
+      case 'conjecture': {
+        const idea = state.current.ideaId ?? '(none)';
+        return `Stage conjecture for the idea ${idea}. Read it (${LOOP_COMMAND} show ${idea}) and the results it relates to. Make it precise as one new conjecture in ${this.paths.assets}/<id>.md: type conjecture, title, status draft, source.kind original, depends_on, uses_definitions, serves (the results it would unblock or strengthen: an open goal, a set-aside result, or a proved one), a precise statement, and ## Motivation (why it is believed: evidence, special cases; and what it would give). Use existing definitions (search the library first, ${LOOP_COMMAND} library search <words>) or draft new ones in ${this.paths.definitions}/. Do not search, plan, or prove it: the loop searches it for a counterexample next, and the researcher agrees on its statement. If it cannot be stated precisely, or it is known, false, or trivial, write nothing and report none with the reason; the idea stays for the researcher with your note. Run research-maintenance validate and links.${report('complete --asset <id>|none|question')}`;
+      }
       case 'waiting':
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
@@ -2059,7 +2322,7 @@ export class ResearchLoopCore {
     const folders = this.folders();
     const isIn = (file: string, folder: string) => path.posix.dirname(file) === folder;
     const allowedFolders = new Set<string>([folders.ideas]);
-    if (stage === 'scaffold' || stage === 'sources') { allowedFolders.add(folders.assets); allowedFolders.add(folders.definitions); }
+    if (stage === 'scaffold' || stage === 'sources' || stage === 'conjecture') { allowedFolders.add(folders.assets); allowedFolders.add(folders.definitions); }
     const search = state.current.search;
     if (stage === 'verify_counterexample') allowedFolders.add(folders.assets);
     if (stage === 'search') { allowedFolders.add(folders.candidates); if (search?.slots.length === 1) allowedFolders.add(folders.checks); }
@@ -2088,7 +2351,9 @@ export class ResearchLoopCore {
       const raw = await this.files.readFile(file);
       try { validateResearchFile(file, raw, folders, paperIds); } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); continue; }
       const data = parseMarkdown(raw).data;
-      if (modified.includes(file) && ['scaffold', 'sources', 'search', 'search_summary', 'plan'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
+      if (stage === 'conjecture' && isIn(file, folders.assets) && data.type !== CONJECTURE_TYPE) problems.push(`${file}: this stage writes one conjecture (type conjecture) and nothing else in ${folders.assets}.`);
+      if (stage === 'conjecture' && isIn(file, folders.ideas) && modified.includes(file) && path.posix.basename(file, '.md') === state.current.ideaId && parseMarkdown(raw).data.status !== 'draft') problems.push(`${file}: leave the idea draft; the loop resolves it from your report.`);
+      if (modified.includes(file) && ['scaffold', 'sources', 'search', 'search_summary', 'plan', 'conjecture'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
       if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.counterexampleId}.md`) problems.push(`${file}: verification may change only the candidate example.`);
       if (stage === 'execute' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md`) problems.push(`${file}: execution may change only its target asset.`);
       if (stage === 'execute' && isIn(file, folders.plans) && file !== `${folders.plans}/${state.current.planId}.md`) problems.push(`${file}: execution may change only its active plan.`);
@@ -2134,6 +2399,7 @@ export class ResearchLoopCore {
       }
       for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (typeof definition !== 'string' || !knownDefinitions.has(definition)) problems.push(`${file}: unknown definition ${String(definition)}.`);
       if (data.type === 'example' && typeof data.refutes === 'string' && !(await this.files.exists(`${folders.assets}/${data.refutes}.md`))) problems.push(`${file}: refutes unknown asset ${data.refutes}.`);
+      for (const target of Array.isArray(data.serves) ? data.serves : []) if (typeof target !== 'string' || !knownAssets.has(target)) problems.push(`${file}: serves unknown result ${String(target)}.`);
     }
     if (stage === 'sources') {
       const { before } = await this.changedFiles();
@@ -2211,8 +2477,9 @@ export class ResearchLoopCore {
   async report(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
     const { stage, current: { assetId } } = this.require();
     const result = await this.reportStage(report);
-    // An autonomous run pays for each executed plan and each search round.
-    const attempt = (stage === 'execute' && (report.outcome === 'proved' || report.outcome === 'failed')) || (stage === 'search' && report.outcome === 'searched');
+    // An autonomous run pays for each executed plan, each search round, and each conjecture idea it tries to make precise.
+    const attempt = (stage === 'execute' && (report.outcome === 'proved' || report.outcome === 'failed')) || (stage === 'search' && report.outcome === 'searched')
+      || (stage === 'conjecture' && (report.outcome === 'complete' || report.outcome === 'none'));
     const handover = attempt ? await this.charge(assetId, stage, report.outcome) : undefined;
     return handover ? { stage: this.require().stage, message: `${result.message}\n${handover}` } : result;
   }
@@ -2257,7 +2524,19 @@ export class ResearchLoopCore {
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
         const assessment = run && state.researcherInput?.kind === 'autonomous_revision' ? run.assessment ?? { at: this.now(), proved: [], setAside: [] } : undefined;
-        const added = assessment && state.extension ? requiredAssetIds(project).filter((id) => !state.extension!.baselineRequired.includes(id)) : [];
+        const exploring = Boolean(run) && state.researcherInput?.kind === 'autonomous_conjecture';
+        const added = (assessment || exploring) && state.extension ? requiredAssetIds(project).filter((id) => !state.extension!.baselineRequired.includes(id)) : [];
+        if (exploring && report.outcome === 'none') {
+          // No conjecture worth the budget: the goals stay as they were, and the run ends.
+          delete state.extension;
+          state.researcherInput = undefined;
+          await this.setStage('select', { assetId: undefined });
+          return { stage: 'select', message: await this.handOver(`it found no conjecture worth taking up (${report.summary.split('\n')[0]})`) };
+        }
+        if (exploring && !added.length) throw new Error(`Nothing changed: take up a conjecture (${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition, and list it under required_results), or run ${LOOP_COMMAND} report none --summary "<why>".`);
+        const goalAssets = await this.collectKind('asset');
+        const resting = assetClosure(requiredAssetIds(project), goalAssets).order.filter((id) => goalAssets.get(id)?.data.type === CONJECTURE_TYPE);
+        if (resting.length) throw new Error(`The goals rest on the conjecture(s) ${resting.join(', ')}, which the loop does not prove: promote each (${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition) or change the goals so that none depends on it.`);
         if (assessment) {
           const broughtBack = (assessment.broughtBack ?? []).filter((id) => !state.parked[id]);
           if (report.outcome === 'none' && !broughtBack.length) {
@@ -2302,6 +2581,28 @@ export class ResearchLoopCore {
         state.researcherInput = undefined;
         if ((await this.autoApproveQueued()).includes('project:project')) return finish('project.md drafted and approved automatically (auto mode). Continue with next.', 'select');
         return finish('project.md drafted; request the researcher\'s approval with request_approval(kind: "project").', 'review_project');
+      }
+      case 'conjecture': {
+        const ideaId = state.current.ideaId;
+        if (!ideaId) throw new Error(`No conjecture idea is open; run ${LOOP_COMMAND} next.`);
+        const { added } = await validated();
+        const created = added.filter((file) => path.posix.dirname(file) === this.paths.assets).map((file) => path.posix.basename(file, '.md'));
+        state.conjectureTried = [...new Set([...(state.conjectureTried ?? []), ideaId])];
+        this.dropConjectureRequest(ideaId);
+        if (report.outcome === 'none') {
+          if (created.length) throw new Error(`report none writes no conjecture; remove ${created.join(', ')} or report complete --asset <id>.`);
+          if (!report.summary.trim()) throw new Error('Say in --summary why the idea cannot be made a precise conjecture now.');
+          const file = `${this.paths.ideas}/${ideaId}.md`;
+          const parsed = parseMarkdown(await this.files.readFile(file));
+          await this.writeOwned(file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Not yet a conjecture\n\n${report.summary.trim()}\n`, parsed.data));
+          return finish(`The idea ${ideaId} stays an idea, with your note. Continue with next.`, 'select', { ideaId: undefined });
+        }
+        if (report.outcome !== 'complete') throw new Error('conjecture outcome must be complete --asset <id>, none, or question.');
+        const assetId = report.assetId ?? (created.length === 1 ? created[0] : undefined);
+        if (!assetId) throw new Error(`Write exactly one new conjecture and pass --asset <id>; found ${created.length ? created.join(', ') : 'none'}.`);
+        if (!created.includes(assetId)) throw new Error(`${assetId} is not a conjecture written in this stage.`);
+        await this.resolveIdea(ideaId, assetId);
+        return finish(`Conjecture ${assetId} recorded from the idea ${ideaId}. Next: the loop searches it for a counterexample (when allowed), then asks to agree on its statement. Continue with next.`, 'select', { ideaId: undefined });
       }
       case 'scaffold': {
         await validated();
@@ -2385,6 +2686,7 @@ export class ResearchLoopCore {
           return this.afterSearchRound(assetId, finish);
         }
         await this.writeCheck(assetId, 'counterexample_rejected', `Candidate ${exampleId} was checked independently and rejected:\n\n${sectionContent(example.content, 'Verdict') || report.summary}`, 'Only this candidate family was examined; no systematic search beyond it is recorded here.');
+        if (await this.isConjecture(assetId)) return finish(`Candidate rejected; the conjecture ${assetId} stands. Continue with next.`, 'select', { assetId: undefined, counterexampleId: undefined });
         return finish(`Candidate rejected. Next: plan for ${assetId}.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
       }
       case 'plan': {
@@ -2554,6 +2856,7 @@ export class ResearchLoopCore {
         }
         for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) if (!definitions.has(String(definition))) problems.push(`${file}: unknown definition ${String(definition)}.`);
         if (typeof data.refutes === 'string' && !assets.has(data.refutes)) problems.push(`${file}: refutes unknown asset ${data.refutes}.`);
+        for (const target of Array.isArray(data.serves) ? data.serves : []) if (!assets.has(String(target))) problems.push(`${file}: serves unknown result ${String(target)}.`);
         if ((folder === folders.plans || folder === folders.checks || folder === folders.candidates) && typeof data.target_asset === 'string' && !assets.has(data.target_asset)) problems.push(`${file}: targets unknown asset ${data.target_asset}.`);
       }
     }
@@ -2690,9 +2993,11 @@ export class ResearchLoopCore {
     delete run.deciding;
     const text = `Autonomous run finished: ${reason}.`;
     await this.event('autonomy_handover', { reason, spent: run.spent });
-    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent reassessed what the goals still need ${run.revisions} time(s), keeping yours` : ''}.`);
+    const ranked = (await this.rankedConjectures()).filter((item) => item.agreed || item.falsified);
+    const conjectures = ranked.length ? `\n\nConjectures worth taking up next, best first:\n${describeConjectures(ranked, CONJECTURES_LISTED)}` : '';
+    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent reassessed what the goals still need ${run.revisions} time(s), keeping yours` : ''}${run.explored ? `; it took up ${run.explored} conjecture(s) as goals of its own` : ''}.${conjectures}`);
     await this.pause(text);
-    return `${text} The loop is handed back to the researcher: stop working now and tell them briefly what was proved, what was set aside, and what waits for their review.`;
+    return `${text} The loop is handed back to the researcher: stop working now and tell them briefly what was proved, what was set aside, and what waits for their review${ranked.length ? `, and recommend the conjectures worth taking up next (${ranked.slice(0, 3).map((item) => item.id).join(', ')}; ${LOOP_COMMAND} conjecture list ranks them)` : ''}.`;
   }
 
   autonomyNote(run: NonNullable<LoopState['autonomy']>): string {
@@ -2720,15 +3025,19 @@ export class ResearchLoopCore {
     run.assessment = { at: this.now(), proved: [...progress.proved.keys()], setAside: progress.setAside.map(([id, info]) => `${id}@${info.at}`), candidates: gap.candidates };
     await this.files.writeFile(ASSESSMENT_PATH, gap.full);
     const left = Math.max(0, settings.autonomyBudget - run.spent);
+    const serving = (await this.rankedConjectures()).filter((item) => item.rank === 0 && (item.agreed || item.falsified));
+    const offPath = progress.setAside.map(([id]) => id).filter((id) => !gap.blockers.includes(id) && PROMOTED_TYPES.includes(progress.assets.get(id)?.data.type));
     // The lead and the choice come first and stay short: an agent may see only the head of a long instruction.
     const goal = [
       `Autonomous reassessment ${run.revisions} of ${settings.autonomyRevisions} (the researcher is away): nothing is actionable, but ${gap.focus.length ? `the researcher's focus ${gap.focus.join(', ')} is open${gap.outside ? ` (${gap.outside} other open required result(s) lie outside it)` : ''}` : `${gap.open} required result(s) are open`}. Before you stop, judge what still separates ${gap.focus.length ? 'the focus' : 'the project'} from its goals and act on it.`,
       gap.brief,
       gap.narrow ? 'The frontier is narrow: unless an obstruction above is false, the way on is (b), a result that supplies it.' : '',
-      'Read a candidate before you judge it (show <id>), then do either or both:',
+      `Read a candidate before you judge it (show <id>), then do ${serving.length ? 'any' : 'either or both'}:`,
       `(a) Bring back a set-aside result when something proved since it was set aside, or a genuinely different idea, gets past its recorded obstruction: ${LOOP_COMMAND} budget allocate <id> <n> --reason "<what changed and how it gets past the obstruction>" (${left} attempt(s) of the budget left; the reason becomes the direction its plans must follow). Bring back the set-aside results it depends on too.`,
       '(b) Add the missing step as a new result under new asset ID(s): a lemma that supplies an obstruction above, or a weaker form of it that still serves the goal; or a weaker statement, a special case, or another route to the goal. Say in ## Intended Contribution what changed and why; once it is proved, the next reassessment can bring back what it unblocks, and the researcher decides at hand-back whether to keep the originals.',
-      `Then run: ${LOOP_COMMAND} report complete --summary "<the gap as you see it, and what you chose>". Only if neither is sound, run: ${LOOP_COMMAND} report none --summary "<why>"; the loop then asks you about each leading candidate before it hands back.`,
+      serving.length ? `(c) Take up a conjecture that serves an open goal, as a goal: ${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition, then list it under required_results. The leading ones:\n${describeConjectures(serving, CONJECTURES_LISTED)}` : '',
+      offPath.length ? `Set-aside results no goal needs any more (${offPath.slice(0, CONJECTURES_LISTED).join(', ')}${offPath.length > CONJECTURES_LISTED ? ', …' : ''}): if one is still believed, keep it as a conjecture: ${LOOP_COMMAND} conjecture demote <id> --note "<why it is believed and what it would give>" [--serves id,id].` : '',
+      `Then run: ${LOOP_COMMAND} report complete --summary "<the gap as you see it, and what you chose>". Only if ${serving.length ? 'none' : 'neither'} is sound, run: ${LOOP_COMMAND} report none --summary "<why>"; the loop then asks you about each leading candidate before it hands back.`,
     ].filter(Boolean).join('\n');
     await this.markExtension(goal);
     state.researcherInput = { kind: 'autonomous_revision', text: goal, at: this.now() };
