@@ -69,6 +69,8 @@ export interface ContextFocus {
   assetId?: string;
   planId?: string;
   counterexampleId?: string;
+  /** Stage `conjecture`: the conjecture idea to make precise. */
+  ideaId?: string;
   missing?: string[];
   incomplete?: string[];
   researcherInput?: string;
@@ -84,12 +86,12 @@ export interface RenderedContext { text: string; tokens: number; included: Conte
 
 export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
-  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000,
+  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000, conjecture: 10000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
-  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep',
+  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep', conjecture: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }
@@ -258,6 +260,19 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
           items.push({ kind: 'text', id: 'proof_style', view: 'all', priority: 1, reason: 'how the researchers want proofs written: follow it', text: sources.style.trim() });
         }
       }
+      break;
+    }
+    case 'conjecture': {
+      const idea = focus.ideaId ? sources.ideas.get(focus.ideaId) : undefined;
+      if (!idea) break;
+      add('idea', idea.id, idea.file, 'all', 0, 'the conjecture idea to make precise');
+      const related = list(idea.data.related_assets);
+      for (const id of related) asset(id, 'statement', 1, 'a result the idea relates to; serves may name it');
+      definitionsOf(related, 1, 3);
+      add('project', 'project', sources.projectFile, ['Main Problem', 'Required Results'], 1, 'the goals a conjecture may serve');
+      for (const node of sources.assets.values()) if (!node.origin && node.data.type === 'conjecture' && ['draft', 'approved'].includes(node.data.status)) asset(node.id, 'statement', 2, 'an existing conjecture; do not state it again');
+      add('index', 'index', undefined, 'all', 3, 'existing IDs, for depends_on, uses_definitions, and serves');
+      excluded.push('proofs (a conjecture is stated, not proved)', 'paper transcriptions');
       break;
     }
     case 'verify_proof':

@@ -1,5 +1,6 @@
 import React from 'react';
 import type { GraphAction, GraphNodeView, GraphPayload } from '../../src/models/graph';
+import { isPrerequisiteEdge } from '../../src/models/graph';
 import { KEEP_TRYING_HINT, keepTryingLabel, kindLabel } from '../../src/domain/copy';
 import { MarkdownPreview } from '../components/MarkdownPreview';
 import { ActionRow, buttonStyle } from './AttentionList';
@@ -80,7 +81,7 @@ export function boxStyle(color: string = COLOR.border, selected = false): React.
 export function ResultCard({ node, payload, expanded, onToggle, onAction, onDetails, elsewhere, onTrace, onClose, innerRef, selected = false }: Props) {
   const style = nodeStyle(node);
   const byId = new Map(payload.nodes.map((item) => [item.id, item]));
-  const prerequisites = payload.edges.filter((edge) => edge.from === node.id && edge.type !== 'refutes').map((edge) => byId.get(edge.to)).filter((item): item is GraphNodeView => Boolean(item));
+  const prerequisites = payload.edges.filter((edge) => edge.from === node.id && isPrerequisiteEdge(edge)).map((edge) => byId.get(edge.to)).filter((item): item is GraphNodeView => Boolean(item));
   const holds = node.blocks.filter((id) => id !== node.id).map((id) => byId.get(id)?.title ?? id);
   const item = payload.attention.find((entry) => entry.target === node.id);
   const loopRunning = payload.loop?.status === 'running' || payload.loop?.status === 'paused';

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphEdgeView, GraphNodeView } from '../../src/models/graph';
+import { isPrerequisiteEdge } from '../../src/models/graph';
 import { kindLabel } from '../../src/domain/copy';
 import { COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
 import type { FoldView } from './graphModel';
@@ -45,7 +46,7 @@ type EdgeKind = keyof typeof EDGE;
 export function GraphCanvas({ nodes, edges, required, folds = [], blocking, selectedId, highlight, onSelect, onBackground, renderCard, height = '100%' }: Props) {
   const requiredSet = useMemo(() => new Set(required), [required]);
   const technical = useTechnical();
-  const placed: Layout = useMemo(() => layout([...nodes.map((node) => ({ id: node.id, required: requiredSet.has(node.id) })), ...folds.map((fold) => ({ id: fold.id }))], edges.filter((edge) => edge.type !== 'refutes')), [nodes, folds, edges, requiredSet]);
+  const placed: Layout = useMemo(() => layout([...nodes.map((node) => ({ id: node.id, required: requiredSet.has(node.id) })), ...folds.map((fold) => ({ id: fold.id }))], edges.filter(isPrerequisiteEdge)), [nodes, folds, edges, requiredSet]);
   const box = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | undefined>();
@@ -122,7 +123,9 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
     if (prerequisite.progress === 'working') return 'working';
     return blocking?.get(edge.to) ?? 'other';
   };
-  const drawn = edges.filter((edge) => edge.type !== 'refutes').map((edge) => ({ edge, kind: edgeKind(edge) }));
+  const drawn = edges.filter(isPrerequisiteEdge).map((edge) => ({ edge, kind: edgeKind(edge) }));
+  /** A conjecture and what it serves: a faint dashed link, outside the prerequisite layout. */
+  const served = edges.filter((edge) => edge.type === 'serves');
   const rank: Record<EdgeKind, number> = { done: 0, other: 1, working: 2, needs_you: 3, stuck: 4 };
   drawn.sort((a, b) => rank[a.kind] - rank[b.kind]);
 
@@ -154,6 +157,20 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
               <path key={`${edge.from}>${edge.to}:${edge.type}`} d={`M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2 - 2}`}
                 fill="none" stroke={style.color} strokeWidth={style.width} strokeDasharray={edge.type === 'uses_definition' && style.width < 2 ? '4 3' : undefined}
                 opacity={dim ? 0.12 : style.opacity} markerEnd={`url(#arrow-${kind})`} />
+            );
+          })}
+          {served.map((edge) => {
+            const from = placed.positions.get(edge.from); const to = placed.positions.get(edge.to);
+            if (!from || !to) return null;
+            const down = to.y >= from.y;
+            const x1 = from.x + NODE_W / 2; const y1 = down ? from.y + NODE_H : from.y; const x2 = to.x + NODE_W / 2; const y2 = down ? to.y : to.y + NODE_H;
+            const bend = Math.max(24, Math.abs(y2 - y1) / 2) * (down ? 1 : -1);
+            const dim = highlight && !(highlight.has(edge.from) && highlight.has(edge.to));
+            return (
+              <path key={`${edge.from}>${edge.to}:serves`} d={`M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}`}
+                fill="none" stroke={COLOR.muted} strokeWidth={1.2} strokeDasharray="2 4" opacity={dim ? 0.12 : 0.7} markerEnd="url(#arrow-other)">
+                <title>{`${byId.get(edge.from)?.title ?? edge.from} would serve ${byId.get(edge.to)?.title ?? edge.to}`}</title>
+              </path>
             );
           })}
           {folds.map((fold) => {

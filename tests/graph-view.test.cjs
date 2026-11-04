@@ -497,3 +497,22 @@ test('text for the researcher: the loop’s vocabulary draws a reminder, mathema
   assert.equal(vocabularyReminder('Proved the gradient bound.'), '');
   assert.match(vocabularyReminder('Worker 2 wrote `cand_x.md`.'), /Writing for the researcher/);
 });
+
+test('a conjecture links to what it serves without becoming its prerequisite', () => {
+  const files = memoryFiles({
+    'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft', deps: ['helper'] }),
+    'research/assets/second.md': node('theorem', { title: 'Second', status: 'draft' }),
+    'research/assets/helper.md': node('lemma', { title: 'Helper', status: 'draft' }),
+    'research/assets/guess.md': node('conjecture', { title: 'Guess', status: 'draft', deps: ['helper'], extra: { serves: ['main'] } }, '## Statement\n\nA guess.\n\n## Motivation\n\nSmall cases.\n'),
+  });
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state: undefined, manuscript: undefined, sectionsDir: 'sections', now: 'now' });
+  assert.ok(payload.edges.some((edge) => edge.from === 'guess' && edge.to === 'main' && edge.type === 'serves'));
+  const byId = new Map(payload.nodes.map((item) => [item.id, item]));
+  assert.deepEqual([byId.get('guess').progressLabel, byId.get('guess').progressDetail], ['Conjecture', 'Not a goal; the loop only searches it for counterexamples']);
+  assert.equal(byId.get('main').closure.total, 2, 'main rests on itself and helper, not on the conjecture');
+  // The conjecture's own dependency survives reduction: guess -> main -> helper is no prerequisite path.
+  const visible = visibleGraph(payload, { ...DEFAULT_OPTIONS, scope: 'all' });
+  assert.ok(visible.edges.some((edge) => edge.from === 'guess' && edge.to === 'helper' && edge.type === 'depends_on'));
+  assert.ok(visible.edges.some((edge) => edge.type === 'serves'));
+  assert.deepEqual(impactOf(payload, 'main').upstream.map((item) => item.id), ['helper']);
+});

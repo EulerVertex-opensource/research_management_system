@@ -17,6 +17,8 @@ export interface NodeFrontmatter {
   target_asset?: string;
   inspired_by?: string[];
   refutes?: string;
+  /** Only on a conjecture: the results it would unblock or strengthen. */
+  serves?: string[];
   idea_kind?: IdeaKind;
 }
 

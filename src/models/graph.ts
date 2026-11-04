@@ -67,9 +67,12 @@ export interface GraphNodeView {
   understanding?: { state: UnderstandingState; level?: UnderstandingLevel; suggested: UnderstandingLevel };
 }
 
-export type GraphEdgeType = 'depends_on' | 'uses_definition' | 'refutes';
+/** `serves`: the conjecture `from` would unblock or strengthen `to`; not a prerequisite either way. */
+export type GraphEdgeType = 'depends_on' | 'uses_definition' | 'refutes' | 'serves';
 /** `from` depends on `to`: the edge is drawn from prerequisite `to` to dependant `from`. */
 export interface GraphEdgeView { from: string; to: string; type: GraphEdgeType }
+/** Edges that make `to` a prerequisite of `from`: the ones layout, closures, and blocking follow. */
+export function isPrerequisiteEdge(edge: { type: string }): boolean { return edge.type === 'depends_on' || edge.type === 'uses_definition'; }
 
 export type AttentionPriority = 0 | 1 | 2 | 3 | 4;
 

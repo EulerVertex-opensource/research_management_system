@@ -233,3 +233,21 @@ test('working on its own, a reassessment offers conjectures that serve a set-asi
   const handoff = [...f.map.entries()].filter(([file]) => file.startsWith('research/handoffs/')).map(([, raw]) => raw).join('\n');
   assert.match(handoff, /Conjectures worth taking up next, best first:\n- add_zero/);
 });
+
+test('making a conjecture precise gets a pack with the idea, what it relates to, the goals, and the conjectures already stated', async () => {
+  const f = fixture(routine());
+  await proveMain(f);
+  f.map.set('research/assets/add_zero.md', conjecture('add_zero', { status: 'deprecated' }));
+  f.map.set('research/assets/mult_one.md', conjecture('mult_one'));
+  await f.core.requestConjecture('mult_one');
+  const ideaId = await f.core.saveIdea('Doubling', 'n + n = 2n for every n.', ['main_theorem'], 'agent', [], 'conjecture');
+  assert.equal((await f.core.next()).stage, 'search', 'a conjecture to search comes before an idea to make precise');
+  await searchNothing(f, 'mult_one');
+  const made = await f.core.next();
+  assert.equal(made.stage, 'conjecture');
+  assert.equal(made.brief.worker, 'deep');
+  const pack = await f.core.contextPack();
+  const ids = pack.manifest.items.map((item) => item.id);
+  for (const id of [ideaId, 'main_theorem', 'project', 'mult_one', 'index']) assert.ok(ids.includes(id), `pack has ${id}`);
+  assert.ok(!ids.includes('add_zero'), 'a retired conjecture is left out');
+});

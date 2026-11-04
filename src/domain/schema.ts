@@ -83,7 +83,8 @@ export function nodeProblems(kind: NodeKind, id: string, data: Record<string, an
   if (data.derived_from !== undefined && typeof data.derived_from !== 'string') problems.push(`${id}: derived_from must be one node ID.`);
   switch (kind) {
     case 'asset': {
-      if (!ASSET_TYPES.has(data.type)) problems.push(`${id}: invalid asset type.`);
+      // Name the known types: a collaborator on a newer extension may use one this version does not know yet.
+      if (!ASSET_TYPES.has(data.type)) problems.push(`${id}: invalid asset type ${String(data.type)} (one of ${[...ASSET_TYPES].join(', ')}; if a collaborator uses a newer Research Assistant, update the extension).`);
       if (!statuses.includes(data.status)) problems.push(`${id}: agent-written assets must stay draft; approval is a researcher action.`);
       problems.push(...sourceProblems(id, data.source, options.paperIds));
       if (data.type === CONJECTURE_TYPE) problems.push(...conjectureProblems(id, data, content));

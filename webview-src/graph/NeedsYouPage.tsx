@@ -1,5 +1,6 @@
 import React from 'react';
 import type { AttentionItem, AttentionPriority, GraphAction, GraphNodeView, GraphPayload } from '../../src/models/graph';
+import { isPrerequisiteEdge } from '../../src/models/graph';
 import { URGENCY_HINT, URGENCY_LABEL, kindLabel, plural } from '../../src/domain/copy';
 import { MarkdownPreview } from '../components/MarkdownPreview';
 import { ActionRow, GROUP_COLOR, when } from './AttentionList';
@@ -43,7 +44,7 @@ function Detail({ item, node, payload, onAction, onNavigate, onShowInResults, on
   const technical = useTechnical();
   const byId = new Map(payload.nodes.map((entry) => [entry.id, entry]));
   const mains = item.blocks.map((id) => byId.get(id)?.title ?? id);
-  const prerequisites = node ? payload.edges.filter((edge) => edge.from === node.id && edge.type !== 'refutes').map((edge) => byId.get(edge.to)).filter((entry): entry is GraphNodeView => Boolean(entry)) : [];
+  const prerequisites = node ? payload.edges.filter((edge) => edge.from === node.id && isPrerequisiteEdge(edge)).map((edge) => byId.get(edge.to)).filter((entry): entry is GraphNodeView => Boolean(entry)) : [];
   return (
     <article style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 820, padding: '14px 16px', borderRadius: 8, border: `1px solid ${tint(GROUP_COLOR[item.priority], 60)}`, background: tint(GROUP_COLOR[item.priority], 7) }}>
       <header style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

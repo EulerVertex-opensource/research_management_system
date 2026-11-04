@@ -1,4 +1,5 @@
 import type { AttentionItem, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView } from '../../src/models/graph';
+import { isPrerequisiteEdge } from '../../src/models/graph';
 
 /**
  * Pure selection logic for the Graph tab: which nodes and edges to draw, so a
@@ -109,7 +110,7 @@ export function visibleGraph(payload: GraphPayload, options: ViewOptions, ignore
   if (search || options.filter !== 'all') {
     const hits = base.filter((node) => (!search || node.id.toLowerCase().includes(search) || node.title.toLowerCase().includes(search)) && matches(node, options.filter)).map((node) => node.id);
     // Keep each hit's path up to the required results it serves, so it stays in context (refutations are not such a path).
-    keep = reach(hits, adjacency(baseEdges.filter((edge) => edge.type !== 'refutes')).dependants);
+    keep = reach(hits, adjacency(baseEdges.filter(isPrerequisiteEdge)).dependants);
   }
   if (options.focus && baseIds.has(options.focus.id)) {
     const both = new Map<string, string[]>();
@@ -120,9 +121,11 @@ export function visibleGraph(payload: GraphPayload, options: ViewOptions, ignore
     keep.add(options.focus.id);
   }
   const nodes = base.filter((node) => keep.has(node.id));
-  const reduced = transitiveReduction(baseEdges.filter((edge) => keep.has(edge.from) && keep.has(edge.to)));
+  const kept = baseEdges.filter((edge) => keep.has(edge.from) && keep.has(edge.to));
+  // Only prerequisites are reduced: a serves or refutes edge never implies, nor is implied by, a dependency.
+  const reduced = transitiveReduction(kept.filter(isPrerequisiteEdge));
   const overCap = !ignoreCap && nodes.length > MAX_VISIBLE;
-  return { nodes: overCap ? [] : nodes, edges: overCap ? [] : reduced.edges, reduced: reduced.removed, hidden: payload.nodes.length - nodes.length, overCap };
+  return { nodes: overCap ? [] : nodes, edges: overCap ? [] : [...reduced.edges, ...kept.filter((edge) => !isPrerequisiteEdge(edge))], reduced: reduced.removed, hidden: payload.nodes.length - nodes.length, overCap };
 }
 
 export interface ImpactResult {
@@ -139,7 +142,7 @@ export interface ImpactResult {
 /** The change-impact view: one step upstream, every dependant downstream, and the manuscript passages that present any of them. */
 export function impactOf(payload: GraphPayload, id: string): ImpactResult {
   const node = payload.nodes.find((item) => item.id === id);
-  const { deps, dependants } = adjacency(payload.edges.filter((edge) => edge.type !== 'refutes'));
+  const { deps, dependants } = adjacency(payload.edges.filter(isPrerequisiteEdge));
   const down = reach([id], dependants);
   const upstreamIds = new Set(deps.get(id) ?? []);
   const byId = new Map(payload.nodes.map((item) => [item.id, item]));
@@ -147,7 +150,7 @@ export function impactOf(payload: GraphPayload, id: string): ImpactResult {
   const upstream = [...upstreamIds].map((item) => byId.get(item)).filter((item): item is GraphNodeView => Boolean(item));
   const keep = new Set([...down, ...upstreamIds]);
   const graphNodes = payload.nodes.filter((item) => keep.has(item.id));
-  const graphEdges = transitiveReduction(payload.edges.filter((edge) => keep.has(edge.from) && keep.has(edge.to) && edge.type !== 'refutes')).edges;
+  const graphEdges = transitiveReduction(payload.edges.filter((edge) => keep.has(edge.from) && keep.has(edge.to) && isPrerequisiteEdge(edge))).edges;
   const affected: ImpactResult['sections'] = [];
   const unaffected: SectionView[] = [];
   for (const section of payload.sections) {
@@ -165,7 +168,7 @@ export interface FoldView { id: string; parent: string; members: string[]; title
 
 export interface FocusedGraph { nodes: GraphNodeView[]; edges: GraphEdgeView[]; folds: FoldView[] }
 
-const PREREQUISITE = (edge: GraphEdgeView) => edge.type !== 'refutes';
+const PREREQUISITE = (edge: GraphEdgeView) => isPrerequisiteEdge(edge);
 
 /**
  * "Still to do": everything `goal` rests on that is not finished, with

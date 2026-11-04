@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphAction, GraphNodeView, GraphPayload } from '../../src/models/graph';
+import { isPrerequisiteEdge } from '../../src/models/graph';
 import type { FocusedGraph } from './graphModel';
 import { layout } from './layout';
 import { ResultCard, boxStyle } from './ResultCard';
@@ -16,7 +17,7 @@ interface Props {
 
 /** Reading order of the graph: top to bottom, left to right, so prerequisites come first and main results last. */
 export function readingOrder(ids: string[], edges: Array<{ from: string; to: string; type?: string }>, required: string[]): string[] {
-  const placed = layout(ids.map((id) => ({ id, required: required.includes(id) })), edges.filter((edge) => edge.type !== 'refutes'));
+  const placed = layout(ids.map((id) => ({ id, required: required.includes(id) })), edges.filter((edge) => !edge.type || isPrerequisiteEdge({ type: edge.type })));
   return [...ids].sort((a, b) => {
     const pa = placed.positions.get(a)!; const pb = placed.positions.get(b)!;
     return pa.y - pb.y || pa.x - pb.x;

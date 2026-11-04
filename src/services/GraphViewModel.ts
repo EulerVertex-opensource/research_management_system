@@ -1,5 +1,5 @@
 import { ProjectPaths, ResearchNode } from '../models/types';
-import { CoverageCell, CoverageRow, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView } from '../models/graph';
+import { CoverageCell, CoverageRow, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView, isPrerequisiteEdge } from '../models/graph';
 import { buildGraph, nodeKey } from '../domain/graph';
 import { nodeKindOf } from '../domain/nodeKinds';
 import { requiredAssetIds } from '../domain/project';
@@ -162,10 +162,11 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       const label = flags.includes('searching') ? 'Agent searching' : stage === 'plan' ? 'Agent planning' : stage === 'execute' ? 'Agent proving' : stage.startsWith('verify') ? 'Agent checking' : 'Agent working';
       return result('working', label, state?.current.search ? `Search round ${state.current.search.round}` : '');
     }
+    // A conjecture waits on nothing: it is not a goal, and the loop only searches it for counterexamples.
+    if (node.type === 'conjecture') return result('waiting', 'Conjecture', 'Not a goal; the loop only searches it for counterexamples');
     const unfinished = [...(node.depends_on ?? []), ...(node.uses_definitions ?? [])].filter((id) => ids.has(id) && statusOf.get(id) !== 'approved');
     if (unfinished.length) return result('waiting', 'Waiting', unfinished.length === 1 ? `Needs ${titleOf.get(unfinished[0]) ?? unfinished[0]} first` : `Needs ${unfinished.length} results first`);
     if (kind === 'definition') return result('waiting', 'Not agreed yet', 'Agree on it before you finish');
-    if (node.type === 'conjecture') return result('waiting', 'Conjecture', 'Not a goal; the loop only searches it for counterexamples');
     return result('waiting', 'Not started', 'Ready to start');
   }
 
@@ -174,6 +175,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     for (const id of node.depends_on ?? []) if (ids.has(id)) edges.push({ from: node.id, to: id, type: 'depends_on' });
     for (const id of node.uses_definitions ?? []) if (ids.has(id)) edges.push({ from: node.id, to: id, type: 'uses_definition' });
     if (typeof node.refutes === 'string' && ids.has(node.refutes)) edges.push({ from: node.id, to: node.refutes, type: 'refutes' });
+    if (node.type === 'conjecture') for (const id of node.serves ?? []) if (ids.has(id)) edges.push({ from: node.id, to: id, type: 'serves' });
   }
 
   const sections: SectionView[] = (manuscript?.sections ?? []).map((section) => {
@@ -223,7 +225,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
 
   // Main results: how much of what they rest on is done.
   const prerequisites = new Map<string, string[]>();
-  for (const edge of edges) if (edge.type !== 'refutes') prerequisites.set(edge.from, [...(prerequisites.get(edge.from) ?? []), edge.to]);
+  for (const edge of edges) if (isPrerequisiteEdge(edge)) prerequisites.set(edge.from, [...(prerequisites.get(edge.from) ?? []), edge.to]);
   for (const id of required) {
     const main = byId.get(id);
     if (!main) continue;

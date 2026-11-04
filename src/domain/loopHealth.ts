@@ -56,7 +56,7 @@ export function computeLoopHealth(input: HealthInput): LoopHealth {
   const { state, nodes, required } = input;
   const title = (id: string) => nodes.get(id)?.title || id;
   const dependants = new Map<string, string[]>();
-  for (const edge of input.edges) if (edge.type !== 'refutes') dependants.set(edge.to, [...(dependants.get(edge.to) ?? []), edge.from]);
+  for (const edge of input.edges) if (edge.type !== 'refutes' && edge.type !== 'serves') dependants.set(edge.to, [...(dependants.get(edge.to) ?? []), edge.from]);
   const requiredSet = new Set(required);
   /** Shortest path from `id` to a main result through what depends on it. */
   const pathToMain = (id: string): string[] => {

@@ -38,6 +38,7 @@ function frontmatterOf(data: Record<string, any>): NodeFrontmatter {
     target_asset: typeof data.target_asset === 'string' ? data.target_asset : undefined,
     inspired_by: list(data.inspired_by),
     refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
+    ...(data.type === 'conjecture' ? { serves: list(data.serves) } : {}),
     idea_kind: typeof data.idea_kind === 'string' ? data.idea_kind as NodeFrontmatter['idea_kind'] : undefined,
   };
 }
