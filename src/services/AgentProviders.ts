@@ -19,7 +19,7 @@ export interface AgentProviderSpec {
   skillsDir: string;
   /** Hook configuration file the extension manages. */
   hooksFile: string;
-  /** PreToolUse matcher covering the agent's file-writing and shell tools. */
+  /** PreToolUse matcher covering the agent's file-writing and shell tools, and the bridge's record_idea (the teaching chat must say whose idea it records). */
   writeToolMatcher: string;
   /** PostToolUse matcher for read tools, to audit reads outside the context pack; absent where the agent has no verified PostToolUse hook. */
   readToolMatcher?: string;
@@ -46,7 +46,7 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     invokePrefix: '/',
     skillsDir: '.claude/skills',
     hooksFile: '.claude/settings.local.json',
-    writeToolMatcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash',
+    writeToolMatcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__research-assistant__record_idea',
     readToolMatcher: 'Read|Grep|Glob|Bash',
     shellTool: 'Bash',
     sessionEndHook: true,
@@ -62,7 +62,7 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     invokePrefix: '$',
     skillsDir: '.agents/skills',
     hooksFile: '.codex/hooks.json',
-    writeToolMatcher: 'apply_patch|Bash|Write|Edit',
+    writeToolMatcher: 'apply_patch|Bash|Write|Edit|mcp__research_assistant__record_idea',
     sessionEndHook: false,
     externalWorkers: { dir: '.codex/agents', extension: '.toml' },
     hooksFileHasPermissions: false,

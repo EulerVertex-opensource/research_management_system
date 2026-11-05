@@ -182,13 +182,21 @@ export function searchProgress(target: string, digest: string, candidates: Candi
 
 export interface DirectionOptions {
   mode: SearchMode; round: number; width: number; tried: string[];
-  /** The researcher's open test-case ideas for the asset; each becomes a direction before the catalog. */
-  ideas: Array<{ id: string; title: string }>;
+  /**
+   * Open test-case ideas for the asset. Only an idea with origin `researcher` counts as the researcher's and comes
+   * before the catalog; any other (an agent's, or one with no origin) only after the untried catalog, so a worker's
+   * leftovers never crowd it out.
+   */
+  ideas: Array<{ id: string; title: string; origin?: string }>;
   specialFromRound: number;
   nearMiss?: string;
 }
 
-/** Deterministic slot assignment: special directions, then untried ideas, then untried catalog directions, then the catalog again. */
+/**
+ * Deterministic slot assignment: special directions, the researcher's untried test cases, untried catalog
+ * directions, agents' untried test cases, then the catalog again. No direction fills two slots of one round,
+ * so a round may have fewer slots than the width.
+ */
 export function assignDirections(options: DirectionOptions): SearchSlot[] {
   const { mode, round, width, tried, ideas } = options;
   const picked: Array<Omit<SearchSlot, 'slot'>> = [];
@@ -199,11 +207,15 @@ export function assignDirections(options: DirectionOptions): SearchSlot[] {
       picked.push({ direction: direction.id, label: direction.label, ...(direction.special === 'repair' ? { candidateId: options.nearMiss } : {}) });
     }
   }
-  for (const idea of ideas) if (!tried.includes(idea.id)) picked.push({ direction: idea.id, label: `The researcher's test case (idea ${idea.id}): ${oneLine(idea.title)}` });
+  const untried = ideas.filter((idea) => !tried.includes(idea.id));
+  for (const idea of untried) if (idea.origin === 'researcher') picked.push({ direction: idea.id, label: `The researcher's test case (idea ${idea.id}): ${oneLine(idea.title)}` });
   const regular = catalog.filter((item) => !item.special);
   for (const direction of regular) if (!tried.includes(direction.id)) picked.push({ direction: direction.id, label: direction.label });
-  for (let index = 0; picked.length < width && regular.length; index++) {
-    const direction = regular[index % regular.length];
+  for (const idea of untried) if (idea.origin !== 'researcher') picked.push({ direction: idea.id, label: `An object an earlier worker recorded but could not finish (idea ${idea.id}): ${oneLine(idea.title)}. Read the idea and the board's ideas tried first; settle whether it has every property, and do not redo a variant the board shows failing.` });
+  const taken = new Set(picked.map((item) => item.direction));
+  for (const direction of regular) {
+    if (picked.length >= width) break;
+    if (taken.has(direction.id)) continue;
     picked.push({ direction: direction.id, label: `${direction.label} Tried before: take a different route than the board shows.` });
   }
   return picked.slice(0, width).map((slot, index) => ({ slot: index + 1, ...slot }));
@@ -211,7 +223,16 @@ export function assignDirections(options: DirectionOptions): SearchSlot[] {
 
 const checkRow = (candidate: CandidateInfo) => Object.entries(candidate.checks).map(([name, verdict]) => `${name} ${verdict === 'pass' ? '✓' : verdict === 'fail' ? '✗' : '?'}`).join(' ');
 
-export interface BoardOptions { mode: SearchMode; target: string; round: number; obstructions: number; nearMisses: number; properties?: string[] }
+/** A test-case idea a search round already tried, with what came of it; `earlier` when tried under an older statement. */
+export interface TriedIdea { id: string; title: string; round?: number; outcome: string; earlier?: boolean }
+
+export interface BoardOptions {
+  mode: SearchMode; target: string; round: number; obstructions: number; nearMisses: number; properties?: string[];
+  /** Test-case ideas already tried on the target, oldest first, so a later worker does not try them again. */
+  triedIdeas?: TriedIdea[];
+  /** Open observations on the target (from impossibility attempts and reviews), by ID and title. */
+  observations?: Array<{ id: string; title: string }>;
+}
 
 /** The shared memory every worker of a round reads; its size is set only by the board settings. */
 export function renderBoard(progress: SearchProgress, options: BoardOptions): string {
@@ -228,9 +249,20 @@ export function renderBoard(progress: SearchProgress, options: BoardOptions): st
     ...(nearMisses.length ? nearMisses.map((item) => `- ${item.id}${item.direction ? ` (${item.direction})` : ''}: ${checkRow(item)}${item.status === 'archived' ? ' — rejected by independent verification' : ''}${item.failure ? ` — ${item.failure}` : ''}`) : ['- none yet']), '',
     '### Directions tried', '', progress.directionsTried.length ? progress.directionsTried.join(', ') : 'none yet',
   ];
+  if (options.triedIdeas?.length) {
+    lines.push('', '### Ideas tried (do not try them, or a variant of the same family, again)', '');
+    for (const idea of options.triedIdeas) lines.push(`- ${idea.id}${idea.earlier ? ' (under an earlier statement)' : ''}${idea.round ? `, round ${idea.round}` : ''}: ${oneLine(idea.title)} — ${oneLine(idea.outcome)}`);
+  }
+  if (options.observations?.length) lines.push('', '### Observations (show <id> for the argument)', '', ...options.observations.map((item) => `- ${item.id}: ${oneLine(item.title)}`));
   if (progress.limitations) lines.push('', '### Limitations of the last round', '', progress.limitations);
   lines.push('', `${progress.candidates.length} candidate(s) in ${progress.lastRound} round(s) so far.`);
   return lines.join('\n');
+}
+
+/** What came of a test-case idea a round tried: its candidates' checks and failures, or a pointer to the idea when the worker wrote none. */
+export function triedOutcome(candidates: CandidateInfo[], ideaId: string): string {
+  if (!candidates.length) return `no candidate written (show ${ideaId} for what was found)`;
+  return candidates.map((item) => `${item.id} ${item.status === 'archived' ? 'rejected by independent verification' : item.status}: ${checkRow(item)}${item.failure ? ` — ${item.failure}` : ''}`).join('; ');
 }
 
 /** One line per candidate of a round, for the summary stage. */

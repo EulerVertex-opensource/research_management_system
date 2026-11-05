@@ -7,7 +7,7 @@ description: Search for a concrete object in rounds of parallel workers. Refute 
 
 Input: the pack the driver gives you. A search worker gets its own `search-<slot>.md` with:
 - the target statement, its direct dependencies, and its definitions;
-- the **search board**: obstructions, near-misses, and directions already tried;
+- the **search board**: obstructions, near-misses, directions and ideas already tried (with what came of each), and open observations;
 - your slot, round, and **direction**.
 
 Read only the pack; for anything else run `research-loop show <id> [--section Heading]`. Do not read the target's `## Proof`, other slots' work, or other candidate files unless the pack names one.
@@ -17,7 +17,7 @@ Read only the pack; for anything else run `research-loop show <id> [--section He
 You look for a counterexample: an object that satisfies every hypothesis of the target and violates its conclusion.
 
 1. List the target's hypotheses as checks `H1`, `H2`, … in order. The last check is `NOT`: the conclusion fails for the object.
-2. Stay in your direction (`references/directions.md`). Use the board: do not repeat a near-miss or a family an obstruction already rules out.
+2. Stay in your direction (`references/directions.md`). Use the board: do not repeat a near-miss, an idea tried, or a family an obstruction already rules out. Changing only a parameter, a constant, or a scale of a failed family is a repeat unless you say why the failure no longer applies.
 3. For each candidate, check in order and stop at the first failing check. Mark that check `fail` and every later check `unknown`. Compute explicitly.
 4. Write each candidate as a new file `<candidates>/cand_<asset>_r<round>_s<slot>_<slug>.md`, at most the number the stage instruction allows.
    - Frontmatter: `type: candidate`, `title`, `status: failed` (a check failed) or `survived` (every check passed), `target_asset`, and `checks: {H1: pass, H2: fail, NOT: unknown}`.
@@ -25,7 +25,9 @@ You look for a counterexample: an object that satisfies every hypothesis of the 
      - `## Object`: the object, precisely enough to recompute.
      - `## Checks`: one `### H1`, `### H2`, …, `### NOT` per check, with the argument or calculation.
      - `## Failure`: one line naming the first failing check and why. Only for a failed candidate.
-5. Found nothing plausible in your direction? Write no candidate. Record a promising object you could not finish with `record_idea` (kind `test_case`).
+5. Worked an object out far enough to see a check fail? Write it as a failed candidate with `## Failure`, even a promising ansatz: that is how later rounds learn it fails. Found nothing plausible? Write no candidate.
+   - Record with `record_idea` (kind `test_case`, origin `agent`) only an object you could not check yet, and say in its body what you did check.
+   - Never record one the board shows failing, or a variant of its family: the loop assigns open test cases to later rounds.
 6. If the instruction says you are the only worker, also write the round record (see Summarize).
 
 Reply in three lines at most: the candidates you wrote and their status, and the key reason.

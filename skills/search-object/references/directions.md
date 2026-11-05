@@ -1,8 +1,11 @@
 # Search directions
 
-The loop assigns each worker slot one direction. It never assigns the same direction twice while untried ones remain. Directions also cover:
-- a researcher's test case: an idea of kind `test_case` related to the asset, which the loop assigns before the catalog;
+The loop assigns each worker slot one direction, never the same one to two slots of a round, and never a direction again while untried ones remain. Directions also cover:
+- a researcher's test case: an idea of kind `test_case` and origin `researcher` related to the asset, which the loop assigns before the catalog;
+- an object an earlier worker recorded but could not finish (any other `test_case` idea), assigned after the untried catalog; read the idea and the board's ideas tried before working on it;
 - a revisit of a direction already tried: when the loop says so, take a route the board does not show.
+
+A test-case idea a round took up is resolved with its outcome and listed under the board's ideas tried; it is not assigned again, even after the statement changes.
 
 ## Refute mode (counterexamples)
 

@@ -358,11 +358,24 @@ function teachingMayRun(call: { command: string; sub?: string }): boolean {
   return false;
 }
 
-/** A teaching chat reads and explains; it never drives the loop or edits the project. */
+export const TEACHING_ORIGIN_REASON = 'This chat is the teaching chat, where an idea may be the researcher\'s or yours: say whose it is before recording it. Origin researcher when the researcher raised it (their doubt, their route, a statement they believe), even if you helped word it; origin agent when it is your own suggestion, even if they agreed to record it. Set origin on record_idea, or pass --origin researcher|agent to idea add, and say in the body who raised it.';
+
+/** Ideas a call records without saying whose they are: record_idea without origin, or idea add without --origin. */
+function unattributedIdeas(input: HookInput): boolean {
+  const tool = input.tool_name ?? '';
+  const args = input.tool_input ?? {};
+  if (/record_idea$/.test(tool)) return args.origin !== 'agent' && args.origin !== 'researcher';
+  const command = typeof args.command === 'string' ? args.command : Array.isArray(args.command) ? args.command.join(' ') : '';
+  const adds = loopCalls(input).filter((call) => call.command === 'idea' && call.sub === 'add').length;
+  return adds > 0 && [...command.matchAll(/--origin[\s=]+["']?(?:agent|researcher)\b/g)].length < adds;
+}
+
+/** A teaching chat reads and explains; it never drives the loop or edits the project, and says whose each idea it records is. */
 export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
   const tool = (input.tool_name ?? '').toLowerCase();
   const refused = loopCalls(input).find((call) => !teachingMayRun(call));
   if (refused) return { deny: true, reason: `This chat is the teaching chat: it explains verified results and never drives the loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there.` };
+  if (unattributedIdeas(input)) return { deny: true, reason: TEACHING_ORIGIN_REASON };
   if (/shell|bash/.test(tool) || !/write|edit|patch|notebook/.test(tool)) return { deny: false };
   const inProject = targetsOf(input).filter((target) => !path.isAbsolute(target) || (root !== undefined && (target === root || target.startsWith(root + path.sep))));
   if (inProject.length) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (${inProject[0]}). Record a doubt or idea with record_idea; changes are made in the loop's own chat.` };

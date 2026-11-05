@@ -18,7 +18,7 @@ import type { AutonomyView } from '../models/graph';
 import { readLoopSettings } from './LoopSettingsStore';
 import { AUTONOMOUS_AUTO_APPROVE, DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
 import {
-  CandidateInfo, NEGATED_CONCLUSION, RoundInfo, SearchMode, SearchProgress, assignDirections, candidateChecks, checkSections, parseCandidate, parseRound, renderBoard, roundDigest, searchProgress, specProperties,
+  CandidateInfo, NEGATED_CONCLUSION, RoundInfo, SearchMode, SearchProgress, TriedIdea, assignDirections, candidateChecks, checkSections, parseCandidate, parseRound, renderBoard, roundDigest, searchProgress, specProperties, triedOutcome,
 } from '../domain/search';
 import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
 import { projectSection, requiredAssetIds } from '../domain/project';
@@ -1091,9 +1091,12 @@ export class ResearchLoopCore {
       const used = await this.constructionUsage(assetId);
       if (used.rounds >= ((await this.allotment(assetId)) ?? limits.rounds) || used.candidates >= settings.constructMaxCandidates) return undefined;
     }
+    // An idea a round already took up stays tried even after the statement changes: its outcome is on the board instead.
+    const { candidates: allCandidates, rounds: allRounds } = await this.searchRecords();
+    const everTried = new Set([...allRounds.filter((item) => item.target === assetId).flatMap((item) => item.directions), ...allCandidates.filter((item) => item.target === assetId).map((item) => item.direction ?? '')]);
     const ideas = [...(await this.collect(this.paths.ideas)).values()]
-      .filter((idea) => idea.data.idea_kind === 'test_case' && idea.data.status === 'draft' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId))
-      .map((idea) => ({ id: idea.id, title: String(idea.data.title ?? idea.id) }));
+      .filter((idea) => idea.data.idea_kind === 'test_case' && idea.data.status === 'draft' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId) && !everTried.has(idea.id))
+      .map((idea) => ({ id: idea.id, title: String(idea.data.title ?? idea.id), origin: typeof idea.data.origin === 'string' ? idea.data.origin : undefined }));
     const slots = assignDirections({ mode, round, width: limits.width, tried: progress.directionsTried, ideas, specialFromRound: settings.specialDirectionsFromRound, nearMiss: progress.nearMisses[0]?.id });
     if (mode === 'refute') return { mode, round, slots, ...(requested ? { requested: true } : {}) };
     return { mode, round, slots, properties: specProperties(statementPart(parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`)).content)) };
@@ -1158,7 +1161,54 @@ export class ResearchLoopCore {
     const progress = await this.searchProgressFor(assetId);
     const searchMode = mode ?? this.state?.current.search?.mode ?? ((await this.isConstructionSearch(assetId)) ? 'construct' : 'refute');
     const properties = searchMode === 'construct' ? specProperties(statementPart(parseMarkdown(await this.files.readFile(`${this.paths.assets}/${assetId}.md`)).content)) : undefined;
-    return renderBoard(progress, { mode: searchMode, target: assetId, round: round ?? progress.lastRound + 1, obstructions: settings.boardObstructions, nearMisses: settings.boardNearMisses, properties });
+    const { triedIdeas, observations } = await this.boardIdeas(assetId, progress);
+    return renderBoard(progress, { mode: searchMode, target: assetId, round: round ?? progress.lastRound + 1, obstructions: settings.boardObstructions, nearMisses: settings.boardNearMisses, properties, triedIdeas, observations });
+  }
+
+  /**
+   * The board's memory of ideas: test cases a round already tried (what came of each, also under an older
+   * statement) and open observations on the asset. Ideas a round took up before the loop recorded outcomes
+   * show the candidates written in their direction.
+   */
+  private async boardIdeas(assetId: string, progress: SearchProgress): Promise<{ triedIdeas: TriedIdea[]; observations: Array<{ id: string; title: string }> }> {
+    const digest = statementDigest(await this.files.readFile(`${this.paths.assets}/${assetId}.md`));
+    const ideas = [...(await this.collect(this.paths.ideas)).values()];
+    const related = (idea: { data: Record<string, any> }) => Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId);
+    const triedIdeas: TriedIdea[] = [];
+    for (const idea of ideas) {
+      if (idea.data.idea_kind !== 'test_case') continue;
+      const record = idea.data.tried_in && typeof idea.data.tried_in === 'object' ? idea.data.tried_in as Record<string, unknown> : undefined;
+      const title = String(idea.data.title ?? idea.id);
+      if (record?.target === assetId) {
+        triedIdeas.push({ id: idea.id, title, round: typeof record.round === 'number' ? record.round : undefined, outcome: String(record.outcome ?? 'tried'), earlier: record.statement_digest !== digest });
+      } else if (!record && related(idea) && progress.directionsTried.includes(idea.id)) {
+        const written = progress.candidates.filter((item) => item.direction === idea.id);
+        triedIdeas.push({ id: idea.id, title, round: written[0]?.round ?? progress.rounds.find((item) => item.directions.includes(idea.id))?.round, outcome: triedOutcome(written, idea.id) });
+      }
+    }
+    triedIdeas.sort((a, b) => (a.round ?? 0) - (b.round ?? 0) || a.id.localeCompare(b.id));
+    const observations = ideas.filter((idea) => idea.data.idea_kind === 'observation' && idea.data.status === 'draft' && related(idea)).map((idea) => ({ id: idea.id, title: String(idea.data.title ?? idea.id) }));
+    return { triedIdeas, observations };
+  }
+
+  /** A round took up test-case ideas as directions: each is resolved with what came of it, so no later round assigns it again and the board shows the outcome. */
+  private async closeTriedIdeas(assetId: string, search: SearchRound, digest: string): Promise<void> {
+    const progress = await this.searchProgressFor(assetId);
+    for (const slot of search.slots) {
+      const file = `${this.paths.ideas}/${slot.direction}.md`;
+      const raw = await this.files.readFile(file).catch(() => '');
+      if (!raw) continue;
+      const parsed = parseMarkdown(raw);
+      if (parsed.data.type !== 'idea' || parsed.data.status !== 'draft') continue;
+      const written = progress.candidates.filter((item) => item.round === search.round && item.slot === slot.slot);
+      const outcome = triedOutcome(written, slot.direction);
+      const resolvedBy = written[0]?.id ?? `search round ${search.round} of ${assetId}`;
+      parsed.data.status = 'resolved';
+      parsed.data.resolved_by = resolvedBy;
+      parsed.data.tried_in = { target: assetId, round: search.round, slot: slot.slot, statement_digest: digest, outcome };
+      await this.writeOwned(file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Resolution\n\nTried in search round ${search.round} for ${assetId} (slot ${slot.slot}): ${outcome}\n`, parsed.data));
+      await this.event('idea_resolved', { ideaId: slot.direction, resolvedBy });
+    }
   }
 
   /** End a refute search that found nothing: the loop writes the falsification check from the search records. */
@@ -1335,7 +1385,7 @@ export class ResearchLoopCore {
 
   // ---------- ideas ----------
 
-  async saveIdea(title: string, body: string, relatedAssets: string[], origin: 'researcher' | 'agent' = 'researcher', tags: string[] = [], ideaKind: IdeaKind = 'approach', extra: Record<string, string> = {}): Promise<string> {
+  async saveIdea(title: string, body: string, relatedAssets: string[], origin: 'researcher' | 'agent' = 'agent', tags: string[] = [], ideaKind: IdeaKind = 'approach', extra: Record<string, string> = {}): Promise<string> {
     if (!body.trim()) throw new Error('Idea text is required.');
     const assetIds = new Set((await this.files.listFiles(this.paths.assets)).map((file) => path.posix.basename(file, '.md')));
     for (const asset of relatedAssets) if (!assetIds.has(asset)) throw new Error(`Unknown related asset: ${asset}`);
@@ -2424,7 +2474,7 @@ export class ResearchLoopCore {
         const slot = /_s(\d+)_/.exec(path.posix.basename(file, '.md').slice(`cand_${state.current.assetId}_r${search.round}`.length))?.[1] ?? '?';
         counts.set(slot, (counts.get(slot) ?? 0) + 1);
       }
-      for (const [slot, count] of counts) if (count > perWorker) problems.push(`slot ${slot} wrote ${count} candidates; at most ${perWorker} per worker. Keep the best and record the others as test_case ideas.`);
+      for (const [slot, count] of counts) if (count > perWorker) problems.push(`slot ${slot} wrote ${count} candidates; at most ${perWorker} per worker. Keep the best; an object you have not checked may become a test_case idea, a failed one never.`);
     }
     const records = added.filter((item) => isIn(item, folders.checks)).length;
     if (((stage === 'search' && search?.slots.length === 1) || stage === 'search_summary') && records !== 1) problems.push(`Write exactly one round record ${folders.checks}/search_${state.current.assetId}_r${search?.round}_<slug>.md (type search_round, ## Obstructions, ## Limitations); found ${records}.`);
@@ -2631,6 +2681,7 @@ export class ResearchLoopCore {
         for (const file of added.filter((item) => path.posix.dirname(item) === this.shared.checks)) {
           await this.writeOwned(file, stampSearchRecord(await this.files.readFile(file), { mode: search.mode, round: search.round, directions: search.slots.map((item) => item.direction), candidates }, digest, provenance));
         }
+        await this.closeTriedIdeas(assetId, search, digest);
         await this.event('search_round', { assetId, mode: search.mode, round: search.round, candidates });
         return this.afterSearchRound(assetId, finish);
       }

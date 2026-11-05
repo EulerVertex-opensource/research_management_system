@@ -194,13 +194,24 @@ test('a teaching chat may read and record doubts, but not drive the loop or edit
   const root = '/work/project';
   const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
   const loop = 'node .agents/skills/research-loop/scripts/research-loop.cjs';
-  for (const command of ['teach list', 'teach pack key_lemma', 'status --brief', 'show key_lemma --section Proof', 'search status key_lemma', 'idea add --title t --body b', 'library search compactness']) {
+  for (const command of ['teach list', 'teach pack key_lemma', 'status --brief', 'show key_lemma --section Proof', 'search status key_lemma', 'idea add --title t --body b --origin researcher', 'idea add --title t --body b --origin agent', 'library search compactness']) {
     assert.equal(teachingToolDecision(paths, bash(`${loop} ${command}`), root).deny, false, command);
   }
   for (const command of ['next', 'report proved --summary x', 'resume', 'park key_lemma --reason x', 'search request key_lemma', 'idea convert idea_1 --asset a', 'sync pull']) {
     assert.match(teachingToolDecision(paths, bash(`${loop} ${command}`), root).reason ?? '', /teaching chat/, command);
   }
   assert.equal(teachingToolDecision(paths, { tool_name: 'Edit', tool_input: { file_path: `${root}/research/assets/key_lemma.md` } }, root).deny, true);
+  // Every idea recorded here says whose it is: the teaching chat decides, the hooks refuse an idea without it.
+  assert.match(teachingToolDecision(paths, bash(`${loop} idea add --title t --body b`), root).reason ?? '', /say whose it is/);
+  assert.equal(teachingToolDecision(paths, bash(`${loop} idea add --title t --body b --origin agent && ${loop} idea add --title u --body c`), root).deny, true);
+  assert.equal(teachingToolDecision(paths, bash(`${loop} idea add --title t --body b --origin=researcher`), root).deny, false);
+  for (const tool of ['mcp__research-assistant__record_idea', 'mcp__research_assistant__record_idea']) {
+    assert.match(teachingToolDecision(paths, { tool_name: tool, tool_input: { title: 't', body: 'b' } }, root).reason ?? '', /say whose it is/, tool);
+    assert.equal(teachingToolDecision(paths, { tool_name: tool, tool_input: { title: 't', body: 'b', origin: 'agent' } }, root).deny, false, tool);
+    assert.equal(teachingToolDecision(paths, { tool_name: tool, tool_input: { title: 't', body: 'b', origin: 'researcher' } }, root).deny, false, tool);
+    // The driving chat records ideas as before; only the teaching chat must decide.
+    assert.equal(preToolUseDecision(paths, { tool_name: tool, tool_input: { title: 't', body: 'b' } }, root).deny, false, tool);
+  }
   assert.equal(teachingToolDecision(paths, { tool_name: 'Write', tool_input: { file_path: '/tmp/scratch/notes.md' } }, root).deny, false);
 });
 

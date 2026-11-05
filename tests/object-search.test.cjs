@@ -125,7 +125,7 @@ test('search progress ignores other statements, ranks near-misses, and collects 
 });
 
 test('directions: test-case ideas first, untried catalog next, special directions from the configured round', () => {
-  const refute = search.assignDirections({ mode: 'refute', round: 1, width: 3, tried: ['boundary_degenerate'], ideas: [{ id: 'idea_zero', title: 'Try zero' }], specialFromRound: 2 });
+  const refute = search.assignDirections({ mode: 'refute', round: 1, width: 3, tried: ['boundary_degenerate'], ideas: [{ id: 'idea_zero', title: 'Try zero', origin: 'researcher' }], specialFromRound: 2 });
   assert.deepEqual(refute.map((slot) => [slot.slot, slot.direction]), [[1, 'idea_zero'], [2, 'small_cases'], [3, 'drop_hypothesis']]);
   const construct = search.assignDirections({ mode: 'construct', round: 2, width: 3, tried: ['adapt_known'], ideas: [], specialFromRound: 2, nearMiss: 'cand_best' });
   assert.deepEqual(construct.map((slot) => slot.direction), ['repair_near_miss', 'nonexistence', 'symmetric_algebraic']);
@@ -134,6 +134,22 @@ test('directions: test-case ideas first, untried catalog next, special direction
   const again = search.assignDirections({ mode: 'refute', round: 9, width: 2, tried: search.DIRECTIONS.map((item) => item.id), ideas: [], specialFromRound: 2 });
   assert.equal(again.length, 2);
   assert.match(again[0].label, /Tried before/);
+});
+
+test('directions: an agent test case waits for the untried catalog, and no direction fills two slots of a round', () => {
+  const regular = ['adapt_known', 'symmetric_algebraic', 'products_limits', 'small_case_search'];
+  const base = { mode: 'construct', round: 1, width: 3, ideas: [], specialFromRound: 99 };
+  // The fill-up after the untried catalog never repeats a direction already picked.
+  assert.deepEqual(search.assignDirections({ ...base, tried: regular.slice(1) }).map((slot) => slot.direction), ['adapt_known', 'symmetric_algebraic', 'products_limits']);
+  // More slots than distinct directions: the round is narrower instead of doubling one up.
+  assert.deepEqual(search.assignDirections({ ...base, width: 8, tried: [] }).map((slot) => slot.direction), regular);
+  // Only origin researcher counts as the researcher's; an idea with no origin waits like an agent's.
+  const ideas = [{ id: 'idea_agent', title: 'Log ansatz', origin: 'agent' }, { id: 'idea_mine', title: 'Enneper surface', origin: 'researcher' }, { id: 'idea_old', title: 'No origin' }];
+  const slots = search.assignDirections({ ...base, width: 7, tried: ['symmetric_algebraic'], ideas });
+  assert.deepEqual(slots.map((slot) => slot.direction), ['idea_mine', 'adapt_known', 'products_limits', 'small_case_search', 'idea_agent', 'idea_old', 'symmetric_algebraic']);
+  assert.match(slots[0].label, /The researcher's test case \(idea idea_mine\)/);
+  assert.match(slots[4].label, /an earlier worker recorded but could not finish \(idea idea_agent\)/);
+  assert.doesNotMatch(slots[4].label, /researcher/);
 });
 
 test('candidate rules: verdicts must match the status, and only known verifiers are accepted', () => {
@@ -382,6 +398,57 @@ test('construct limits ask the researcher; a direction resets them, silence park
   capped.map.set('research/checks/search_main_theorem_r1_sum.md', roundRecord());
   await capped.core.report({ outcome: 'summarized', summary: 'Summary' });
   assert.match(capped.core.current.pendingQuestion.prompt, /2 candidate\(s\)/);
+});
+
+test('a test-case idea a round tried is resolved with its outcome, shown on the board, and never assigned again', async () => {
+  const spec = 'A disk such that:\n\n- P1: G is finite.\n- P2: G is not abelian.';
+  const f = fixture({ constructWidth: 1, constructRounds: 5, specialDirectionsFromRound: 99 });
+  await driveToSearch(f, construction(spec));
+  await approveSpecification(f);
+  assert.equal(f.core.current.current.search.slots[0].direction, 'adapt_known');
+  // Round 1: the worker leaves an unfinished ansatz as a test case.
+  const first = await f.core.saveIdea('Log ansatz, variant 1', 'Center cut checked; offset cuts not yet.', ['main_theorem'], 'agent', [], 'test_case');
+  f.map.set('research/checks/search_main_theorem_r1_a.md', roundRecord('main_theorem', 'Known constructions are abelian.'));
+  await f.core.report({ outcome: 'searched', summary: 'nothing' });
+  // An agent's test case waits for the untried catalog.
+  assert.equal(f.core.current.current.search.slots[0].direction, 'symmetric_algebraic');
+  for (const direction of ['symmetric_algebraic', 'products_limits', 'small_case_search']) {
+    const { round } = f.core.current.current.search;
+    assert.equal(f.core.current.current.search.slots[0].direction, direction);
+    f.map.set(`research/checks/search_main_theorem_r${round}_a.md`, roundRecord());
+    await f.core.report({ outcome: 'searched', summary: 'nothing' });
+  }
+  // Round 5 takes the ansatz up; the worker finds it fails and writes it as a failed candidate.
+  const round = f.core.current.current.search;
+  assert.equal(round.slots[0].direction, first);
+  await f.core.next();
+  f.map.set(`research/candidates/cand_main_theorem_r${round.round}_s1_log.md`, groupCandidate('failed'));
+  f.map.set(`research/checks/search_main_theorem_r${round.round}_a.md`, roundRecord());
+  await f.core.report({ outcome: 'searched', summary: 'fails P2' });
+  const idea = matter(f.map.get(`research/ideas/${first}.md`));
+  assert.equal(idea.data.status, 'resolved');
+  assert.equal(idea.data.tried_in.round, round.round);
+  assert.match(idea.data.tried_in.outcome, /cand_main_theorem_r5_s1_log failed: P1 ✓ P2 ✗ — P2 fails: cyclic groups are abelian\./);
+  assert.match(idea.content, /## Resolution\n\nTried in search round 5/);
+  const board = await f.core.searchBoard('main_theorem', 'construct', 6);
+  assert.match(board, new RegExp(`### Ideas tried[^\\n]*\\n\\n- ${first}, round 5: Log ansatz, variant 1 — cand_main_theorem_r5_s1_log failed`));
+  // A changed specification starts the search over, but the tried idea stays tried and on the board.
+  f.map.set('research/assets/main_theorem.md', construction(`${spec}\n- P3: G has order 6.`));
+  const after = await f.core.searchBoard('main_theorem', 'construct', 1);
+  assert.match(after, new RegExp(`- ${first} \\(under an earlier statement\\), round 5`));
+});
+
+test('the board shows test cases tried before outcomes were recorded, and open observations', async () => {
+  const f = fixture({ constructWidth: 1, constructRounds: 3, specialDirectionsFromRound: 99 });
+  await driveToSearch(f, construction());
+  await approveSpecification(f);
+  const legacy = await f.core.saveIdea('Old ansatz', 'Explored elsewhere.', ['main_theorem'], 'agent', [], 'test_case');
+  const note = await f.core.saveIdea('Every abelian group fails P2', 'Commutators vanish.', ['main_theorem'], 'agent', [], 'observation');
+  // A round record from before this change lists the idea as a direction while the idea stayed draft.
+  f.map.set('research/checks/search_main_theorem_r1_old.md', matter.stringify(matter(roundRecord()).content, { ...matter(roundRecord()).data, round: 1, statement_digest: (load('../src/services/ResearchLoopModel.ts')).statementDigest(f.map.get('research/assets/main_theorem.md')), directions: [legacy] }));
+  const board = await f.core.searchBoard('main_theorem', 'construct', 2);
+  assert.match(board, new RegExp(`- ${legacy}, round 1: Old ansatz — no candidate written \\(show ${legacy} for what was found\\)`));
+  assert.match(board, new RegExp(`### Observations[^\\n]*\\n\\n- ${note}: Every abelian group fails P2`));
 });
 
 // ---------- researcher-requested search ----------

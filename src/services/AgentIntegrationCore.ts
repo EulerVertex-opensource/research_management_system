@@ -154,7 +154,7 @@ You run exactly one research-loop stage. The driver gives you the stage, the ass
 Commands you may need (no need to run \`help\`):
 - \`${loopCommand} show <id|paper_slug|project> [--section Heading]...\`: one node or section; a paper slug alone shows its outline.
 - \`${loopCommand} library search <words...> [--type T]\`: known results to reuse.
-- \`${loopCommand} idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID]\`: keep a side thought.
+- \`${loopCommand} idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk] [--asset ID] [--origin researcher]\`: keep a side thought. It is recorded as the agent's; add \`--origin researcher\` only for the researcher's own idea in their words.
 - \`${maintenanceCommand} validate\` and \`${maintenanceCommand} links --file <path> --apply\`: check the files you wrote.
 `;
 }

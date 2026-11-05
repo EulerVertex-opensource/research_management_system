@@ -515,7 +515,12 @@ test('CLI drives the state machine and validates files on disk', () => {
     assert.match(p.run(['next']).stdout, /paused/);
     const idea = p.run(['idea', 'add', '--title', 'Hunch', '--body', 'Try induction.', '--json']);
     assert.equal(idea.status, 0, idea.stderr);
-    assert.match(p.read(`research/ideas/${JSON.parse(idea.stdout).ideaId}.md`), /origin: researcher/);
+    // An idea is the agent's unless it is said to be the researcher's.
+    assert.match(p.read(`research/ideas/${JSON.parse(idea.stdout).ideaId}.md`), /origin: agent/);
+    const theirs = p.run(['idea', 'add', '--title', 'Their hunch', '--body', 'In their words.', '--origin', 'researcher', '--json']);
+    assert.equal(theirs.status, 0, theirs.stderr);
+    assert.match(p.read(`research/ideas/${JSON.parse(theirs.stdout).ideaId}.md`), /origin: researcher/);
+    assert.match(p.run(['idea', 'add', '--title', 'x', '--body', 'y', '--origin', 'me']).stderr, /--origin must be agent or researcher/);
     p.write('research/assets/forged.md', asset('', { status: 'approved' }));
     assert.equal(p.run(['validate']).status, 1);
     assert.equal(p.run(['validate', '--fix']).status, 0);

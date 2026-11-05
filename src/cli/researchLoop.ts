@@ -63,7 +63,7 @@ const USAGE = `Usage: research-loop <command> [options]
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
-  idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk|conjecture] [--asset ID]... [--tag TAG]... [--origin researcher|agent]
+  idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk|conjecture] [--asset ID]... [--tag TAG]... [--origin agent|researcher]   (agent by default; researcher only for the researcher's own idea in their words)
   idea resolve <ideaId> --by <decision, plan, or asset ID> [--note "..."]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
   conjecture list [--json]   (conjectures ranked against the goals, best first)
@@ -651,7 +651,10 @@ async function main(): Promise<void> {
     case 'idea': {
       if (sub === 'add') {
         const tags = args.lists.tag ?? [];
-        const id = await core.saveIdea(text(args.flags.title, 'title'), text(args.flags.body, 'body'), args.lists.asset ?? [], args.flags.origin === 'agent' ? 'agent' : 'researcher', tags, toIdeaKind(args.flags.kind, tags));
+        // An agent's idea is never presented as the researcher's: researcher only when said so.
+        const origin = args.flags.origin ?? 'agent';
+        if (origin !== 'agent' && origin !== 'researcher') throw new Error('--origin must be agent or researcher.');
+        const id = await core.saveIdea(text(args.flags.title, 'title'), text(args.flags.body, 'body'), args.lists.asset ?? [], origin, tags, toIdeaKind(args.flags.kind, tags));
         out(json ? { ideaId: id } : `Saved idea ${id}.`);
         return;
       }
