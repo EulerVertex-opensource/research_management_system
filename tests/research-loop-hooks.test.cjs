@@ -36,6 +36,8 @@ test('Stop hook decision matrix', () => {
   const decision = stopDecision(active, { session_id: 's' }, 'Do the plan stage.');
   assert.equal(decision.block, true);
   assert.match(decision.reason, /node \.agents\/skills\/research-loop\/scripts\/research-loop\.cjs next/);
+  assert.equal(decision.counted, true, 'a block counts toward the cap outside an autonomous run');
+  assert.equal(stopDecision(running({ autonomy: { startedAt: 'then', spent: 0 } }), { session_id: 's' }, 'x').counted, false);
   active.autopilot.sessions.s = { blocks: 3, lastSignature: '', lastBlockAt: '' };
   assert.equal(stopDecision(active, { session_id: 's' }, 'x').capReached, true);
   active.autopilot.sessions.s = { blocks: 1, lastSignature: stageSignature(active), lastBlockAt: '' };
@@ -167,10 +169,14 @@ test('a teaching chat beside the loop never takes its lock, is never sent on at 
     hook('UserPromptSubmit', 'driver');
     hook('PreToolUse', 'driver', { tool_name: 'Bash', tool_input: { command: `${loop} next` } });
     assert.equal(state().lock.sessionId, 'driver');
-    // The driver has been quiet past the lock's lifetime, so a new chat would take the lock on opening.
+    // The driver has been quiet past the lock's lifetime; a chat that does not drive still does not take the lock.
     const loopState = state();
     loopState.lock.heartbeatAt = '2000-01-01T00:00:00.000Z';
     write('.research-assistant-loop/state.json', JSON.stringify(loopState));
+    hook('SessionStart', 'teacher');
+    assert.equal(state().lock.sessionId, 'driver');
+    // A teaching chat that took a free lock before it named the skill gives it back.
+    const freed = state(); delete freed.lock; write('.research-assistant-loop/state.json', JSON.stringify(freed));
     hook('SessionStart', 'teacher');
     assert.equal(state().lock.sessionId, 'teacher');
     const context = JSON.parse(hook('UserPromptSubmit', 'teacher', { prompt: '/teach' }).stdout);
@@ -190,6 +196,40 @@ test('a teaching chat beside the loop never takes its lock, is never sent on at 
     // The driver asking for an explanation in its own chat stays the driver.
     hook('UserPromptSubmit', 'driver', { prompt: '/teach' });
     assert.equal(JSON.parse(hook('Stop', 'driver').stdout).decision, 'block');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a chat that only looks at the loop never inherits a quiet driver\'s lock and is never sent on at Stop', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-onlooker-'));
+  try {
+    const write = (relative, content) => { fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true }); fs.writeFileSync(path.join(root, relative), content); };
+    write('.research-assistant.json', JSON.stringify({ version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [], notations: null, sections: 'sections' }, research: { root: 'research', project: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' } }));
+    write('research/project.md', '# Project\n');
+    const hook = (event, session, input = {}) => spawnSync(process.execPath, [cli, 'hook', event], { encoding: 'utf8', input: JSON.stringify({ cwd: root, session_id: session, ...input }) });
+    const statePath = path.join(root, '.research-assistant-loop/state.json');
+    const state = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    const quiet = () => { const s = state(); s.lock.heartbeatAt = '2000-01-01T00:00:00.000Z'; fs.writeFileSync(statePath, JSON.stringify(s)); };
+    const loop = 'node .claude/skills/research-loop/scripts/research-loop.cjs';
+    assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root], { encoding: 'utf8' }).status, 0);
+    hook('UserPromptSubmit', 'driver', { prompt: 'go' });
+    hook('PreToolUse', 'driver', { tool_name: 'Bash', tool_input: { command: `${loop} next` } });
+    assert.equal(state().lock.sessionId, 'driver');
+    // The driver waits on a long background subagent: no hook fires in its chat, so its heartbeat goes quiet.
+    quiet();
+    assert.match(JSON.parse(hook('SessionStart', 'onlooker').stdout).hookSpecificOutput.additionalContext, /another session \(driver\) is driving/);
+    hook('UserPromptSubmit', 'onlooker', { prompt: 'why did the loop stop earlier?' });
+    hook('PreToolUse', 'onlooker', { tool_name: 'Bash', tool_input: { command: `${loop} status` } });
+    assert.equal(state().lock.sessionId, 'driver', 'looking at the loop does not take it over');
+    assert.equal(hook('Stop', 'onlooker').stdout, '', 'the onlooker is not sent on to drive');
+    // The subagent hands back: the driver still holds the loop and is sent on.
+    hook('UserPromptSubmit', 'driver', { prompt: 'Another Claude session sent a message:\n<agent-message from="a1">done</agent-message>' });
+    assert.equal(state().lock.sessionId, 'driver');
+    assert.equal(JSON.parse(hook('Stop', 'driver').stdout).decision, 'block');
+    // A fresh chat where the researcher invokes the loop's skill takes over a quiet lock.
+    quiet();
+    hook('UserPromptSubmit', 'fresh', { prompt: '/research-loop' });
+    assert.equal(state().lock.sessionId, 'fresh');
+    assert.equal(JSON.parse(hook('Stop', 'fresh').stdout).decision, 'block');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

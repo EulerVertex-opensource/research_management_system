@@ -172,6 +172,8 @@ export class ResearchLoopCore {
 
   async load(): Promise<LoopState | undefined> {
     this.state = await this.peek();
+    // Status lines (the autonomous budget among them) are synchronous: give them the researcher's settings, not the defaults.
+    await this.loopSettings().catch(() => undefined);
     return this.state;
   }
 
@@ -269,6 +271,9 @@ export class ResearchLoopCore {
     state.status = 'running';
     state.lastError = null;
     state.researcherInput = { kind: 'goals', text: goal.trim(), at: this.now() };
+    // A new goal sends the loop on like a resume: an autonomous run that handed back starts afresh, and so does every chat's continuation count.
+    if (state.autonomy?.handedOverAt) delete state.autonomy;
+    state.autopilot.sessions = {};
     await this.markExtension(goal.trim());
     await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined });
     return state;
@@ -328,6 +333,8 @@ export class ResearchLoopCore {
     state.lastError = null;
     // Resuming after an autonomous run handed back starts a new run with a fresh budget.
     if (state.autonomy?.handedOverAt) delete state.autonomy;
+    // The continuation cap counts what a chat did since the researcher last sent the loop on, not over the chat's whole life.
+    state.autopilot.sessions = {};
     await this.save();
     await this.event('resumed');
   }
@@ -349,14 +356,19 @@ export class ResearchLoopCore {
     await this.event('iteration_cap', { cap });
   }
 
-  /** Refresh the session lock; returns false when another live session owns the loop. */
-  heartbeat(sessionId: string, force = false): boolean {
+  /**
+   * Refresh the session lock; returns false when another session owns the loop.
+   * A lock another session let go quiet is taken over only with `takeOver`: a
+   * driver waiting on a long subagent sends no heartbeat, so a chat that merely
+   * looks at the loop must not inherit it.
+   */
+  heartbeat(sessionId: string, force = false, takeOver = true): boolean {
     const state = this.state;
     if (!state) return true;
     const lock = state.lock;
     if (lock && lock.sessionId !== sessionId && !force) {
       const age = Date.now() - Date.parse(lock.heartbeatAt);
-      if (Number.isFinite(age) && age < LOCK_TTL_MS) return false;
+      if (!takeOver || (Number.isFinite(age) && age < LOCK_TTL_MS)) return false;
     }
     state.lock = { sessionId, provider: state.provider, acquiredAt: lock?.sessionId === sessionId ? lock.acquiredAt : this.now(), heartbeatAt: this.now() };
     return true;
@@ -369,9 +381,9 @@ export class ResearchLoopCore {
     await this.save();
   }
 
-  async touch(sessionId?: string, force = false): Promise<boolean> {
+  async touch(sessionId?: string, force = false, takeOver = true): Promise<boolean> {
     if (!this.state) return true;
-    const ok = sessionId ? this.heartbeat(sessionId, force) : true;
+    const ok = sessionId ? this.heartbeat(sessionId, force, takeOver) : true;
     if (ok) await this.save();
     return ok;
   }
@@ -886,7 +898,8 @@ export class ResearchLoopCore {
       return searched || (await this.loopSettings()).rigor.refuteSearch !== 'all' ? 'conjectures' : undefined;
     }
     if (!PROVABLE_TYPES.has(data.type)) return policy.supporting ? 'supporting' : undefined;
-    return policy.proofs && (await this.proofIsVouched(request.target, raw, parsed)) ? 'proofs' : undefined;
+    if (!policy.proofs) return undefined;
+    return (await this.proofIsVouched(request.target, raw, parsed)) || (await this.constructionIsVouched(request.target, raw, parsed)) ? 'proofs' : undefined;
   }
 
   /**
@@ -906,8 +919,20 @@ export class ResearchLoopCore {
     const vouched = (await this.vouchingPlans(assetId, raw)).some((plan) => sameDigests(plan.data.dependency_digests, dependencies)
       && (verifyProofs !== 'agent' || plan.data.verified_proof_digest === proof));
     if (!vouched) return false;
+    return this.dependenciesApproved(parsed.data);
+  }
+
+  /** A proof a search construction wrote, after its independent check, and unchanged since. */
+  private async constructionIsVouched(assetId: string, raw: string, parsed: matter.GrayMatterFile<string>): Promise<boolean> {
+    const progress = this.state?.progress[assetId];
+    if (!proofText(parsed.content) || progress?.changesRequested || progress?.constructionProof !== proofDigest(raw)) return false;
+    if ((await this.loopSettings()).rigor.verifyProofs === 'researcher') return false;
+    return this.dependenciesApproved(parsed.data);
+  }
+
+  private async dependenciesApproved(data: Record<string, any>): Promise<boolean> {
     const records = (await this.approvals()).records;
-    for (const dep of Array.isArray(parsed.data.depends_on) ? parsed.data.depends_on as string[] : []) {
+    for (const dep of Array.isArray(data.depends_on) ? data.depends_on as string[] : []) {
       const depRaw = await this.files.readFile(await this.nodeFile('asset', dep)).catch(() => '');
       if (!depRaw || !isApproved(records, 'asset', dep, depRaw)) return false;
     }
@@ -1253,7 +1278,12 @@ export class ResearchLoopCore {
     const parsed = parseMarkdown(await this.files.readFile(file));
     const proof = verdict.replace(/^\s*(confirmed|rejected)\b[.:]?\s*/i, '').trim() || verdict.trim();
     const content = `${parsed.content.trimEnd()}\n\n## Construction\n\n${candidate.object.trim()}\n\n## Proof\n\n${proof}\n\nFound by search candidate ${candidate.id} (round ${candidate.round ?? '?'}) and verified independently.\n`;
-    await this.writeOwned(file, stringifyMarkdown(content, parsed.data));
+    const written = stringifyMarkdown(content, parsed.data);
+    await this.writeOwned(file, written);
+    // The independent check vouches for this proof, as a verified plan does, so auto mode may approve it.
+    const state = this.require();
+    state.progress[assetId] = { ...state.progress[assetId], constructionProof: proofDigest(written) };
+    await this.save();
     await this.event('construction_found', { assetId, candidateId: candidate.id });
   }
 
@@ -2697,7 +2727,7 @@ export class ResearchLoopCore {
           const missing = (search.properties ?? []).filter((name) => !new RegExp(`^### ${name}\\b`, 'm').test(verdict));
           if (missing.length) throw new Error(`## Verdict of ${candidate.id} needs a ### section with the argument for ${missing.join(', ')}.`);
           await this.recordConstruction(assetId, candidate, verdict);
-          return finish(`Construction for ${assetId} verified and written into it; the researcher approves it as a proof. Continue with next.`, 'select', { assetId: undefined });
+          return finish(`Construction for ${assetId} verified and written into it as its proof; it is approved like an independently verified proof. Continue with next.`, 'select', { assetId: undefined });
         }
         if (report.outcome !== 'rejected') throw new Error('verify_construction outcome must be confirmed, rejected, or question.');
         await this.archiveCandidate(candidate.id, verdict);

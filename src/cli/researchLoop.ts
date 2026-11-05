@@ -331,7 +331,8 @@ async function runHook(event: string, args: Args): Promise<void> {
         if (event === 'SessionStart') process.stdout.write(contextOutput(event, `Research Assistant: ${LINK_HINT}`) + '\n');
         return;
       }
-      if (session && !core.heartbeat(session)) {
+      // Only a chat that drives the loop takes over a lock its holder let go quiet; any chat may take a free one.
+      if (session && !core.heartbeat(session, false, role === 'drive')) {
         process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
         return;
       }
@@ -392,7 +393,8 @@ async function runHook(event: string, args: Args): Promise<void> {
         return;
       }
       if (!state || state.status !== 'running') return;
-      if (session && !core.heartbeat(session)) return;
+      // A chat that does not hold the lock is never sent on: the driver may only be waiting on a long subagent.
+      if (session && !core.heartbeat(session, false, role === 'drive')) return;
       await core.validateWorkspace({ fix: true });
       let instruction: string | undefined;
       try { const next = await core.next(); instruction = next.blocked ? undefined : next.instruction; } catch { instruction = undefined; }
@@ -417,7 +419,8 @@ async function runHook(event: string, args: Args): Promise<void> {
       }
       const key = session ?? 'unknown';
       const record = state.autopilot.sessions[key] ?? { blocks: 0, lastSignature: '', lastBlockAt: '' };
-      record.blocks += 1; record.lastSignature = stageSignature(state); record.lastBlockAt = new Date().toISOString();
+      if (decision.counted) record.blocks += 1;
+      record.lastSignature = stageSignature(state); record.lastBlockAt = new Date().toISOString();
       state.autopilot.sessions[key] = record;
       await core.touch(session);
       await note({ kind: 'active', sessionId: session });

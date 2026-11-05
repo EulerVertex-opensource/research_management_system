@@ -351,6 +351,30 @@ test('construct search: checks are the specification properties; a verified surv
   assert.ok(!f.core.current.approvalQueue.some((item) => item.kind === 'specification'));
 });
 
+test('a verified construction is approved like a verified proof when auto mode covers proofs, so an autonomous run does not wait on it', async () => {
+  const f = fixture({ constructWidth: 1, autoApprove: { enabled: true, specifications: true, proofs: true } });
+  assert.equal((await driveToSearch(f, construction())).stage, 'search');
+  writeConstructRound(f, { survivor: true });
+  await f.core.report({ outcome: 'searched', summary: 'S3 survives' });
+  const file = `research/candidates/${f.core.current.current.search.candidateId}.md`;
+  f.map.set(file, f.map.get(file) + '\n## Verdict\n\nconfirmed\n\n### P1\n\nS3 has 6 elements.\n\n### P2\n\n(12)(13) = (132) but (13)(12) = (123).\n');
+  await f.core.report({ outcome: 'confirmed', summary: 'Verified' });
+  await f.core.next();
+  assert.ok(!f.core.current.approvalQueue.some((item) => item.kind === 'asset' && item.target === 'main_theorem'), 'no researcher approval is waited for');
+  assert.equal(matter(f.map.get('research/assets/main_theorem.md')).data.status, 'approved');
+  // An edit to the proof after the check takes the vouch away.
+  const g = fixture({ constructWidth: 1, autoApprove: { enabled: true, specifications: true, proofs: true } });
+  await driveToSearch(g, construction());
+  writeConstructRound(g, { survivor: true });
+  await g.core.report({ outcome: 'searched', summary: 'S3 survives' });
+  const gFile = `research/candidates/${g.core.current.current.search.candidateId}.md`;
+  g.map.set(gFile, g.map.get(gFile) + '\n## Verdict\n\nconfirmed\n\n### P1\n\nS3 has 6 elements.\n\n### P2\n\n(12)(13) = (132) but (13)(12) = (123).\n');
+  await g.core.report({ outcome: 'confirmed', summary: 'Verified' });
+  g.map.set('research/assets/main_theorem.md', g.map.get('research/assets/main_theorem.md') + '\nAn extra unchecked step.\n');
+  await g.core.next();
+  assert.ok(g.core.current.approvalQueue.some((item) => item.kind === 'asset' && item.target === 'main_theorem'));
+});
+
 test('a rejected construction stays as a near-miss for the repair direction', async () => {
   const f = fixture({ constructWidth: 1, constructRounds: 3, specialDirectionsFromRound: 2 });
   await driveToSearch(f, construction());

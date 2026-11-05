@@ -135,6 +135,38 @@ test('setting a result aside leaves nothing to do alone: the loop hands back wit
   assert.deepEqual([f.core.current.autonomy.spent, f.core.current.status], [0, 'paused'], 'still nothing to do alone, so it hands back again');
 });
 
+test('a new goal after a hand-back starts a new autonomous run, and resume and extend reset the continuation count', async () => {
+  const f = fixture({ autonomyRevisions: 0, autonomyConjectures: 0 });
+  await driveToPlan(f);
+  await fail(f, 'attempt_1');
+  await f.core.park('main_theorem', 'agent_gave_up', 'Reflexivity cannot reach n = 0.');
+  await f.core.next();
+  assert.ok(f.core.current.autonomy.handedOverAt, 'handed back');
+  // A chat that kept the autonomous run going for a long time has a large count; it must not end the next run at its first Stop.
+  f.core.current.autopilot.sessions.s = { blocks: 44, lastSignature: '', lastBlockAt: '' };
+  await f.core.extend('Also prove a weaker form.');
+  assert.equal(f.core.current.status, 'running');
+  assert.equal(f.core.current.autonomy, undefined, 'the handed-back run is over');
+  assert.deepEqual(f.core.current.autopilot.sessions, {});
+  await f.core.next();
+  assert.ok(f.core.current.autonomy && !f.core.current.autonomy.handedOverAt, 'the extension runs autonomously again');
+  assert.equal(f.core.current.autonomy.spent, 0);
+  assert.equal(stopDecision(f.core.current, { session_id: 's' }, 'go').counted, false, 'an autonomous run does not count toward the cap');
+
+  await f.core.pause('Paused by the researcher.');
+  f.core.current.autopilot.sessions.s = { blocks: 7, lastSignature: '', lastBlockAt: '' };
+  await f.core.resume();
+  assert.deepEqual(f.core.current.autopilot.sessions, {});
+});
+
+test('status reports the researcher\'s autonomous budget, not the default, right after loading', async () => {
+  const f = fixture({ autonomyBudget: 100 });
+  await driveToPlan(f);
+  const reopened = new ResearchLoopCore(f.files, paths, { id: () => `id-${++counter}` });
+  await reopened.load();
+  assert.match(reopened.briefStatus(), /of 100 attempts/);
+});
+
 test('the budget ends the run, and the Stop hook ignores the per-session cap until then', async () => {
   const f = fixture({ autonomyBudget: 2, maxFailedPlans: 5 });
   await driveToPlan(f);

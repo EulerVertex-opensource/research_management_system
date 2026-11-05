@@ -142,7 +142,8 @@ export interface LoopState {
     search?: { mode: SearchMode; round: number; slots: SearchSlot[]; candidateId?: string; properties?: string[]; requested?: boolean };
   };
   /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
-  progress: Record<string, { falsifiedAt?: string; changesRequested?: string }>;
+  /** constructionProof: digest of the proof a verified search construction wrote into the asset; it vouches for that proof as a verified plan would. */
+  progress: Record<string, { falsifiedAt?: string; changesRequested?: string; constructionProof?: string }>;
   scaffoldBrief?: { missing?: string[]; incomplete?: string[]; missingDefinitions?: string[] };
   /** Definitions drafted to fill a gap while the researcher asked to be waited for (rigor.missingDefinitions: wait). */
   awaitingDefinitions?: string[];

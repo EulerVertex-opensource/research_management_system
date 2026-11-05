@@ -20,7 +20,8 @@ export interface HookInput {
   transcript_path?: string;
 }
 
-export interface StopDecision { block: boolean; reason?: string; capReached?: boolean }
+/** `counted`: the block counts toward the continuation cap (an autonomous run is bounded by its budget instead). */
+export interface StopDecision { block: boolean; reason?: string; capReached?: boolean; counted?: boolean }
 export interface ToolDecision { deny: boolean; reason?: string }
 
 const APPROVED = /^[+>\s]*status:\s*['"]?approved\b/m;
@@ -40,7 +41,7 @@ export function stopDecision(state: LoopState | undefined, input: HookInput, ins
   if (!autonomous && record.blocks >= state.autopilot.iterationCap) return { block: false, capReached: true };
   if (input.stop_hook_active && record.lastSignature === stageSignature(state)) return { block: false };
   const reason = `Research loop is running (stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}). Continue: run ${LOOP_COMMAND} next and follow it; earlier stages are summarized in its context pack, so do not reread their files. ${instruction ?? ''}`.trim();
-  return { block: true, reason };
+  return { block: true, reason, counted: !autonomous };
 }
 
 /**
@@ -331,6 +332,8 @@ export function sessionRole(roles: SessionRoles, session: string | undefined): S
   return roles.teach[session] ? 'teach' : undefined;
 }
 
+/** A prompt invoking the research-loop skill (Claude Code /research-loop, Codex $research-loop). */
+export const LOOP_PROMPT_PATTERN = /(?:^|\s)[/$]research-loop\b/i;
 const LOOP_CALL = /research-loop\.cjs["']?\s+([a-z-]+)(?:\s+([a-z-]+))?/g;
 const DRIVING_COMMANDS = new Set(['start', 'resume', 'extend', 'next', 'report']);
 
@@ -343,7 +346,12 @@ function loopCalls(input: HookInput): Array<{ command: string; sub?: string }> {
 
 /** What a turn says about its chat: a prompt naming the teach skill, a teach command, or a command that drives the loop. */
 export function roleSignal(event: string, input: HookInput, teachPrompt: RegExp): SessionRole | undefined {
-  if (event === 'UserPromptSubmit') return typeof input.prompt === 'string' && teachPrompt.test(input.prompt) ? 'teach' : undefined;
+  if (event === 'UserPromptSubmit') {
+    if (typeof input.prompt !== 'string') return undefined;
+    if (teachPrompt.test(input.prompt)) return 'teach';
+    // The researcher invoking the loop's skill in a chat asks that chat to drive.
+    return LOOP_PROMPT_PATTERN.test(input.prompt) ? 'drive' : undefined;
+  }
   if (event !== 'PreToolUse') return undefined;
   const calls = loopCalls(input);
   if (calls.some((call) => DRIVING_COMMANDS.has(call.command))) return 'drive';

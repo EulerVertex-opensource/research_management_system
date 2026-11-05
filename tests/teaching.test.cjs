@@ -179,6 +179,9 @@ test('a chat that names the teach skill is a teaching chat; one that has driven 
   assert.equal(roleSignal('UserPromptSubmit', { prompt: '$teach key_lemma' }, TEACH_PROMPT_PATTERN), 'teach');
   assert.equal(roleSignal('UserPromptSubmit', { prompt: teachPrompt({ id: 'key_lemma', title: 'Key lemma' }) }, TEACH_PROMPT_PATTERN), 'teach');
   assert.equal(roleSignal('UserPromptSubmit', { prompt: 'continue the loop and teach me nothing' }, TEACH_PROMPT_PATTERN), undefined);
+  assert.equal(roleSignal('UserPromptSubmit', { prompt: '/research-loop' }, TEACH_PROMPT_PATTERN), 'drive');
+  assert.equal(roleSignal('UserPromptSubmit', { prompt: '$research-loop continue' }, TEACH_PROMPT_PATTERN), 'drive');
+  assert.equal(roleSignal('UserPromptSubmit', { prompt: 'what does research-loop do?' }, TEACH_PROMPT_PATTERN), undefined);
   const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
   assert.equal(roleSignal('PreToolUse', bash('node .claude/skills/research-loop/scripts/research-loop.cjs next'), TEACH_PROMPT_PATTERN), 'drive');
   assert.equal(roleSignal('PreToolUse', bash('node .agents/skills/research-loop/scripts/research-loop.cjs teach list'), TEACH_PROMPT_PATTERN), 'teach');
