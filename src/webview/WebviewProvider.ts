@@ -19,6 +19,7 @@ import { LoopHost } from '../services/LoopHost';
 import { SettingsService } from '../services/SettingsService';
 import { parseWritingOutline } from '../services/ManuscriptWriting';
 import { summarizeProject } from '../domain/project';
+import { PACKAGE_LOCK_FILE } from '../domain/registry';
 import { THEME_CSS } from './themeCss';
 import { OverlayFiles, migrateProject, migrationReasons } from '../services/SchemaMigration';
 
@@ -786,6 +787,24 @@ export class WebviewProvider {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
           // Batch approval is for library results only; project results are approved one by one after review.
           const targets = msg.ids.map((id) => this.nodeIndex!.getById(id)).filter((node): node is ResearchNode => Boolean(node && node.origin === 'library' && node.status === 'draft'));
+          if (!targets.length) break;
+          // Results of an imported package are accepted together, under the package's one record.
+          const packages: string[] = [];
+          for (const collection of new Set(targets.map((node) => node.collection).filter((item): item is string => Boolean(item)))) {
+            if (this.paths && await this.fileService.exists(`${this.paths.library}/${collection}/${PACKAGE_LOCK_FILE}`)) packages.push(collection);
+          }
+          if (packages.length) {
+            const accept = packages.length === 1 ? 'Accept package' : `Accept ${packages.length} packages`;
+            const pick = await vscode.window.showWarningMessage(
+              `Accept the imported package${packages.length > 1 ? 's' : ''} ${packages.join(', ')} as known results? Every result in ${packages.length > 1 ? 'them' : 'it'} counts as approved; the research loop uses them without re-proving them. A new version that changes a result asks again.`,
+              { modal: true }, accept);
+            if (pick !== accept) break;
+            for (const alias of packages) await this.loopHost.approvePackage(alias, 'dashboard');
+            await this.refreshNodes();
+            this.scheduleGraph();
+          }
+          // The rest (hand-made collections) are checked one by one as before.
+          targets.splice(0, targets.length, ...targets.filter((node) => !node.collection || !packages.includes(node.collection)));
           if (!targets.length) break;
           const confirm = `Mark ${targets.length} as checked`;
           const choice = await vscode.window.showWarningMessage(

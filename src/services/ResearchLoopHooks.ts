@@ -267,6 +267,9 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
   if (isShell && RAW_GIT.test(text)) {
     return { deny: true, reason: `Research loop: do not run git pull/push/rebase/merge directly. Use ${LOOP_COMMAND} sync status | sync pull | sync prepare; publishing (sync publish) needs the researcher's confirmation.` };
   }
+  if (isShell && /\bpackage\s+approve\b/.test(text)) {
+    return { deny: true, reason: `Research loop: accepting an imported package is the researcher's decision. Tell them it waits in the dashboard (Needs you), or that they can run ${LOOP_COMMAND} package approve <alias> --interactive in their own terminal.` };
+  }
   const shellWrites = !isShell || /(?:^|[^<])>|\bsed\s+-i|\btee\b|\bmv\b|\bcp\b|\brsync\b|\bln\b|\brm\b|\btruncate\b|\bpython|\bnode\b|\bperl\b/.test(text);
   for (const target of targets) {
     if (shellWrites && under(target, UNDERSTANDING_PATH, root)) {

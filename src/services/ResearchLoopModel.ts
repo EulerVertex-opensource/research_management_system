@@ -20,7 +20,8 @@ export type LoopStage =
   | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'conjecture' | 'waiting' | 'ready';
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
-export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification';
+/** `package`: one review of an imported research package (target: its alias) that approves all of its results at once. */
+export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification' | 'package';
 export type ReportOutcome = 'complete' | 'none' | 'candidate' | 'confirmed' | 'rejected' | 'proved' | 'failed' | 'question' | 'searched' | 'summarized';
 export const REPORT_OUTCOMES: readonly ReportOutcome[] = ['complete', 'none', 'candidate', 'confirmed', 'rejected', 'proved', 'failed', 'question', 'searched', 'summarized'];
 /** Stages of one object search; the search round in `current.search` lives through all of them. */
@@ -180,10 +181,17 @@ export interface LoopState {
 }
 
 export interface ApprovalRecord {
-  /** `remark`: the researcher agreed a remark may appear in the paper; it covers the remark's text, not any result. */
-  kind: 'project' | 'asset' | 'definition' | 'specification' | 'remark'; target: string; digest: string; approvedAt: string; source?: string;
+  /**
+   * `remark`: the researcher agreed a remark may appear in the paper; it covers the remark's text, not any result.
+   * `package`: the researcher accepted an imported package (target: its alias); `digest` is the package digest and
+   * `nodes` holds each result's digests, so every result it covers counts as approved while its content matches.
+   */
+  kind: 'project' | 'asset' | 'definition' | 'specification' | 'remark' | 'package'; target: string; digest: string; approvedAt: string; source?: string;
   statement?: string; performed_by?: string; base_commit?: string; extension_version?: string;
+  /** Only on a package record. */
+  package?: string; version?: string; nodes?: Record<string, PackageApprovalNode>;
 }
+export interface PackageApprovalNode { digest: string; statement: string }
 export interface ApprovalFile { version: 1; records: ApprovalRecord[] }
 
 export interface StageReport {
@@ -204,11 +212,28 @@ export { researchDigest, statementDigest, proofDigest } from '../domain/digests'
 
 /** A specification approval covers the statement only, so writing the construction found later keeps it. */
 export function approvalDigest(raw: string, kind: ApprovalRecord['kind']): string {
-  return kind === 'specification' ? statementDigest(raw) : researchDigest(raw, kind === 'remark' ? 'asset' : kind);
+  // A package record is not compared against one file's digest; its results carry their own (see isApproved).
+  return kind === 'specification' ? statementDigest(raw) : researchDigest(raw, kind === 'remark' || kind === 'package' ? 'asset' : kind);
 }
 
 export function isApproved(records: ApprovalRecord[], kind: ApprovalRecord['kind'], target: string, raw: string): boolean {
-  return records.some((record) => record.kind === kind && record.target === target && record.digest === approvalDigest(raw, kind));
+  const digest = approvalDigest(raw, kind);
+  if (records.some((record) => record.kind === kind && record.target === target && record.digest === digest)) return true;
+  // A result of an imported package is also approved by the package's one record.
+  return (kind === 'asset' || kind === 'definition') && records.some((record) => record.kind === 'package' && record.nodes?.[target]?.digest === digest);
+}
+
+/**
+ * The record that approves a result: its own, else the package record that
+ * covers it, presented as a per-result record (digest and statement).
+ */
+export function approvalRecordOf(records: ApprovalRecord[], kind: 'asset' | 'definition', target: string): ApprovalRecord | undefined {
+  const own = records.find((record) => record.kind === kind && record.target === target);
+  if (own) return own;
+  const pkg = records.find((record) => record.kind === 'package' && record.nodes?.[target]);
+  if (!pkg) return undefined;
+  const node = pkg.nodes![target];
+  return { kind, target, digest: node.digest, statement: node.statement, approvedAt: pkg.approvedAt, source: `package:${pkg.target}`, ...(pkg.performed_by ? { performed_by: pkg.performed_by } : {}) };
 }
 
 export function safeRelativeFile(filePath: string): string {

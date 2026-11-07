@@ -354,3 +354,120 @@ test('citation locations are saved in the manifest, so a later folder build cite
   assert.equal(plan.diff.bump, 'none');
   assert.equal(matter(plan.writes.find((w) => w.file.endsWith('lib_hk_main_theorem.md')).content).data.source.location, 'Theorem 1.2');
 });
+
+// ---------- package approval in the loop ----------
+
+const { isApproved, approvalRecordOf } = load('../src/services/ResearchLoopModel.ts');
+
+test('one package record approves every result it covers, while each still matches', () => {
+  const raw = node({ type: 'lemma', title: 'L', source: { kind: 'original' }, depends_on: [], uses_definitions: [] }, '## Statement\n\nX.\n');
+  const records = [{ kind: 'package', target: 'hk', digest: 'pkg', approvedAt: 't', nodes: { lib_hk_l: { digest: approvalDigest(raw, 'asset'), statement: 's' } } }];
+  assert.equal(isApproved(records, 'asset', 'lib_hk_l', raw), true);
+  assert.equal(isApproved(records, 'asset', 'lib_hk_l', raw.replace('X.', 'Y.')), false);
+  assert.equal(isApproved(records, 'asset', 'other', raw), false);
+  assert.equal(isApproved(records, 'project', 'lib_hk_l', raw), false);
+  assert.deepEqual(approvalRecordOf(records, 'asset', 'lib_hk_l'), { kind: 'asset', target: 'lib_hk_l', digest: approvalDigest(raw, 'asset'), statement: 's', approvedAt: 't', source: 'package:hk' });
+});
+
+async function loopWithPackage() {
+  const { up, pkg } = await exported();
+  const down = downstream();
+  await down.service.applyImport(await down.service.previewImport(pkg, { alias: 'hk', source: { type: 'file', path: 'x' }, now: 'now' }));
+  let counter = 0;
+  const core = new ResearchLoopCore(down.files, paths, { id: () => `id-${++counter}`, iterationCap: 5 });
+  await core.start('claude', { goal: 'Prove my result.' });
+  // project.md already holds the goals, so the loop starts by asking to review them.
+  if (core.current.stage !== 'review_project') await core.report({ outcome: 'complete', summary: 'Drafted' });
+  await core.resolveApproval(core.current.approvalQueue.find((item) => item.kind === 'project').id, 'approved', '', 'test');
+  assert.equal((await core.next()).stage, 'scaffold');
+  down.files.map.set('research/assets/my_result.md', node({ type: 'theorem', title: 'My result', source: { kind: 'original' }, depends_on: ['lib_hk_main_theorem'], uses_definitions: ['lib_hk_heat_kernel_def'] }, '## Statement\n\nA consequence.\n'));
+  await core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await core.report({ outcome: 'none', summary: 'No sources' });
+  // My result's statement uses an imported definition, so the loop waits for it to be agreed: through the package.
+  assert.equal((await core.next()).stage, 'waiting');
+  return { up, down, core };
+}
+
+test('the loop asks once for an imported package, and accepting it approves all its results', async () => {
+  const { down, core } = await loopWithPackage();
+  const queue = core.current.approvalQueue;
+  assert.equal(queue.some((item) => item.target.startsWith('lib_hk_')), false);
+  const request = queue.find((item) => item.kind === 'package');
+  assert.equal(request.target, 'hk');
+  assert.match(request.reason, /heat_kernel 1\.0\.0 \(4 results and definitions in research\/library\/hk\)/);
+  assert.deepEqual(await core.packageStatus('hk'), { approved: false, pending: ['lib_hk_gaussian_bound', 'lib_hk_heat_kernel_def', 'lib_hk_li_yau', 'lib_hk_main_theorem'], version: '1.0.0' });
+
+  await core.resolveApproval(request.id, 'approved', '', 'dashboard');
+  assert.equal(core.current.approvalQueue.some((item) => item.kind === 'package'), false);
+  // With the package accepted, the loop goes on to work on my result.
+  assert.equal((await core.next()).stage, 'search');
+  const record = JSON.parse(down.files.map.get('research/approvals/packages/hk.json'));
+  assert.equal(record.kind, 'package');
+  assert.equal(record.version, '1.0.0');
+  assert.deepEqual(Object.keys(record.nodes).sort(), ['lib_hk_gaussian_bound', 'lib_hk_heat_kernel_def', 'lib_hk_li_yau', 'lib_hk_main_theorem']);
+  assert.equal([...down.files.map.keys()].some((file) => file.startsWith('research/approvals/assets/lib_hk_')), false);
+  for (const file of [...down.files.map.keys()].filter((key) => key.startsWith('research/library/hk/') && key.endsWith('.md'))) assert.equal(matter(down.files.map.get(file)).data.status, 'approved');
+  assert.equal((await core.packageStatus('hk')).approved, true);
+  assert.deepEqual(await down.service.problems(), []);
+  assert.deepEqual(await core.approvalProblems(), []);
+  // Asking again for one of its results is already satisfied.
+  assert.equal((await core.requestApproval('asset', 'lib_hk_main_theorem', 'x')).status, 'already_approved');
+  // An agent asking for one of its results is redirected to the package.
+  down.files.map.set('research/approvals/packages/hk.json', '');
+  for (const file of [...down.files.map.keys()].filter((key) => key.startsWith('research/library/hk/') && key.endsWith('.md'))) down.files.map.set(file, down.files.map.get(file).replace('status: approved', 'status: draft'));
+  assert.equal((await core.requestApproval('citation', 'lib_hk_li_yau', 'check it')).request.kind, 'package');
+});
+
+test('a package that no longer matches its lockfile cannot be accepted', async () => {
+  const { down, core } = await loopWithPackage();
+  const file = 'research/library/hk/assets/lib_hk_li_yau.md';
+  down.files.map.set(file, down.files.map.get(file).replace('gradient bound', 'sharp gradient bound'));
+  await assert.rejects(core.approvePackage('hk', 'dashboard'), /no longer matches its lockfile:\n- research\/library\/hk\/assets\/lib_hk_li_yau\.md: edited after import/);
+});
+
+test('an update re-opens only what changed, and flags results here that rest on a changed statement', async () => {
+  const { up, down, core } = await loopWithPackage();
+  await core.approvePackage('hk', 'dashboard');
+  await core.approve('asset', 'my_result', 'dashboard');
+
+  // A proof-only change upstream: that result needs a look, nothing that rests on it does.
+  up.files.map.set('research/assets/main_theorem.md', up.files.map.get('research/assets/main_theorem.md').replace('By the Gaussian bound.', 'From the Gaussian bound.'));
+  approve(up.files.map, 'asset', 'main_theorem');
+  let plan = await down.service.previewUpdate('hk', (await up.service.export(provenance)).package, { source: { type: 'file', path: 'x' }, now: 'now' });
+  assert.equal(matter(plan.writes.find((w) => w.file.endsWith('lib_hk_li_yau.md')).content).data.status, 'approved');
+  await down.service.applyImport(plan);
+  let details = [];
+  assert.deepEqual(await core.reconcile(undefined, { details }), ['lib_hk_main_theorem']);
+  assert.deepEqual(details, [{ id: 'lib_hk_main_theorem', reason: 'content_changed' }]);
+  assert.deepEqual((await core.packageStatus('hk')).pending, ['lib_hk_main_theorem']);
+  assert.equal(JSON.parse(down.files.map.get('research/approvals/packages/hk.json')).nodes.lib_hk_main_theorem, undefined);
+  await core.approvePackage('hk', 'dashboard');
+  assert.equal(JSON.parse(down.files.map.get('research/approvals/packages/hk.json')).version, '1.0.1');
+
+  // A statement change upstream: results here that rest on it are flagged for a re-check.
+  up.files.map.set('research/assets/main_theorem.md', up.files.map.get('research/assets/main_theorem.md').replace('decays like', 'decays at least like'));
+  approve(up.files.map, 'asset', 'main_theorem');
+  plan = await down.service.previewUpdate('hk', (await up.service.export(provenance)).package, { source: { type: 'file', path: 'x' }, now: 'now' });
+  assert.deepEqual([plan.diff.bump, plan.diff.statement], ['major', ['lib_hk_main_theorem']]);
+  await down.service.applyImport(plan);
+  details = [];
+  await core.reconcile(undefined, { details });
+  assert.deepEqual(details.map((item) => item.id).sort(), ['lib_hk_main_theorem', 'my_result']);
+  assert.match(details.find((item) => item.id === 'my_result').reason, /lib_hk_main_theorem/);
+});
+
+test('removing a package removes its approval records', async () => {
+  const { down, core } = await loopWithPackage();
+  await core.approvePackage('hk', 'dashboard');
+  down.files.map.delete('research/assets/my_result.md');
+  const plan = await down.service.previewRemove('hk');
+  assert.ok(plan.deletes.includes('research/approvals/packages/hk.json'));
+  await down.service.applyRemove(plan);
+  assert.equal(down.files.map.has('research/approvals/packages/hk.json'), false);
+});
+
+test('agents cannot accept a package', () => {
+  const deny = (command) => preToolUseDecision(paths, { tool_name: 'Bash', tool_input: { command } }, '/repo').deny;
+  assert.equal(deny('node .agents/skills/research-loop/scripts/research-loop.cjs package approve hk --interactive'), true);
+  assert.equal(deny('node .agents/skills/research-loop/scripts/research-loop.cjs package list'), false);
+});

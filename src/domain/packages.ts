@@ -418,6 +418,11 @@ export interface ImportProject {
   references?: Map<string, string[]>;
   /** BibTeX keys cited outside the collection being changed (nodes and TeX). */
   citedElsewhere?: Set<string>;
+  /**
+   * Local IDs in the collection being updated whose files say approved. They are written approved
+   * again, so reconciling afterwards reverts exactly the changed ones and flags what rests on them.
+   */
+  approved?: Set<string>;
 }
 
 export interface ImportOptions {
@@ -614,7 +619,8 @@ export function planImport(pkg: ResearchPackage, project: ImportProject, options
     } else {
       source = { kind: 'paper', paper_id: citeAs, location: node.location?.trim() || `result ${node.id} of ${pkg.name}` };
     }
-    const out: Record<string, unknown> = { type: data.type, title: typeof data.title === 'string' ? data.title : node.id, status: 'draft' };
+    const keepApproved = Boolean(installed && project.approved?.has(local));
+    const out: Record<string, unknown> = { type: data.type, title: typeof data.title === 'string' ? data.title : node.id, status: keepApproved ? 'approved' : 'draft' };
     if (typeof data.definition_kind === 'string') out.definition_kind = data.definition_kind;
     out.source = source;
     out.depends_on = mapDeps('depends_on');

@@ -8,7 +8,7 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, ASSESSMENT_PATH, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, GoalAssessment, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  LoopExtension, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, isApproved, isWaitingForHuman, newState,
+  LoopExtension, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES } from '../domain/nodeKinds';
@@ -40,6 +40,7 @@ import {
 } from './ResearchContext';
 import { ideaPlanProblems } from './ProofIdeas';
 import { packageProblemsIn } from './PackageService';
+import { PackageLock, lockPath, parseLock, vendoredPath } from '../domain/packages';
 import { Teaching } from './Teaching';
 import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLibraryPath, libraryFolders, libraryProblems, listNodeFiles, locateNodeFile, nodeFolders, searchLibrary } from '../domain/registry';
 
@@ -505,6 +506,88 @@ export class ResearchLoopCore {
     return true;
   }
 
+  // ---------- imported packages ----------
+
+  async packageLock(alias: string): Promise<PackageLock> {
+    const file = lockPath(this.paths.library, alias);
+    return parseLock(await this.files.readFile(file), file);
+  }
+
+  /** The alias of the imported package a result belongs to, if any. */
+  private async importedPackageOf(kind: ResultKind, id: string): Promise<string | undefined> {
+    const file = await findNodeFile(this.files, this.paths, kind, id);
+    const location = file ? locateNodeFile(file, this.paths) : undefined;
+    if (location?.origin !== 'library' || !location.collection) return undefined;
+    return await this.files.exists(lockPath(this.paths.library, location.collection)) ? location.collection : undefined;
+  }
+
+  private async packageReason(alias: string): Promise<string> {
+    const lock = await this.packageLock(alias).catch(() => undefined);
+    if (!lock) return `Imported package ${alias}: accept it once to use its results as known.`;
+    const count = Object.keys(lock.nodes).length;
+    return `Imported package ${lock.package} ${lock.version} (${count} result${count === 1 ? '' : 's'} and definition${count === 1 ? '' : 's'} in ${this.paths.library}/${alias}): accept it once to use them as known.`;
+  }
+
+  private async packageProblemsFor(alias: string): Promise<string[]> {
+    const prefix = `${this.paths.library}/${alias}/`;
+    return (await packageProblemsIn(this.files, this.paths)).filter((problem) => problem.startsWith(prefix));
+  }
+
+  /** Whether an imported package is accepted, and which of its results its record does not (or no longer) cover. */
+  async packageStatus(alias: string): Promise<{ approved: boolean; pending: string[]; version?: string; approvedVersion?: string }> {
+    const lock = await this.packageLock(alias);
+    const records = (await this.approvals()).records;
+    const record = records.find((item) => item.kind === 'package' && item.target === alias);
+    const pending: string[] = [];
+    for (const [id, node] of Object.entries(lock.nodes)) {
+      const raw = await this.files.readFile(vendoredPath(this.paths.library, alias, node.kind, id)).catch(() => '');
+      let status: unknown;
+      try { status = raw ? parseMarkdown(raw).data.status : undefined; } catch { status = undefined; }
+      if (!raw || status !== 'approved' || !isApproved(records, node.kind, id, raw)) pending.push(id);
+    }
+    return { approved: !pending.length, pending, version: lock.version, ...(record?.version ? { approvedVersion: record.version } : {}) };
+  }
+
+  /**
+   * The researcher accepts an imported package: every result in it becomes
+   * approved under one record holding each result's digests. Only the
+   * extension (a human click), the researcher's terminal, or auto mode calls this.
+   */
+  async approvePackage(alias: string, source: string): Promise<string[]> {
+    const lock = await this.packageLock(alias);
+    const problems = await this.packageProblemsFor(alias);
+    if (problems.length) throw new Error(`Cannot accept package ${alias}; it no longer matches its lockfile:\n${problems.map((problem) => `- ${problem}`).join('\n')}`);
+    const nodes: Record<string, PackageApprovalNode> = {};
+    for (const [id, node] of Object.entries(lock.nodes)) {
+      const file = vendoredPath(this.paths.library, alias, node.kind, id);
+      const parsed = parseMarkdown(await this.files.readFile(file));
+      if (parsed.data.status !== 'approved') {
+        parsed.data.status = 'approved';
+        await this.writeOwned(file, stringifyMarkdown(parsed.content, parsed.data));
+      }
+      const raw = await this.files.readFile(file);
+      nodes[id] = { digest: researchDigest(raw, node.kind), statement: statementDigest(raw) };
+    }
+    const file = await this.approvals();
+    // The package record replaces earlier ones and any per-result records of its results.
+    file.records = file.records.filter((record) => !(record.kind === 'package' && record.target === alias) && !((record.kind === 'asset' || record.kind === 'definition') && lock.nodes[record.target]));
+    const provenance = await this.provenance();
+    file.records.push({
+      kind: 'package', target: alias, digest: lock.digest, approvedAt: provenance.created_at, source, performed_by: provenance.performed_by,
+      ...(provenance.base_commit ? { base_commit: provenance.base_commit } : {}), ...(provenance.extension_version ? { extension_version: provenance.extension_version } : {}),
+      package: lock.package, version: lock.version, nodes,
+    });
+    await this.writeApprovals(file);
+    const ids = Object.keys(lock.nodes);
+    if (this.state) {
+      this.state.approvalQueue = this.state.approvalQueue.filter((item) => !(item.kind === 'package' && item.target === alias) && !ids.includes(item.target));
+      await this.save();
+    }
+    if (source !== 'auto') for (const [id, node] of Object.entries(lock.nodes)) await this.clearHold(node.kind, id);
+    await this.event('approved', { kind: 'package', target: alias, source, version: lock.version });
+    return ids;
+  }
+
   /** Researcher confirmed a counterexample: approve the example and deprecate the refuted asset. */
   async confirmCounterexample(exampleId: string, source: string): Promise<string> {
     const file = `${this.paths.assets}/${exampleId}.md`;
@@ -584,6 +667,8 @@ export class ResearchLoopCore {
       node.raw = stringifyMarkdown(parsed.content, parsed.data);
       node.data = parsed.data;
       approvals.records = approvals.records.filter((record) => !(record.kind === node.kind && record.target === id));
+      // A package record stops covering the changed result; the rest of the package stays approved.
+      for (const record of approvals.records) if (record.kind === 'package' && record.nodes?.[id]) delete record.nodes[id];
       reverted.push(id);
       options.details?.push({ id, reason });
       if (options.dryRun) return;
@@ -618,7 +703,7 @@ export class ResearchLoopCore {
     for (const id of candidates) {
       const node = nodes.get(id);
       if (!node || node.data.status !== 'approved') continue;
-      const record = approvals.records.find((entry) => entry.kind === node.kind && entry.target === id) as (ApprovalRecord & { statement?: string }) | undefined;
+      const record = approvalRecordOf(approvals.records, node.kind, id);
       if (!record) continue; // approved without a record: handled by validateWorkspace (agent) or recorded by the extension (human)
       if (record.digest !== researchDigest(node.raw, node.kind)) {
         await revert(id, 'content_changed');
@@ -742,9 +827,19 @@ export class ResearchLoopCore {
   async enqueueApproval(kind: ApprovalKind, target: string, reason: string): Promise<ApprovalRequest> {
     // The project has one approval record, keyed `project`; agents may name it by its path.
     if (kind === 'project') target = 'project';
+    // A result of an imported package is reviewed with its package, once.
+    if (kind === 'asset' || kind === 'definition' || kind === 'citation') {
+      const alias = await this.importedPackageOf(kind === 'definition' ? 'definition' : 'asset', target);
+      if (alias) return this.enqueueApproval('package', alias, await this.packageReason(alias));
+    }
     const state = this.require();
-    const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(await this.nodeFile(kind === 'definition' ? 'definition' : 'asset', target)).catch(() => '');
-    const digest = raw ? approvalDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : kind === 'specification' ? 'specification' : 'asset') : '';
+    let digest: string;
+    if (kind === 'package') {
+      digest = (await this.packageLock(target).catch(() => undefined))?.digest ?? '';
+    } else {
+      const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(await this.nodeFile(kind === 'definition' ? 'definition' : 'asset', target)).catch(() => '');
+      digest = raw ? approvalDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : kind === 'specification' ? 'specification' : 'asset') : '';
+    }
     const existing = state.approvalQueue.find((item) => item.kind === kind && item.target === target);
     if (existing) {
       if (existing.digest !== digest) { existing.digest = digest; existing.reason = reason; existing.requestedAt = this.now(); await this.save(); }
@@ -791,6 +886,7 @@ export class ResearchLoopCore {
     else if (request.kind === 'definition') await this.approve('definition', request.target, source);
     else if (request.kind === 'counterexample') await this.confirmCounterexample(request.target, source);
     else if (request.kind === 'specification') await this.approve('specification', request.target, source);
+    else if (request.kind === 'package') await this.approvePackage(request.target, source);
     else await this.approve('asset', request.target, source);
   }
 
@@ -807,6 +903,7 @@ export class ResearchLoopCore {
 
   private async isCurrentlyApproved(kind: ApprovalKind, target: string): Promise<boolean> {
     if (kind === 'project') return this.isProjectApproved();
+    if (kind === 'package') return (await this.packageStatus(target)).approved;
     if (kind === 'specification') {
       const raw = await this.files.readFile(`${this.paths.assets}/${target}.md`).catch(() => '');
       return Boolean(raw) && isApproved((await this.approvals()).records, 'specification', target, raw);
@@ -857,6 +954,12 @@ export class ResearchLoopCore {
       if (!policy.project) return undefined;
       const raw = await this.files.readFile(this.paths.projectMd).catch(() => '');
       return raw && researchDigest(raw, 'project') === request.digest && requiredAssetIds(raw).length && projectSection(raw, 'Main Problem') ? 'project' : undefined;
+    }
+    if (request.kind === 'package') {
+      // A package holds known results, which auto mode treats like citations; only an intact package of the requested version.
+      if (!policy.citations) return undefined;
+      const lock = await this.packageLock(request.target).catch(() => undefined);
+      return lock && lock.digest === request.digest && !(await this.packageProblemsFor(request.target)).length ? 'citations' : undefined;
     }
     if (request.kind === 'specification') {
       if (!policy.specifications) return undefined;

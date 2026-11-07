@@ -1,7 +1,7 @@
 import * as path from 'path';
 import type { ProjectPaths } from '../models/types';
 import { LoopFiles, isApproved } from './ResearchLoopModel';
-import { readApprovals } from './ApprovalStore';
+import { approvalRecordPath, readApprovals } from './ApprovalStore';
 import { parseMarkdown } from './Frontmatter';
 import { requiredAssetIds } from '../domain/project';
 import { RELATION_FIELDS } from '../domain/schema';
@@ -120,12 +120,16 @@ export class PackageService {
     const nodeIds = new Set<string>();
     const references = new Map<string, string[]>();
     const citedElsewhere = new Set<string>();
+    const approved = new Set<string>();
     const library = (await libraryCollections(this.files, this.paths)).flatMap((collection) => Object.values(LIBRARY_KIND_FOLDERS).map((kind) => `${this.paths.library}/${collection}/${kind}`));
     for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, ...library]) {
       for (const file of await this.files.listFiles(folder)) {
         const id = idOf(file);
         nodeIds.add(id);
-        if (inside && file.startsWith(inside)) continue;
+        if (inside && file.startsWith(inside)) {
+          if (/^status:\s*approved\s*$/m.test(await this.files.readFile(file).catch(() => ''))) approved.add(id);
+          continue;
+        }
         let data: Record<string, any>;
         try { data = parseMarkdown(await this.files.readFile(file)).data; } catch { continue; }
         for (const field of RELATION_FIELDS) {
@@ -149,6 +153,7 @@ export class PackageService {
       papersIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''),
       references,
       citedElsewhere,
+      approved,
     };
   }
 
@@ -175,7 +180,12 @@ export class PackageService {
   }
 
   async previewRemove(alias: string, options: { force?: boolean } = {}): Promise<RemovePlan> {
-    return planRemove(await this.lockFor(alias), await this.importProject(alias), options);
+    const lock = await this.lockFor(alias);
+    const plan = planRemove(lock, await this.importProject(alias), options);
+    // The package's approval record, and any per-result records of its results, go with it.
+    const records = [approvalRecordPath(this.paths.researchRoot, 'package', alias), ...Object.entries(lock.nodes).map(([id, node]) => approvalRecordPath(this.paths.researchRoot, node.kind, id))];
+    for (const file of records) if (await this.files.exists(file)) plan.deletes.push(file);
+    return plan;
   }
 
   async applyRemove(plan: RemovePlan): Promise<void> {

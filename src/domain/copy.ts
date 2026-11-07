@@ -107,6 +107,7 @@ export function approvalTitle(kind: string, title: string, type: string, library
   if (kind === 'definition') return `Review the definition of ${title}`;
   if (kind === 'specification') return `Accept the required properties of ${title}`;
   if (kind === 'citation') return `Check the citation for ${title}`;
+  if (kind === 'package') return `Accept the imported package ${title}`;
   if (kind === 'counterexample') return `Check a possible counterexample: ${title}`;
   if (library) return `Accept the known result ${title}`;
   return isProvable(type) ? `Review the proof of ${title}` : `Review ${kindLabel(type).toLowerCase()} ${title}`;
@@ -118,6 +119,7 @@ export function acceptLabel(kind: string, type: string): string {
   if (kind === 'definition') return 'Accept definition';
   if (kind === 'specification') return 'Accept the properties';
   if (kind === 'citation') return 'The citation matches';
+  if (kind === 'package') return 'Accept package';
   if (kind === 'counterexample') return 'Yes, it is a counterexample';
   return isProvable(type) ? 'Accept proof' : 'Accept';
 }
@@ -126,6 +128,7 @@ export function acceptLabel(kind: string, type: string): string {
 export function needsLabel(kind: string | undefined): string {
   if (kind === 'counterexample') return 'Check counterexample';
   if (kind === 'citation') return 'Check citation';
+  if (kind === 'package') return 'Accept package';
   if (kind === 'specification') return 'Accept properties';
   if (kind === 'question') return 'Question for you';
   return 'Needs your review';

@@ -285,6 +285,13 @@ export class LoopHost implements vscode.Disposable {
     if (recorded) this.output.appendLine(`[loop] Recorded ${source} approval of ${id}`);
   }
 
+  /** The researcher accepted an imported package in the dashboard (a human click). Returns the results it approved. */
+  async approvePackage(alias: string, source: string): Promise<string[]> {
+    const ids = await this.withCore((core) => core.approvePackage(alias, source));
+    this.output.appendLine(`[loop] Recorded ${source} approval of package ${alias} (${ids.length} results)`);
+    return ids;
+  }
+
   /** Remarks the researcher writes, edits, archives, or restores in the dashboard: theirs, from outside the chats. */
   async addRemark(input: { target: string; title: string; body: string; anchor?: string }): Promise<string> {
     return (await this.withCore((core) => core.addRemark({ ...input, origin: 'researcher', from: 'other' }))).id;

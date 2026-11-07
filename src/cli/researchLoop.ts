@@ -815,7 +815,7 @@ async function main(): Promise<void> {
       throw new Error('library search|list|promote');
     }
     case 'package': {
-      await runPackage(sub, args, { root, out, json, loopRunning: core.current?.status === 'running', extensionVersion: EXTENSION_VERSION });
+      await runPackage(sub, args, { root, out, json, loopRunning: core.current?.status === 'running', extensionVersion: EXTENSION_VERSION, core, confirm: confirmOnTty });
       return;
     }
     case 'search': {

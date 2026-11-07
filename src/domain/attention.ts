@@ -77,6 +77,21 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
       });
       continue;
     }
+    if (request.kind === 'package') {
+      // An imported package: results approved in another project, accepted here once as known results.
+      const members = [...nodes.values()].filter((item) => item.origin === 'library' && item.collection === target).sort((a, b) => a.id.localeCompare(b.id));
+      items.push({
+        key: `approval:${request.id}`, priority: 3, category: 'approval', title: approvalTitle('package', target, ''),
+        reason: request.reason, why: 'Its results were proved and approved in another project. Check that you accept them, once for the whole package.',
+        ifIgnored: 'Research continues on top of it, but the project cannot count as done.',
+        blocks: [...new Set(members.flatMap((item) => item.blocks ?? []))], sections: [], since: request.requestedAt,
+        buttons: [
+          ...(members.length ? [{ label: 'Read its results', action: { action: 'openNode', id: members[0].id }, kind: 'primary' } as AttentionButton] : []),
+          { label: acceptLabel('package', ''), action: { action: 'approve', requestId: request.id }, kind: 'secondary' },
+        ],
+      });
+      continue;
+    }
     const library = node?.origin === 'library';
     if (request.kind === 'citation' || (request.kind === 'asset' && library)) {
       // Taken from the literature: the loop already builds on it; checking it is the last step before the project counts as done.

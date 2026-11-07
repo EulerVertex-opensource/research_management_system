@@ -6,6 +6,7 @@ import { ExportPlan, ImportPlan, PackageProvenance, PackageSource, RemovePlan, R
 import type { ProjectPaths } from '../models/types';
 import { NodeLoopFiles, loadProjectPaths, loadSyncConfig } from './nodeFiles';
 import { NodeGitRunner } from './nodeGit';
+import type { ResearchLoopCore } from '../services/ResearchLoopCore';
 
 /**
  * `research-loop package ...`: export this project as a research package,
@@ -17,6 +18,7 @@ export const PACKAGE_USAGE = `  package export [--name N --cite KEY] [--exports 
   package import <file.rpkg.json|project folder> [--as alias] [--apply]   (vendor a package into the library as lib_<alias>_* results)
   package update <alias> [<file|folder>] [--apply]   (bring a new version; shows what changed)
   package remove <alias> [--force] [--apply]
+  package approve <alias> --interactive   (the researcher, in their own terminal: accept every result of the package at once)
   package list | package verify`;
 
 interface PackageArgs { positional: string[]; flags: Record<string, string | true>; lists: Record<string, string[]> }
@@ -27,6 +29,9 @@ interface PackageContext {
   /** A loop stage is in progress: importing would change files outside the stage. */
   loopRunning: boolean;
   extensionVersion?: string;
+  core: ResearchLoopCore;
+  /** Ask the researcher on their terminal; throws when none is attached (an agent's shell). */
+  confirm: (text: string, word: string, elsewhere: string) => boolean;
 }
 
 const flag = (args: PackageArgs, name: string) => typeof args.flags[name] === 'string' ? args.flags[name] as string : undefined;
@@ -135,7 +140,11 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       const installed = await service.installed();
       if (json) { out(installed.map((item) => item.lock)); return; }
       if (!installed.length) { out('No packages imported.'); return; }
-      for (const { lock } of installed) out(`${lock.alias} | ${lock.package} ${lock.version} | ${Object.keys(lock.nodes).length} results | from ${lock.source.type === 'git' ? lock.source.url : lock.source.path}`);
+      for (const { lock } of installed) {
+        const status = await context.core.packageStatus(lock.alias).catch(() => undefined);
+        const approval = !status ? '?' : status.approved ? `accepted${status.approvedVersion && status.approvedVersion !== lock.version ? ` (${status.approvedVersion} reviewed earlier)` : ''}` : `${status.pending.length} to review`;
+        out(`${lock.alias} | ${lock.package} ${lock.version} | ${Object.keys(lock.nodes).length} results | ${approval} | from ${lock.source.type === 'git' ? lock.source.url : lock.source.path}`);
+      }
       return;
     }
     case 'verify': {
@@ -189,8 +198,15 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       if (!spec) throw new Error(`${third} came from git; pass the file or folder to update from.`);
       const { pkg, source } = await loadPackage(spec, root, context.extensionVersion);
       const plan = await service.previewUpdate(third, pkg, { source, now: new Date().toISOString() });
-      if (apply && plan.ok) { guardLoop(); await service.applyImport(plan); }
-      out(json ? { ...plan, writes: plan.writes.map((write) => write.file), bib: undefined, papersIndex: undefined, applied: apply && plan.ok } : describeImport(pkg, plan, true, apply && plan.ok));
+      const details: Array<{ id: string; reason: string }> = [];
+      if (apply && plan.ok) {
+        guardLoop();
+        await service.applyImport(plan);
+        // Changed results lose their approval; approved results here that rest on a changed statement are reverted or flagged, per the rigor setting.
+        await context.core.reconcile(undefined, { details });
+      }
+      const affected = details.map((item) => `${item.id}: ${item.reason.replace(/^recheck:/, 'recheck, rests on ').replace(/^content_changed$/, 'changed in the new version').replace(/^dependency_changed:/, 'reverted, rests on ')}`);
+      out(json ? { ...plan, writes: plan.writes.map((write) => write.file), bib: undefined, papersIndex: undefined, applied: apply && plan.ok, reconciled: details } : [describeImport(pkg, plan, true, apply && plan.ok), bullets('Approvals affected:', affected)].filter(Boolean).join('\n'));
       if (!plan.ok) process.exitCode = 1;
       return;
     }
@@ -202,7 +218,20 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       if (!plan.ok) process.exitCode = 1;
       return;
     }
+    case 'approve': {
+      if (!third) throw new Error('package approve <alias> --interactive');
+      const lock = await service.lockFor(third);
+      // Only the researcher accepts results: in VS Code (Needs you) or here, typed at their own terminal.
+      if (args.flags.interactive !== true) throw new Error(`Only the researcher accepts a package: in the dashboard (Needs you), or by running package approve ${third} --interactive in their own terminal.`);
+      const status = await context.core.packageStatus(third);
+      if (status.approved) { out(`${lock.package} ${lock.version} (${third}) is already accepted.`); return; }
+      const question = `Accept package ${lock.package} ${lock.version} as known results? ${Object.keys(lock.nodes).length} results and definitions in ${paths.library}/${third}; the research loop will use them without re-proving them.`;
+      if (!context.confirm(question, 'yes', 'accept it in VS Code instead (Needs you)')) { out('Not accepted.'); return; }
+      const ids = await context.core.approvePackage(third, 'terminal');
+      out(json ? { approved: ids } : `Accepted ${lock.package} ${lock.version}: ${ids.length} results now count as known.`);
+      return;
+    }
     default:
-      throw new Error(`package export|import|update|remove|list|verify\n${PACKAGE_USAGE}`);
+      throw new Error(`package export|import|update|remove|approve|list|verify\n${PACKAGE_USAGE}`);
   }
 }
