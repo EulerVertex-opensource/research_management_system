@@ -5,8 +5,11 @@ import { parseMarkdown } from '../services/Frontmatter';
 import { computeAssetOrder } from '../services/AssetOrder';
 import { planResearchInterlinks } from '../services/ResearchInterlinks';
 import { ideaPlanProblems } from '../services/ProofIdeas';
-import { OverlayFiles, migrateProject, migrationReasons } from '../services/SchemaMigration';
-import { NodeKind } from '../domain/nodeKinds';
+import { OverlayFiles, RemarkMigrationPlan, migrateProject, migrationReasons } from '../services/SchemaMigration';
+import * as fs from 'fs/promises';
+import { NodeKind, nodeKindOf } from '../domain/nodeKinds';
+import { Remarks } from '../services/Remarks';
+import { remarkReferenceProblems } from '../domain/remarks';
 import { duplicateIds, nodeProblems } from '../domain/schema';
 import { ProjectPaths } from '../models/types';
 import { RegistryNode, libraryProblems, nodeFolders } from '../domain/registry';
@@ -16,11 +19,12 @@ const USAGE = `Usage: research-maintenance <command> [--preview | --apply] [--pr
 
   validate [--assets | --definitions]  Check node schema, global IDs, dependencies, and the research folder layout; print dependency order. Read-only.
   links [--file NODE_PATH]             Link verified prose mentions of dependencies and definitions in asset and definition bodies.
-  migrate [--force]                    Upgrade an older project to the current schema (definitions, plans, project.md, titles, link blocks, source kinds).
+  migrate [--force] [--remarks FILE]   Upgrade an older project to the current schema (definitions, plans, project.md, titles, link blocks, source kinds, remarks).
+                                       FILE sorts the remark assets: {"<id>": {"as": "assumption|convention|lemma|proposition|example|remark", "target": "<id for a remark>"}}.
 
 --preview (default) prints the changes; --apply writes them.`;
 
-interface Options { command: string; apply: boolean; root: string; file?: string; only?: 'asset' | 'definition'; force: boolean }
+interface Options { command: string; apply: boolean; root: string; file?: string; only?: 'asset' | 'definition'; force: boolean; remarks?: string }
 
 function parseArgs(argv: string[]): Options {
   const [command, ...rest] = argv;
@@ -38,6 +42,7 @@ function parseArgs(argv: string[]): Options {
     else if (arg === '--assets' && command === 'validate') options.only = 'asset';
     else if (arg === '--definitions' && command === 'validate') options.only = 'definition';
     else if (arg === '--force' && command === 'migrate') options.force = true;
+    else if (arg === '--remarks' && command === 'migrate') options.remarks = path.resolve(value());
     else throw new Error(`Unknown option ${arg} for ${command}.\n${USAGE}`);
   }
   if (rest.includes('--apply') && rest.includes('--preview')) throw new Error('Choose --preview or --apply');
@@ -95,6 +100,12 @@ async function validate(files: NodeLoopFiles, paths: ProjectPaths, only?: 'asset
   }
   const layout = await layoutReport(files, paths);
   problems.push(...layout.problems);
+  {
+    const remarks = new Remarks(files, paths);
+    const ids = new Set((await remarks.all()).map((remark) => remark.id));
+    problems.push(...await remarks.problems(new Set(registry.filter((node) => ['asset', 'definition'].includes(String(nodeKindOf(node.data.type)))).map((node) => node.id))));
+    if (ids.size) for (const node of registry) problems.push(...remarkReferenceProblems(node.file, node.data, ids));
+  }
   for (const file of layout.legacy) out(`NOTE ${file} is left from an older version; review it and remove it or move its content into the research folders.`);
   const reasons = await migrationReasons(files, paths);
   if (reasons.length) out(`NOTE this project uses an older schema (${reasons.join('; ')}); run \`research-maintenance migrate --preview\`.`);
@@ -125,17 +136,21 @@ async function links(files: NodeLoopFiles, paths: ProjectPaths, apply: boolean, 
   if (apply) for (const change of changes) await files.writeFile(change.filePath, change.raw);
 }
 
-async function migrate(files: NodeLoopFiles, paths: ProjectPaths, root: string, apply: boolean, force: boolean): Promise<void> {
+async function migrate(files: NodeLoopFiles, paths: ProjectPaths, root: string, apply: boolean, force: boolean, remarksFile?: string): Promise<void> {
   const reasons = await migrationReasons(files, paths);
   if (!reasons.length) { out('The project already uses the current schema; nothing to migrate.'); return; }
   out(`Migrating: ${reasons.join('; ')}.`);
   if (apply && !force) {
-    const research = [paths.projectMd, paths.assets, paths.definitions, paths.ideas, paths.plans, `${paths.researchRoot}/approvals`];
+    const research = [paths.projectMd, paths.assets, paths.definitions, paths.ideas, paths.plans, paths.remarks, `${paths.researchRoot}/approvals`];
     const status = await new NodeGitRunner(root).run(['status', '--porcelain', '--', ...research]);
     if (status.code === 0 && status.stdout.trim()) throw new Error(`Commit or stash research changes first so the migration can be reviewed as one diff (or pass --force):\n${status.stdout.trimEnd()}`);
   }
   const overlay = new OverlayFiles(files);
-  const report = await migrateProject(overlay, paths);
+  let remarkPlan: RemarkMigrationPlan | undefined;
+  if (remarksFile) {
+    try { remarkPlan = JSON.parse(await fs.readFile(remarksFile, 'utf8')) as RemarkMigrationPlan; } catch (error) { throw new Error(`Cannot read the remark sorting ${remarksFile}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  const report = await migrateProject(overlay, paths, { remarkPlan });
   const changes = await overlay.changes();
   for (const change of changes) out(`${change.after === null ? 'DELETE' : change.before === undefined ? 'CREATE' : 'UPDATE'} ${change.file}`);
   for (const note of report.notes) out(`NOTE ${note}`);
@@ -150,7 +165,7 @@ async function main(): Promise<void> {
   const paths = await loadProjectPaths(options.root);
   if (options.command === 'validate') process.exitCode = await validate(files, paths, options.only);
   else if (options.command === 'links') await links(files, paths, options.apply, options.file);
-  else await migrate(files, paths, options.root, options.apply, options.force);
+  else await migrate(files, paths, options.root, options.apply, options.force, options.remarks);
 }
 
 main().catch((error: unknown) => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });

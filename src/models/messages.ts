@@ -1,13 +1,13 @@
 import type { GraphAction, GraphPayload } from './graph';
 import type { SettingsErrors, SettingsPatch, SettingsPayload } from './settings';
 import type { SyncBadge, SyncNotice } from './sync';
-import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from './types';
+import { DefinitionKind, RemarkView, ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
 export type ExtensionMessage =
   | { type: 'init'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'nodesUpdated'; nodes: ResearchNode[] }
-  | { type: 'nodeDetail'; id: string; frontmatter: NodeFrontmatter; body: string }
+  | { type: 'nodeDetail'; id: string; frontmatter: NodeFrontmatter; body: string; remarks?: RemarkView[] }
   | { type: 'projectMd'; content: string; summary?: ProjectSummary }
   | { type: 'papersData'; papers: PaperEntry[] }
   | { type: 'manuscriptStatus'; status: ManuscriptStatus }
@@ -34,7 +34,8 @@ export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'getNodeContent'; id: string }
   | { type: 'saveNode'; id: string; frontmatter: NodeFrontmatter; body: string }
-  | { type: 'createNode'; nodeType: NodeType; title: string; targetAsset?: string }
+  | { type: 'approveRemark'; id: string; nodeId: string }
+  | { type: 'createNode'; nodeType: NodeType; title: string; targetAsset?: string; definitionKind?: DefinitionKind }
   | { type: 'updateStatus'; id: string; status: ResearchStatus }
   /** Approve several library results at once (the extension asks the researcher to confirm). */
   | { type: 'approveNodes'; ids: string[]; label: string }

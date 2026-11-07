@@ -308,7 +308,8 @@ Stages: `discuss_goals` → `draft_project` → `review_project` → `scaffold` 
 - **What it starts from.** `research-loop teach list` lists what is new to you or changed since you studied it, each after the results it rests on. The teacher starts with how these results fit together, then takes one result at a time.
 - **How it explains.** It goes one layer at a time, and you choose how deep: what the result says, the key idea, the skeleton, the hard step, line by line. Its material comes from `teach pack <id>`: the statement and proof, what it rests on, the attempts that failed and why, the independent check's verdict, and known results it adapts.
 - **Reading the files yourself.** The teacher names each result, plan, and doubt as a dashboard link (see item 6 above), so a click opens that page in the dashboard. File links are given too: a research file open in the editor has a **Show in Dashboard** button in its title bar.
-- **Rewording a proof.** When you dislike how a proof is written, the teacher rewords it with you in the chat, adds your remarks (intuition, why a step is needed) if you like, and proposes the result with `teach revise`. Only a running loop applies a rewording, between stages; if the loop is not running, paused, or waiting, the teacher tells you to start, resume, or nudge it.
+- **Remarks.** As you discuss a result, the teacher writes remarks on it like margin notes (intuition, why a step is needed, a picture to keep in mind), saved at once in `research/remarks/`, one file each. The loop adds its own remarks too (the key idea of a proof it found), marked as unchecked. Remarks are annotations, not results: nothing depends on them, no approval or check covers them, the loop never reads them, and the dashboard shows them under their result.
+- **Rewording a proof.** When you dislike how a proof is written, the teacher rewords it with you in the chat and proposes the result with `teach revise`. Only a running loop applies a rewording, between stages; if the loop is not running, paused, or waiting, the teacher tells you to start, resume, or nudge it.
   - **Checking.** A reworded proof is always checked independently, whatever *Check each proof* says. Confirmed, it replaces the old one and comes back to you for approval, and your understanding mark moves to the new wording. Rejected, the old proof (and its approval) comes back, and the rewrite plan records why. Neither counts as a failed attempt.
   - **What can change.** The statement never changes. Remarks sit in a block that changes no approval and no verification.
   - **The paper.** How the paper presents a proof is a separate layer: the manuscript skills change only the LaTeX, never the result's file.
@@ -336,8 +337,8 @@ Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everythin
 | **Results** | The research structure as a list or a graph (one switch): *Still to do* per main result with finished branches folded, *Held up*, or *Everything*. A chosen result opens in a side panel, which can narrow the view to what it rests on or what rests on it, including the passages of the paper |
 | **Activity** | The full timeline of what the agent and you did |
 | **Project goals** | Edit the project contract, with derived status (required results, open questions, manuscript sections) above it; initialize or refresh shared setup |
-| **Definitions** | Browse and edit definitions and their notation, listed in dependency order |
-| **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and remark nodes |
+| **Definitions** | Browse and edit definitions, assumptions, and conventions (`definition_kind`) and their notation, listed in dependency order |
+| **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and conjecture nodes, with their remarks |
 | **Library** | Browse known results from earlier work and papers (`lib_` IDs), and approve them in bulk |
 | **Plans** | Browse and edit proof plans, including failed and succeeded attempts |
 | **Ideas** | Browse and edit freeform research ideas |

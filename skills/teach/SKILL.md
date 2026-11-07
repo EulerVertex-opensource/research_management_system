@@ -1,6 +1,6 @@
 ---
 name: teach
-description: Teach the researcher the verified results of the research loop at their own pace, in a chat beside the loop, and reword a proof or add remarks when they ask. Use when the researcher wants to catch up, asks what was proved and how, asks to be walked through a result or its proof, or wants a proof written differently.
+description: Teach the researcher the verified results of the research loop at their own pace, in a chat beside the loop, write remarks on results as they discuss them, and reword a proof when they ask. Use when the researcher wants to catch up, asks what was proved and how, asks to be walked through a result or its proof, or wants a proof written differently.
 ---
 
 # Teach the verified results
@@ -14,7 +14,7 @@ node .agents/skills/research-loop/scripts/research-loop.cjs teach list        # 
 node .agents/skills/research-loop/scripts/research-loop.cjs teach pack <id>   # the material for one result
 ```
 
-This chat never changes a project file itself. Never run `next`, `report`, or any command that drives the loop, and never edit project files; the hooks refuse both. A rewording the researcher asks for is proposed with `teach revise`, and the loop applies it (see [Reword a proof](#reword-a-proof)). Read research files only through `teach pack` (and `show <paper_slug> --section ...` for a cited source), not by browsing the research folders.
+This chat never edits a project file itself. Never run `next`, `report`, or any command that drives the loop, and never edit project files; the hooks refuse both. Remarks are written with `add_remark` (see [Remarks](#remarks)). A rewording the researcher asks for is proposed with `teach revise`, and the loop applies it (see [Reword a proof](#reword-a-proof)). Read research files only through `teach pack` (and `show <paper_slug> --section ...` for a cited source), not by browsing the research folders.
 
 ## Start: where they stand
 
@@ -37,6 +37,7 @@ Use what the pack offers:
 - **A known result.** When the proof follows a known result ("Known results whose proof it follows"), say what is the same and what had to change.
 - **What they already know.** The pack says which results it rests on the researcher already knows. Do not re-teach those; for one they have not studied, offer to cover it first or to use it as a black box.
 - **Their earlier note.** When the pack shows the note they wrote last time, start from it.
+- **Remarks on it.** The pack lists the remarks on the result: the researcher's own, and the loop's or an agent's, which nobody checked. Use the researcher's as their earlier thinking; present the loop's as the loop's explanation, never as part of the proof. A remark written for an earlier version may no longer fit; say so.
 - **A changed result.** When the statement or proof changed since they studied it, the pack shows the version they studied. Start from what changed and why, not from scratch.
 
 If the researcher wants to be asked before you reveal a step ("how would you do this?"), do so. Do not quiz them unasked.
@@ -54,20 +55,27 @@ If the researcher wants to be asked before you reveal a step ("how would you do 
   - Start the body with who raised it, for example "Raised by the researcher while studying key_lemma:" or "Suggested by the teaching chat; the researcher agreed to record it:".
 - Without `record_idea`, use the CLI: `idea add --title "..." --body "..." --kind <kind> --asset <id> --origin researcher|agent`.
 
+## Remarks
+
+Remarks are annotations on a result, like notes in a margin: intuition, why a step is needed, a picture to keep in mind, how this result relates to another, the confusion the researcher had and how it cleared up. They are not part of the proof: no check covers them, they change no approval, and the loop never reads them. Selected remarks the researcher approves may later appear in the paper as remarks.
+
+- **Write one** when an explanation helped, or the researcher says something worth keeping: `add_remark({target: id, title, body, anchor: "step 3", origin, from: "teaching"})`. Saved at once; no loop needs to run. Without the tool: `remark add --target <id> --title "..." --body "..." --origin researcher|agent --from teaching [--anchor "..."]`.
+- **Whose it is**, as for ideas: `origin: researcher` when the researcher said it or asked for it in their words, even if you worded it; `origin: agent` when it is your explanation, even if they agreed to keep it. The hooks refuse a remark without origin or with a from other than teaching.
+- **Never a claim.** A remark explains; it never says something a result relies on or that nobody proved (a bound is sharp, a hypothesis can be dropped, a step generalizes). That is an idea (`record_idea`, kind `conjecture`, `observation`, or `risk`) so the loop can take it up.
+- **Light edits.** `remark edit <remarkId> --body "..." --from teaching` when the researcher refines a remark; `remark archive <remarkId> --from teaching` when they drop it. Only at their request. `remark list --target <id>` shows the remarks on a result.
+
 ## Reword a proof
 
 When the researcher understands a proof but dislikes how it is written, reword it with them. The result's file is the source of truth. How the paper presents it is a separate layer: for the paper's wording, point them to the manuscript skills, which change only the LaTeX.
 
 1. **Work out the wording in the chat first.** Show the reworded proof, or only the steps that change. Iterate until the researcher is satisfied. Follow the project's proof style in the pack. Reword only: the same steps, the same hypotheses used, the same cited results. If a clearer proof needs a different argument, that is a new plan for the loop; record it as an `approach` idea instead.
-2. **Remarks** are the researcher's explanations beside the proof: intuition, why a step is needed, a picture to keep in mind. They are not part of the proof, the check does not cover them, and they change no approval. Offer them when an explanation helped.
-3. **Propose it** once the researcher agrees. Write a draft file outside the project (a temporary folder) holding only these sections:
+2. **Propose it** once the researcher agrees. Write a draft file outside the project (a temporary folder) holding only these sections:
    - `## Proof`: the whole reworded proof, with `###` or bold labels for steps, never `##`;
-   - `## Changes`: what was reworded and why, so the check knows where to look;
-   - `## Remarks` (optional): an empty section removes the remarks.
+   - `## Changes`: what was reworded and why, so the check knows where to look.
 
-   Then run `teach revise <id> --file <draft>`. It refuses anything else in the draft, and the statement never changes.
-4. **Tell the researcher what happens next, as the command says.** A reworded proof is always checked independently before it replaces the current one. If the check rejects it, the current proof stays, and the verdict names the step. Only a running loop applies a rewording. When the command says the loop is not running, paused, or waiting, tell the researcher to start it, resume it, or ask the agent in its chat to continue.
-5. **Pending rewordings** appear in `teach list` and in the result's pack. Proposing again for the same result replaces the earlier proposal.
+   Then run `teach revise <id> --file <draft>`. It refuses anything else in the draft, and the statement never changes. Explanations that helped go into remarks (above), not into the proof.
+3. **Tell the researcher what happens next, as the command says.** A reworded proof is always checked independently before it replaces the current one. If the check rejects it, the current proof stays, and the verdict names the step. Only a running loop applies a rewording. When the command says the loop is not running, paused, or waiting, tell the researcher to start it, resume it, or ask the agent in its chat to continue.
+4. **Pending rewordings** appear in `teach list` and in the result's pack. Proposing again for the same result replaces the earlier proposal.
 
 **Style rules.** When the researcher states a general preference ("use we", "number the constants", "never write clearly"), ask whether to keep it for the whole project. If they agree, run `teach style --add "<the rule in a sentence>"`. New proofs the loop writes follow it, and so do your rewordings. It is shared with collaborators, so add only what the researcher agreed to. `teach style` shows the current rules.
 

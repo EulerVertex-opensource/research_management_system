@@ -1,6 +1,6 @@
 ---
 name: extract-research-nodes
-description: Extract draft research nodes - theorem-like results, examples, definitions (every concept a kept result uses, standard or newly introduced), and remarks - from an imported paper transcription, research notes, or existing assets, into the project or into the library of known results. Use when turning source text into assets or definitions, when the researcher asks to organize, sort, or ingest research materials, or when importing earlier theorems or a useful paper's results into the library; use import-math-paper first for a new PDF.
+description: Extract draft research nodes - theorem-like results, examples, definitions (every concept a kept result uses, standard or newly introduced), assumptions, conventions, and remarks - from an imported paper transcription, research notes, or existing assets, into the project or into the library of known results. Use when turning source text into assets or definitions, when the researcher asks to organize, sort, or ingest research materials, or when importing earlier theorems or a useful paper's results into the library; use import-math-paper first for a new PDF.
 ---
 
 # Extract research nodes
@@ -12,7 +12,7 @@ Scope the request: `results` (theorems, lemmas, propositions, examples, construc
 When the researcher hands over a batch of materials to organize, sort each part to its one destination and extract it; do not invent another structure:
 
 - A written manuscript: the main TeX document when it already holds the paper, or a Markdown draft of it. Its mathematics and its prose have different destinations, and organizing is not finished until both are filled, in this order:
-  1. The manuscript is the researcher's finished work: extract all of it as written, `source.kind: original`. Every result becomes an asset with its statement and proof (under `## Proof`), and every definition it states, standard or newly introduced, becomes a definition node (Definitions and remarks). A proof's `\ref` or `\cite` to another result becomes a `depends_on` or a cited library or paper node, and a use of a defined term or notation becomes a `uses_definitions`, so the graph reproduces the manuscript's dependencies.
+  1. The manuscript is the researcher's finished work: extract all of it as written, `source.kind: original`. Every result becomes an asset with its statement and proof (under `## Proof`), and every definition it states, standard or newly introduced, becomes a definition node (Definitions, assumptions, and conventions). A proof's `\ref` or `\cite` to another result becomes a `depends_on` or a cited library or paper node, and a use of a defined term or notation becomes a `uses_definitions`, so the graph reproduces the manuscript's dependencies.
   2. Propose `project.md` text from the abstract and introduction, with the main theorems as `required_results`.
   3. The prose: `plan-manuscript` (scope adopt) splits the TeX into section files and writes briefs citing the new node IDs, then `draft-latex` wraps the passages that present them in blocks. A Markdown draft gets the outline and briefs only; `draft-latex` writes its TeX when the researcher asks.
   4. Finish below, then request approval of the extracted nodes (`request_approval`) so the researcher reviews them together.
@@ -25,9 +25,9 @@ Each node is one file directly in its configured folder. Never create subfolders
 
 ## Results
 
-Create one Markdown asset per useful result under the configured assets folder with a descriptive snake_case filename ID, `type` (theorem, lemma, proposition, example, construction, remark, or conjecture for a statement the source believes but does not prove; a conjecture needs `## Motivation` and may list the results it would serve under `serves`), a plain `title`, and `status: draft`. Record provenance in `source`: `kind: paper` with the paper slug as `paper_id` and the exact page or theorem number as `location`, `textbook` in the same way (a cited result: the loop checks the citation instead of proving it), `note` for an informal source such as a talk or lecture notes (it will still be proved here), or `original` for content produced in this project. Include the statement, known `depends_on` asset IDs, `uses_definitions` IDs, and tags. A construction still to be found is a specification: its statement lists the required properties one per line as `- P1: ...`, `- P2: ...`, and the loop searches for an object with all of them once the researcher approves the list. A construction of a given object states the object instead. Do not invent proof details or dependencies.
+Create one Markdown asset per useful result under the configured assets folder with a descriptive snake_case filename ID, `type` (theorem, lemma, proposition, example, construction, or conjecture for a statement the source believes but does not prove; a conjecture needs `## Motivation` and may list the results it would serve under `serves`), a plain `title`, and `status: draft`. Record provenance in `source`: `kind: paper` with the paper slug as `paper_id` and the exact page or theorem number as `location`, `textbook` in the same way (a cited result: the loop checks the citation instead of proving it), `note` for an informal source such as a talk or lecture notes (it will still be proved here), or `original` for content produced in this project. Include the statement, known `depends_on` asset IDs, `uses_definitions` IDs, and tags. A construction still to be found is a specification: its statement lists the required properties one per line as `- P1: ...`, `- P2: ...`, and the loop searches for an object with all of them once the researcher approves the list. A construction of a given object states the object instead. Do not invent proof details or dependencies.
 
-## Definitions and remarks
+## Definitions, assumptions, and conventions
 
 Decide by use, not by whether a concept is standard. A concept becomes a `type: definition` node when a result being kept, or a required result in `project.md`, uses it in its statement or proof, whether it is standard or introduced by the source. This includes the conditions and hypotheses a source defines ("we say $f$ satisfies (H) if ..."): the results that assume them list them in `uses_definitions`, so a later change to the condition marks those results stale. In the researcher's own manuscript every result is kept, so every definition it states becomes a node, even one used only in an example or in the prose.
 
@@ -37,7 +37,15 @@ Decide by use, not by whether a concept is standard. A concept becomes a `type: 
 - Skip a source's definitions that no kept result uses; they stay in its transcription.
 - When unsure whether a kept result depends on a definition, extract it and flag it for researcher review: a missing node breaks the graph, while the researcher can drop an unneeded one.
 
-A `type: remark` asset is only for text that defines nothing: a standing assumption ("throughout, $\Omega$ is bounded"), a convention, or an observation. Propose a standing assumption that holds for the whole project as `project.md` text under Scope and Assumptions. Link a remark to the definitions it uses (`uses_definitions`) and relate it to the assets it affects with relative Markdown links, adding `depends_on` only for a real mathematical dependency.
+Text that defines nothing but that results rely on is a definition node too, with `definition_kind`:
+
+- `definition_kind: assumption`, titled `Assumption (...)`: a hypothesis a part of the source takes for granted ("from now on, $\Omega$ is bounded"). Every result in its scope lists it in `uses_definitions`, so a change to it marks them stale. A standing assumption for the whole project goes into `project.md` under Scope and Assumptions instead, so not every result has to list it.
+- `definition_kind: convention`, titled `Convention (...)`: notation or a normalization with no mathematical content ("$C$ denotes a constant that may change from line to line"). The results whose statements depend on it list it in `uses_definitions`.
+
+A source's remark is sorted by what it says:
+
+- It claims something (a bound is sharp, a hypothesis can be dropped, a special case behaves differently): a `proposition`, `lemma`, or `example` asset, with its proof if the source gives one. Never leave a claim in prose that no node proves.
+- It explains (the idea behind a proof, why a hypothesis is needed, how a result relates to another): a remark on the result it explains, `node .agents/skills/research-loop/scripts/research-loop.cjs remark add --target <id> --title "..." --body "..." --origin researcher` for the researcher's own manuscript, `--origin agent` otherwise. Remarks are annotations, not nodes: nothing depends on them.
 
 Add `uses_definitions` to an existing asset only when concept and definition match. A verified link alone does not reset approval; report each such link for review. Any material change to a statement or proof leaves the node `draft`.
 

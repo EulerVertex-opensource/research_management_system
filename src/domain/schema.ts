@@ -1,5 +1,5 @@
 import {
-  ASSET_TYPES, AssetType, CITED_SOURCE_KINDS, CONJECTURE_TYPE, IDEA_KIND_LIST, IDEA_STATUS_LIST, IdeaKind, IdeaStatus, LEGACY_SOURCE_KINDS, NODE_STATUS_LIST, NodeKind, NodeStatus,
+  ASSET_TYPES, AssetType, CITED_SOURCE_KINDS, CONJECTURE_TYPE, DEFINITION_KIND_LIST, DefinitionKind, IDEA_KIND_LIST, IDEA_STATUS_LIST, IdeaKind, IdeaStatus, LEGACY_SOURCE_KINDS, NODE_STATUS_LIST, NodeKind, NodeStatus,
   PLAN_STATUS_LIST, PlanStatus, SOURCE_KIND_LIST, SourceKind,
 } from './nodeKinds';
 import { CHECKLIST_STEP, hasSection, hasSectionContent } from './sections';
@@ -22,7 +22,11 @@ export interface ResultNodeData extends NodeBase {
   /** Only on a conjecture: `high` or `low` moves it within its rank; set by the researcher. */
   priority?: 'high' | 'low';
 }
-export interface DefinitionNodeData extends NodeBase { type: 'definition'; status: NodeStatus; source?: NodeSource; depends_on?: string[]; derived_from?: string }
+export interface DefinitionNodeData extends NodeBase {
+  type: 'definition'; status: NodeStatus; source?: NodeSource; depends_on?: string[]; derived_from?: string;
+  /** definition (the default), assumption, or convention; see DEFINITION_KIND_LIST. */
+  definition_kind?: DefinitionKind;
+}
 export interface IdeaNodeData extends NodeBase {
   type: 'idea'; status: IdeaStatus; idea_kind?: IdeaKind; related_assets?: string[]; origin?: string;
   /** The decision, plan, or asset that resolved it. */
@@ -96,6 +100,7 @@ export function nodeProblems(kind: NodeKind, id: string, data: Record<string, an
     }
     case 'definition':
       if (data.type !== 'definition' || !statuses.includes(data.status) || !content.trim()) problems.push(`${id}: invalid draft definition.`);
+      if (data.definition_kind !== undefined && !(DEFINITION_KIND_LIST as readonly string[]).includes(data.definition_kind)) problems.push(`${id}: definition_kind must be one of ${DEFINITION_KIND_LIST.join(', ')}.`);
       problems.push(...sourceProblems(id, data.source, options.paperIds));
       break;
     case 'idea':

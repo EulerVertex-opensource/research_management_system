@@ -19,4 +19,6 @@ Write `## Verdict` at the end of the plan named in the instruction:
 - `confirmed`: a few lines on what you checked and any small gaps you closed.
 - `rejected`: the first step that fails, quoted or pinpointed, why it fails, and what would be needed to fix it. The loop marks the plan failed and the next plan starts from your verdict.
 
+Do not read remarks (`remark list`, the remarks folder): they are explanations nobody checked, and the hooks refuse it in this stage. After a `confirmed` verdict you may add one remark on the target when a step was harder than it looks, naming that step (`add_remark` with `origin: "agent", from: "loop"`).
+
 Report `confirmed` or `rejected` to match the first line, or `question --question "..."` when the statement itself is ambiguous. Only the plan's `## Verdict` may change: leave the asset, the plan's status, and its frontmatter as they are. Never write `verified_proof_digest`; the loop records it.

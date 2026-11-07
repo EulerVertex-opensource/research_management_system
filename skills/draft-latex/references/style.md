@@ -22,7 +22,7 @@ Avoid empty connectors such as "Next, we prove the following lemma." They name t
 |---|---|
 | A routine verification written out line by line | "A direct computation gives ..." or "By Hölder's inequality, ..." |
 | A restatement of standard definitions or known results | A citation, or one sentence |
-| Exploratory remarks, earlier attempts, sanity checks | Omitted |
+| Exploratory remarks, earlier attempts, sanity checks | Omitted, except remarks the brief lists (approved for the paper), presented as a remark |
 | Motivation repeated inside every asset | Said once, where the section opens |
 
 Keep in full: every statement, every step that is not routine, and every place a hypothesis is used.

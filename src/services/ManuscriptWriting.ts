@@ -12,7 +12,8 @@ export interface WritingSection {
 }
 
 /** How a section uses a node; drives which rhetoric a change touches, not freshness. */
-export const SOURCE_ROLES = ['central_result', 'supporting_result', 'definition', 'motivation', 'counterexample', 'citation', 'background'] as const;
+/** `remark`: a remark (an annotation on a result) the researcher approved for the paper, presented as a remark. */
+export const SOURCE_ROLES = ['central_result', 'supporting_result', 'definition', 'motivation', 'counterexample', 'citation', 'background', 'remark'] as const;
 export type SourceRole = typeof SOURCE_ROLES[number];
 
 /** A node a section presents and the components it presents; a change to another component leaves the section current. */

@@ -222,3 +222,127 @@ test('the generated .gitignore covers every preinstalled skill and generated age
   assert.ok(!ignores.some((entry) => entry === '/.claude/agents/' || entry === '/.claude/skills/' || entry === '/.agents/skills/'));
   assert.equal(new Set(ignores).size, ignores.length);
 });
+
+const { statementDigest: stmt } = load('../src/services/ResearchLoopModel.ts');
+
+/** A schema-2 project with remark assets of every sort, a remarks block inside a result, and approvals and a plan that recorded digests. */
+function v2Project() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'schema3-migration-'));
+  const write = (relative, content) => { fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true }); fs.writeFileSync(path.join(root, relative), content); };
+  const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
+  const exists = (relative) => fs.existsSync(path.join(root, relative));
+  write('.research-assistant.json', JSON.stringify({ version: 1, layout: 'overleaf-shared' }));
+  write('research/project.md', '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNone.\n\n## Intended Contribution\n\nA.\n\n## Background\n\nNone.\n');
+  const nodes = {
+    'research/definitions/group.md': '---\ntype: definition\ntitle: Definition (group)\nstatus: approved\nsource:\n  kind: original\ndepends_on: []\n---\n\nA group is a set with an operation.\n',
+    'research/assets/bounded.md': '---\ntype: remark\ntitle: Remark (bounded domain)\nstatus: approved\nsource:\n  kind: original\ndepends_on: []\nuses_definitions: [group]\n---\n\nFrom now on, the domain is bounded.\n',
+    'research/assets/intuition_note.md': '---\ntype: remark\ntitle: The idea\nstatus: approved\nsource:\n  kind: original\ndepends_on: []\nuses_definitions: []\n---\n\nThe idea is compactness.\n',
+    'research/assets/sharp_note.md': '---\ntype: remark\ntitle: Sharpness\nstatus: approved\nsource:\n  kind: original\ndepends_on: []\nuses_definitions: []\n---\n\nThe constant is sharp.\n',
+    'research/assets/unsorted_note.md': '---\ntype: remark\ntitle: Constants\nstatus: draft\nsource:\n  kind: original\ndepends_on: []\nuses_definitions: []\n---\n\nC denotes a constant that may change from line to line.\n',
+    'research/assets/key_lemma.md': '---\ntype: lemma\ntitle: Key lemma\nstatus: approved\nsource:\n  kind: original\ndepends_on: []\nuses_definitions: []\n---\n\nB holds.\n\n## Proof\n\nBy reflexivity.\n\n<!-- research-assistant:remarks:start -->\n### Remarks\n\nThink of a mirror.\n<!-- research-assistant:remarks:end -->\n',
+    'research/assets/main_theorem.md': '---\ntype: theorem\ntitle: Main theorem\nstatus: approved\nsource:\n  kind: original\ndepends_on: [bounded, intuition_note, key_lemma]\nuses_definitions: [group]\n---\n\nA holds.\n\n## Proof\n\nBy the key lemma on a bounded domain.\n',
+  };
+  for (const [file, raw] of Object.entries(nodes)) write(file, raw);
+  for (const [file, raw] of Object.entries(nodes)) {
+    const kind = file.includes('/definitions/') ? 'definition' : 'asset';
+    const id = path.basename(file, '.md');
+    if (/status: approved/.test(raw)) write(`research/approvals/${kind === 'asset' ? 'assets' : 'definitions'}/${id}.json`, JSON.stringify({ kind, target: id, digest: researchDigest(raw, kind), approvedAt: 'then' }, null, 2) + '\n');
+  }
+  const main = nodes['research/assets/main_theorem.md'];
+  write('research/plans/main_plan.md', `---\ntype: plan\ntitle: Main plan\nstatus: succeeded\ntarget_asset: main_theorem\ninspired_by: []\nstatement_digest: ${stmt(main)}\ndependency_digests:\n  bounded: ${stmt(nodes['research/assets/bounded.md'])}\n  key_lemma: ${stmt(nodes['research/assets/key_lemma.md'])}\n---\n\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\n## Plan\n\n1. [x] Use the lemma.\n\n## Verification\n\nDone.\n\n## Outcome\n\nIn main_theorem.\n`);
+  const run = (cli, ...args) => spawnSync(process.execPath, [path.resolve(__dirname, `../out/${cli}.cjs`), ...args, '--project', root], { encoding: 'utf8' });
+  return { root, write, read, exists, run, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+
+test('schema 3: remark assets are sorted as the researcher decides, remarks leave result files, and approvals carry over', () => {
+  const p = v2Project();
+  try {
+    const preview = p.run('research-maintenance', 'migrate');
+    assert.equal(preview.status, 0, preview.stderr);
+    assert.match(preview.stdout, /remarks stored inside result files; remark assets \(type: remark\) to sort/);
+    assert.match(preview.stdout, /REVIEW Remark assets still to sort: bounded, intuition_note, sharp_note, unsorted_note\./);
+    const sorting = path.join(p.root, 'sorting.json');
+    fs.writeFileSync(sorting, JSON.stringify({ bounded: { as: 'assumption' }, intuition_note: { as: 'remark', target: 'main_theorem' }, sharp_note: { as: 'lemma' } }));
+    const applied = p.run('research-maintenance', 'migrate', '--apply', '--force', '--remarks', sorting);
+    assert.equal(applied.status, 0, applied.stderr + applied.stdout);
+
+    // An assumption is a definition now, and the results that rested on it use it.
+    assert.equal(p.exists('research/assets/bounded.md'), false);
+    const bounded = matter(p.read('research/definitions/bounded.md'));
+    assert.deepEqual([bounded.data.type, bounded.data.definition_kind, bounded.data.title, bounded.data.status], ['definition', 'assumption', 'Assumption (bounded domain)', 'approved']);
+    assert.deepEqual(bounded.data.depends_on, ['group']);
+    const main = matter(p.read('research/assets/main_theorem.md'));
+    assert.deepEqual(main.data.depends_on, ['key_lemma']);
+    assert.deepEqual([...main.data.uses_definitions].sort(), ['bounded', 'group']);
+    // An explanation is a remark on the result it explains; nothing depends on it.
+    assert.equal(p.exists('research/assets/intuition_note.md'), false);
+    const intuition = matter(p.read('research/remarks/remark_intuitionnote.md'));
+    assert.deepEqual([intuition.data.type, intuition.data.target, intuition.data.origin, intuition.data.from, intuition.content.trim()], ['remark', 'main_theorem', 'researcher', 'other', 'The idea is compactness.']);
+    // A claim is a result to prove; its approval agreed to a remark, so it is gone.
+    assert.deepEqual([matter(p.read('research/assets/sharp_note.md')).data.type, matter(p.read('research/assets/sharp_note.md')).data.status], ['lemma', 'draft']);
+    assert.equal(p.exists('research/approvals/assets/sharp_note.json'), false);
+    assert.equal(p.exists('research/approvals/assets/intuition_note.json'), false);
+    // The remarks block left the key lemma for a remark file; its approval never changed.
+    assert.doesNotMatch(p.read('research/assets/key_lemma.md'), /research-assistant:remarks|mirror/);
+    const notes = matter(p.read('research/remarks/remark_keylemmanotes.md'));
+    assert.deepEqual([notes.data.target, notes.data.from, notes.content.trim()], ['key_lemma', 'teaching', 'Think of a mirror.']);
+
+    // Approvals followed the files: nothing the migration changed needs approving again.
+    const approval = (kind, id) => JSON.parse(p.read(`research/approvals/${kind === 'asset' ? 'assets' : 'definitions'}/${id}.json`));
+    assert.equal(approval('asset', 'main_theorem').digest, researchDigest(p.read('research/assets/main_theorem.md'), 'asset'));
+    assert.equal(approval('definition', 'bounded').digest, researchDigest(p.read('research/definitions/bounded.md'), 'definition'));
+    assert.equal(p.exists('research/approvals/assets/bounded.json'), false);
+    assert.equal(approval('asset', 'key_lemma').digest, researchDigest(p.read('research/assets/key_lemma.md'), 'asset'));
+    // So did the plan's recorded versions.
+    const plan = matter(p.read('research/plans/main_plan.md'));
+    assert.equal(plan.data.statement_digest, stmt(p.read('research/assets/main_theorem.md')));
+    assert.equal(plan.data.dependency_digests.bounded, stmt(p.read('research/definitions/bounded.md')));
+
+    // The one left unsorted is still listed and fails validation until sorted.
+    assert.match(applied.stdout, /Remark assets still to sort: unsorted_note\./);
+    assert.equal(p.run('research-maintenance', 'validate').status, 1);
+    fs.writeFileSync(sorting, JSON.stringify({ unsorted_note: { as: 'convention' } }));
+    assert.equal(p.run('research-maintenance', 'migrate', '--apply', '--force', '--remarks', sorting).status, 0);
+    assert.equal(matter(p.read('research/definitions/unsorted_note.md')).data.title, 'Convention (Constants)');
+    const validation = p.run('research-maintenance', 'validate');
+    assert.equal(validation.status, 0, validation.stdout);
+    const loop = p.run('research-loop', 'validate');
+    assert.equal(loop.status, 0, loop.stdout + loop.stderr);
+    assert.doesNotMatch(loop.stdout, /without a matching/);
+    assert.match(p.run('research-maintenance', 'migrate').stdout, /already uses the current schema/);
+  } finally { p.cleanup(); }
+});
+
+test('definition kinds: assumptions and conventions are definitions; writing out the default kind changes nothing agreed', () => {
+  const { DEFINITION_KIND_LIST, definitionKindOf, definitionTitle, definitionConcept, ASSET_TYPE_LIST } = load('../src/domain/nodeKinds.ts');
+  const { nodeTemplate } = load('../src/domain/templates.ts');
+  assert.deepEqual([...DEFINITION_KIND_LIST], ['definition', 'assumption', 'convention']);
+  assert.equal(ASSET_TYPE_LIST.includes('remark'), false);
+  assert.equal(definitionKindOf({}), 'definition');
+  assert.equal(definitionKindOf({ definition_kind: 'assumption' }), 'assumption');
+  assert.equal(definitionTitle('convention', 'constants'), 'Convention (constants)');
+  assert.equal(definitionConcept('Assumption (bounded domain)'), 'bounded domain');
+  const definition = { type: 'definition', title: 'Assumption (bounded)', status: 'draft' };
+  assert.deepEqual(nodeProblems('definition', 'b', { ...definition, definition_kind: 'assumption' }, 'Bounded.'), []);
+  assert.match(nodeProblems('definition', 'b', { ...definition, definition_kind: 'axiom' }, 'Bounded.')[0], /definition_kind must be one of definition, assumption, convention/);
+  assert.match(nodeProblems('asset', 'r', { type: 'remark', title: 'R', status: 'draft' }, 'Text.')[0], /invalid asset type remark/);
+  const raw = '---\ntype: definition\ntitle: Definition (group)\nstatus: draft\n---\n\nA group.\n';
+  assert.equal(researchDigest(raw.replace('type: definition\n', 'type: definition\ndefinition_kind: definition\n'), 'definition'), researchDigest(raw, 'definition'));
+  assert.notEqual(researchDigest(raw.replace('type: definition\n', 'type: definition\ndefinition_kind: assumption\n'), 'definition'), researchDigest(raw, 'definition'));
+  assert.match(nodeTemplate('definition', { title: 'Assumption (bounded)', definitionKind: 'assumption' }), /^---\ntype: definition\ndefinition_kind: assumption\ntitle: "Assumption \(bounded\)"/);
+  assert.doesNotMatch(nodeTemplate('definition', { title: 'Definition (group)' }), /definition_kind/);
+  assert.throws(() => nodeTemplate('remark', { title: 'x' }), /No template/);
+});
+
+test('validate: a remark names an existing target, and nothing depends on a remark', () => {
+  const p = v2Project();
+  try {
+    p.write('research/remarks/remark_orphan.md', '---\ntype: remark\ntitle: Orphan\ntarget: nowhere\norigin: agent\nfrom: loop\nstatus: active\ntarget_digest: abc\nat: now\n---\n\nAn explanation.\n');
+    p.write('research/remarks/notes.md', '---\ntype: remark\ntitle: Misnamed\ntarget: key_lemma\norigin: agent\nfrom: loop\nstatus: active\ntarget_digest: abc\nat: now\n---\n\nAn explanation.\n');
+    p.write('research/ideas/uses_remark.md', '---\ntype: idea\ntitle: Idea\nstatus: draft\nidea_kind: approach\nrelated_assets: [remark_orphan]\n---\n\nUse it.\n');
+    const result = p.run('research-maintenance', 'validate');
+    assert.match(result.stdout, /remark_orphan: target nowhere is not an asset or definition/);
+    assert.match(result.stdout, /notes: remark files are named remark_<id>\.md/);
+    assert.match(result.stdout, /related_assets names the remark remark_orphan; remarks are annotations/);
+  } finally { p.cleanup(); }
+});

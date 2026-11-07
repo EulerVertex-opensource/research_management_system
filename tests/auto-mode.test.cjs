@@ -134,7 +134,7 @@ test('auto approvals in one selection are followed by a fresh one: supporting re
   f.map.set(SETTINGS, auto());
   await driveToFalsify(f, {
     'research/assets/main_theorem.md': asset('', { depends_on: ['note_a'], uses_definitions: ['natural'] }),
-    'research/assets/note_a.md': node('remark', 'A remark', 'Equality is reflexive.'),
+    'research/assets/note_a.md': node('example', 'An example', 'Equality is reflexive.'),
     'research/definitions/natural.md': definition('A natural number is a member of N.'),
   });
   assert.equal(record(f, 'note_a').source, 'auto');
@@ -248,7 +248,7 @@ test('a dependency change puts its dependants on hold until the researcher appro
   f.map.set(SETTINGS, auto());
   await driveToFalsify(f, {
     'research/assets/main_theorem.md': asset('', { depends_on: ['key_lemma'] }),
-    'research/assets/key_lemma.md': node('remark', 'Key remark', 'A remark.'),
+    'research/assets/key_lemma.md': node('example', 'Key example', 'A remark.'),
   });
   await prove(f);
   assert.equal(record(f, 'main_theorem').source, 'auto');

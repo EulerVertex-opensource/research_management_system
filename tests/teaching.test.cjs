@@ -15,9 +15,9 @@ const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
 const { Teaching } = load('../src/services/Teaching.ts');
 const { markFor, studyItems, understandingState, UNDERSTANDING_PATH } = load('../src/domain/understanding.ts');
 const { TEACH_PROMPT_PATTERN, teachPrompt } = load('../src/domain/understandingLevels.ts');
-const { parseSessionRoles, preToolUseDecision, roleSignal, sessionRole, teachingToolDecision, withSessionRole } = load('../src/services/ResearchLoopHooks.ts');
+const { loopRemarkDecision, parseSessionRoles, preToolUseDecision, roleSignal, sessionRole, teachingToolDecision, withSessionRole } = load('../src/services/ResearchLoopHooks.ts');
 
-const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
+const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', remarks: 'research/remarks', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
 const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n    role: the central claim\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n\n## Background\n\nNone.\n';
 const node = (title, type, statement, extra = {}) => matter.stringify(`\n## Statement\n\n${statement}\n`, { type, title, status: 'draft', source: { kind: 'original' }, depends_on: [], uses_definitions: [], tags: [], ...extra });
 const planFor = (target, id) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/${target}.md)\n\nProve it.\n\n## Plan\n\n1. [ ] Use reflexivity.\n\n## Verification\n\nCheck the equality.\n`, { type: 'plan', title: id, status: 'pending', target_asset: target, inspired_by: [], tags: [] });
@@ -174,6 +174,37 @@ test('by default, and while working on its own, the loop never waits for the res
   assert.notEqual((await lemmaChecked(alone)).stage, 'waiting');
 });
 
+test('remarks: the teaching chat writes them from teaching and says whose; the loop never poses as it, and a checking stage reads none', () => {
+  const root = '/work/project';
+  const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
+  const loop = 'node .agents/skills/research-loop/scripts/research-loop.cjs';
+  for (const command of ['remark add --target key_lemma --title t --body b --origin researcher --from teaching', 'remark edit remark_1 --body b --from teaching', 'remark archive remark_1 --from teaching', 'remark list --target key_lemma']) {
+    assert.equal(teachingToolDecision(paths, bash(`${loop} ${command}`), root).deny, false, command);
+  }
+  for (const command of ['remark add --target key_lemma --title t --body b --from teaching', 'remark add --target key_lemma --title t --body b --origin agent --from loop', 'remark add --target key_lemma --title t --body b --origin agent', 'remark archive remark_1 --from loop']) {
+    assert.match(teachingToolDecision(paths, bash(`${loop} ${command}`), root).reason ?? '', /from teaching/, command);
+  }
+  for (const tool of ['mcp__research-assistant__add_remark', 'mcp__research_assistant__add_remark']) {
+    assert.equal(teachingToolDecision(paths, { tool_name: tool, tool_input: { target: 'key_lemma', title: 't', body: 'b', origin: 'researcher', from: 'teaching' } }, root).deny, false, tool);
+    assert.equal(teachingToolDecision(paths, { tool_name: tool, tool_input: { target: 'key_lemma', title: 't', body: 'b', from: 'teaching' } }, root).deny, true, tool);
+    assert.equal(teachingToolDecision(paths, { tool_name: tool, tool_input: { target: 'key_lemma', title: 't', body: 'b', origin: 'agent', from: 'loop' } }, root).deny, true, tool);
+  }
+  // Remark files are written only through remark add, by either chat.
+  assert.match(preToolUseDecision(paths, { tool_name: 'Write', tool_input: { file_path: `${root}/research/remarks/remark_1.md`, content: '---\ntype: remark\n---\n' } }, root).reason ?? '', /remark add/);
+  assert.match(preToolUseDecision(paths, bash('echo x > research/remarks/remark_1.md'), root).reason ?? '', /remark add/);
+  assert.equal(preToolUseDecision(paths, bash('cat research/remarks/remark_1.md'), root).deny, false);
+  assert.equal(layoutProblem(paths, 'research/remarks/remark_abc.md'), undefined);
+  assert.match(layoutProblem(paths, 'research/remarks/notes/x.md') ?? '', /flat/);
+  // The loop's chat: its remarks say from loop, and a checking stage never reads remarks.
+  assert.match(loopRemarkDecision(paths, bash(`${loop} remark add --target key_lemma --title t --body b --origin agent --from teaching`), 'execute', root).reason ?? '', /from loop/);
+  assert.equal(loopRemarkDecision(paths, bash(`${loop} remark add --target key_lemma --title t --body b --origin agent --from loop`), 'execute', root).deny, false);
+  for (const input of [{ tool_name: 'Read', tool_input: { file_path: `${root}/research/remarks/remark_1.md` } }, { tool_name: 'Grep', tool_input: { pattern: 'mirror', path: 'research/remarks' } }, { tool_name: 'Glob', tool_input: { pattern: 'research/remarks/*.md' } }, bash('cat research/remarks/*.md'), bash(`${loop} remark list --target key_lemma`)]) {
+    assert.match(loopRemarkDecision(paths, input, 'verify_proof', root).reason ?? '', /checking stage does not read remarks/, JSON.stringify(input));
+    assert.equal(loopRemarkDecision(paths, input, 'execute', root).deny, false, JSON.stringify(input));
+  }
+  assert.equal(loopRemarkDecision(paths, { tool_name: 'Read', tool_input: { file_path: `${root}/research/assets/key_lemma.md` } }, 'verify_proof', root).deny, false);
+});
+
 test('a chat that names the teach skill is a teaching chat; one that has driven the loop never becomes one', () => {
   assert.equal(roleSignal('UserPromptSubmit', { prompt: '/teach' }, TEACH_PROMPT_PATTERN), 'teach');
   assert.equal(roleSignal('UserPromptSubmit', { prompt: '$teach key_lemma' }, TEACH_PROMPT_PATTERN), 'teach');
@@ -234,10 +265,10 @@ const REWORDED = '## Proof\n\nBy reflexivity of equality, $n = n$ for every $n$.
 const LEMMA = 'research/assets/key_lemma.md';
 const verdictFor = (f, planId, verdict) => f.map.set(`research/plans/${planId}.md`, f.map.get(`research/plans/${planId}.md`).trimEnd() + `\n\n## Verdict\n\n${verdict}\n`);
 
-test('a rewording draft holds only the proof, its changes, and remarks; remarks change no digest', () => {
+test('a rewording draft holds only the proof and its changes; the legacy remarks block changes no digest', () => {
   assert.deepEqual(parseRevisionDraft(REWORDED), { proof: 'By reflexivity of equality, $n = n$ for every $n$.', changes: 'One sentence instead of a bare citation.' });
-  assert.deepEqual(parseRevisionDraft('## Remarks\n\nThink of it as a mirror.\n'), { remarks: 'Think of it as a mirror.' });
-  assert.deepEqual(parseRevisionDraft('## Remarks\n'), { remarks: '' });
+  assert.throws(() => parseRevisionDraft('## Remarks\n\nThink of it as a mirror.\n'), /no longer part of a rewording[\s\S]*add_remark/);
+  assert.throws(() => parseRevisionDraft(REWORDED + '\n## Remarks\n\nA mirror.\n'), /no longer part of a rewording/);
   assert.throws(() => parseRevisionDraft('## Proof\n\nNew.\n'), /needs ## Changes/);
   assert.throws(() => parseRevisionDraft('## Statement\n\nStronger.\n\n' + REWORDED), /never changes the statement/);
   assert.throws(() => parseRevisionDraft('Every n is even.\n\n' + REWORDED), /never changes the statement/);
@@ -293,7 +324,7 @@ test('a reworded proof is always checked independently first; confirmed, it goes
   const f = researcherChecks();
   await lemmaApproved(f);
   await f.teaching.mark('key_lemma', 'idea', { at: '2026-10-28T10:00:00Z', note: 'reflexivity' });
-  await f.teaching.propose('key_lemma', REWORDED + '\n## Remarks\n\nThink of it as a mirror.\n', 'now');
+  await f.teaching.propose('key_lemma', REWORDED, 'now');
   const next = await f.core.next();
   assert.equal(next.stage, 'verify_proof', 'checked even though the researcher checks proofs themselves');
   assert.equal(f.core.current.current.planId, 'key_lemma_rewording');
@@ -311,7 +342,6 @@ test('a reworded proof is always checked independently first; confirmed, it goes
   const result = await f.core.report({ outcome: 'confirmed', summary: 'The reworded proof holds.' });
   assert.match(result.message, /verified independently/);
   assert.equal(f.core.current.approvalQueue.find((item) => item.target === 'key_lemma').reason, 'Proof reworded at your request in the teaching chat, verified independently.');
-  assert.equal(remarksOf(matter(f.map.get(LEMMA)).content), 'Think of it as a mirror.', 'remarks come with a confirmed rewording');
   const item = (await f.teaching.overview()).items.find((entry) => entry.id === 'key_lemma');
   assert.deepEqual([item.state, item.level, item.note], ['understood', 'idea', 'reflexivity']);
 });
@@ -334,16 +364,34 @@ test('a rejected rewording brings the previous proof back, approved, and counts 
   assert.equal((await f.teaching.overview()).items.find((entry) => entry.id === 'key_lemma').failedPlans, 0);
 });
 
-test('remarks are added between stages without touching the approval; a proposal against an older version is dropped', async () => {
+test('a remark is saved at once in its own file, touches no approval, and shows in the pack; a proposal against an older version is dropped', async () => {
   const f = researcherChecks();
   await lemmaApproved(f);
-  await f.teaching.propose('key_lemma', '## Remarks\n\nThink of it as a mirror.\n', 'now');
-  await f.core.next();
-  assert.notEqual(f.core.current.stage, 'verify_proof');
-  assert.equal(remarksOf(matter(f.map.get(LEMMA)).content), 'Think of it as a mirror.');
+  const before = f.map.get(LEMMA);
+  const remark = await f.core.addRemark({ target: 'key_lemma', title: 'A mirror', body: 'Think of it as a mirror.', anchor: 'step 1', origin: 'researcher', from: 'teaching' });
+  assert.equal(f.map.get(LEMMA), before, 'the result file is untouched');
+  assert.match(f.map.get(remark.file), /^---\ntype: remark\ntitle: A mirror\ntarget: key_lemma\nanchor: step 1\norigin: researcher\nfrom: teaching\nstatus: active\ntarget_digest: [0-9a-f]{64}\n/);
   assert.equal(matter(f.map.get(LEMMA)).data.status, 'approved');
   assert.deepEqual((await f.core.validateWorkspace()).problems, []);
-  assert.match(await f.teaching.packText('key_lemma'), /## The researcher's remarks \(not part of the proof\)\n\nThink of it as a mirror\./);
+  assert.match(await f.teaching.packText('key_lemma'), /## Remarks on it \(explanations, not part of the proof; no check covers them\)\n\n### A mirror \(remark_[0-9a-f]+, at step 1; the researcher's\)\n\nThink of it as a mirror\./);
+  await assert.rejects(f.core.addRemark({ target: 'nothing', title: 't', body: 'b', origin: 'agent', from: 'teaching' }), /No asset or definition named nothing/);
+  // The loop writes remarks only on its current result, at most two per stage; it never edits the researcher's.
+  await assert.rejects(f.core.addRemark({ target: 'key_lemma', title: 't', body: 'b', origin: 'agent', from: 'loop' }), /only while it works on a result|only on the result it is working on/);
+  await assert.rejects(f.core.editRemark(remark.id, { body: 'Changed.' }, 'loop'), /may change only its own remarks/);
+  await f.core.editRemark(remark.id, { body: 'Think of it as a mirror image.' }, 'teaching');
+  assert.match(f.map.get(remark.file), /mirror image/);
+  // A result that changes later leaves its remarks in place, marked as written for an earlier version.
+  f.map.set(LEMMA, f.map.get(LEMMA).replace('Equality is reflexive.', 'Equality is reflexive, by definition.'));
+  assert.equal((await f.core.remarks().list({ target: 'key_lemma' }))[0].stale, true);
+  await f.core.archiveRemark(remark.id, 'teaching');
+  assert.deepEqual(await f.core.remarks().list({ target: 'key_lemma' }), []);
+  // A proposal from before remarks had files: its remarks become a remark file.
+  const { understandingParts } = load('../src/domain/understanding.ts');
+  f.map.set('.research-assistant-loop/revisions/key_lemma.json', JSON.stringify({ id: 'key_lemma', remarks: 'An old note.', baseStatement: understandingParts(f.map.get(LEMMA)).statementDigest, at: 'then' }));
+  await f.core.next();
+  const legacy = (await f.core.remarks().list({ target: 'key_lemma' }));
+  assert.deepEqual(legacy.map((item) => [item.body, item.origin, item.from]), [['An old note.', 'researcher', 'teaching']]);
+  assert.equal(f.map.has('.research-assistant-loop/revisions/key_lemma.json'), false);
 
   const g = researcherChecks();
   await lemmaApproved(g);

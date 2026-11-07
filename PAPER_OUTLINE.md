@@ -133,10 +133,11 @@ The framework distinguishes objects that have different meanings and lifecycles:
 | Object | What it records |
 |---|---|
 | Project contract | Main problem, scope, intended contribution, and required results |
-| Definition | A standard or project-specific concept, defined condition, or named hypothesis and its notation, with dependencies on other definitions |
-| Mathematical asset | A theorem, lemma, proposition, example, construction, or remark; its source and dependencies |
+| Definition | A standard or project-specific concept, defined condition, or named hypothesis and its notation, with dependencies on other definitions; also a standing assumption or a convention a part of the project relies on |
+| Mathematical asset | A theorem, lemma, proposition, example, construction, or conjecture; its source and dependencies |
 | Construction specification | The required properties of an object to be found, recorded in a construction asset's statement |
 | Idea | An intuition, open question, observation, possible approach, test case, or risk |
+| Remark | An explanation attached to a result or definition (key idea, why a step is needed, a picture); not a node, relied on by nothing, and never read by the loop |
 | Proof plan | One attempt at proving one target claim, including its outcome |
 | Search candidate | A proposed object with a pass, fail, or unknown verdict for each property checked, plus the supporting reasoning |
 | Search round record | Directions explored, candidate references, obstructions, and limitations of a round of search |

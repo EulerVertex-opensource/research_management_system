@@ -13,11 +13,12 @@ import type { BriefSource, SectionBrief } from '../services/ManuscriptWriting';
  * Pure; the CLI reads files and passes them in.
  */
 
-export interface ImpactNode { id: string; kind: 'asset' | 'definition'; raw: string; data: Record<string, any>; approved: boolean }
+/** `remark`: a remark the researcher approved for the paper; it has no dependencies and is presented as written. */
+export interface ImpactNode { id: string; kind: 'asset' | 'definition' | 'remark'; raw: string; data: Record<string, any>; approved: boolean }
 
 export interface BoundSource {
   id: string;
-  kind: 'asset' | 'definition';
+  kind: 'asset' | 'definition' | 'remark';
   /** `direct` when the brief names it; otherwise the source it was reached from. */
   via: string;
   role?: string;
@@ -55,7 +56,8 @@ export const texDigest = (tex: string) => sha(tex.replace(/\r\n/g, '\n').replace
  * then their dependencies (definitions and lemmas are needed for their statement only).
  */
 export function sectionClosure(sources: BriefSource[], nodes: Map<string, ImpactNode>): { bound: Omit<BoundSource, 'digests'>[]; missing: string[] } {
-  const graph = buildGraph({ nodes: [...nodes.values()].map(({ id, kind, data }) => ({ id, kind, data })) });
+  // Remarks are no graph nodes: nothing depends on them, and they depend on nothing.
+  const graph = buildGraph({ nodes: [...nodes.values()].flatMap(({ id, kind, data }) => kind === 'remark' ? [] : [{ id, kind, data }]) });
   const bound = new Map<string, Omit<BoundSource, 'digests'>>();
   const missing: string[] = [];
   for (const source of sources) {
@@ -65,7 +67,7 @@ export function sectionClosure(sources: BriefSource[], nodes: Map<string, Impact
   }
   for (const source of sources) {
     const node = nodes.get(source.id);
-    if (!node) continue;
+    if (!node || node.kind === 'remark') continue;
     for (const key of graph.reachable([nodeKey(node.kind, node.id)], ['depends_on', 'uses_definition'])) {
       const id = key.slice(key.indexOf(':') + 1);
       const dependency = nodes.get(id);

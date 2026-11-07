@@ -12,7 +12,7 @@ import { LIBRARY_KIND_FOLDERS, COLLECTION_FILE } from './registry';
  */
 
 export type LayoutPaths = Pick<ProjectPaths, 'researchRoot' | 'projectMd' | 'paperIndex' | 'assets' | 'definitions' | 'ideas' | 'plans'>
-  & Partial<Pick<ProjectPaths, 'papers' | 'library' | 'writingRoot' | 'writingOutline' | 'writingSections'>>;
+  & Partial<Pick<ProjectPaths, 'papers' | 'library' | 'writingRoot' | 'writingOutline' | 'writingSections' | 'remarks'>>;
 
 const NODE_FILE = /^[a-z][a-z0-9_]*\.md$/;
 const LIBRARY_FILE = /^lib_[a-z0-9_]+\.md$/;
@@ -39,7 +39,8 @@ function folders(paths: LayoutPaths) {
   const shared = (child: string) => join(paths.researchRoot, child);
   const writing = paths.writingRoot ?? shared('writing');
   return {
-    nodes: [paths.assets, paths.definitions, paths.ideas, paths.plans, shared('checks'), shared('candidates')],
+    // Remarks are not nodes, but their folder follows the same rule: one file each, flat, with frontmatter.
+    nodes: [paths.assets, paths.definitions, paths.ideas, paths.plans, shared('checks'), shared('candidates'), ...(paths.remarks ? [paths.remarks] : [])],
     records: [shared('decisions'), shared('handoffs')],
     approvals: shared('approvals'),
     writing,
@@ -141,7 +142,7 @@ export function layoutProblem(paths: LayoutPaths, file: string, isDir = false): 
 
 /**
  * A note written into a node folder without frontmatter is a folder note, not
- * a node (it would show up as an untyped remark). Checked on full-content writes.
+ * a node (it would show up as an untyped node). Checked on full-content writes.
  */
 export function folderNoteProblem(paths: LayoutPaths, file: string, content: string): string | undefined {
   const parent = path.posix.dirname(file);

@@ -375,6 +375,18 @@ export class WebviewProvider {
       watcher.onDidDelete(() => { void onNodeFileDelete(); });
     }
 
+    // A remark shows under its result: refresh that result's detail. Remarks are not nodes, so the index stays as it is.
+    const remarkWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, `${paths.remarks}/*.md`));
+    const onRemarkChange = async (uri: vscode.Uri) => {
+      try {
+        const raw = await this.fileService.readFile(`${paths.remarks}/${uri.path.split('/').pop()}`);
+        const target = /^target:\s*['"]?([a-z][a-z0-9_]*)/m.exec(raw)?.[1];
+        if (target && this.nodeIndex?.getById(target)) this.send({ type: 'nodeDetail', id: target, ...await this.nodeIndex.getNodeDetail(target) });
+      } catch { /* non-fatal */ }
+    };
+    remarkWatcher.onDidChange((uri) => { void onRemarkChange(uri); });
+    remarkWatcher.onDidCreate((uri) => { void onRemarkChange(uri); });
+
     // Watch the configured project description.
     const projectWatcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(root, paths.projectMd)
@@ -429,7 +441,7 @@ export class WebviewProvider {
       await this.sendManuscriptStatus();
     });
 
-    this.watchers = [...nodeWatchers, projectWatcher, ...graphWatchers, papersWatcher, bibWatcher, pdfWatcher];
+    this.watchers = [...nodeWatchers, remarkWatcher, projectWatcher, ...graphWatchers, papersWatcher, bibWatcher, pdfWatcher];
   }
 
   private async sendManuscriptStatus(forceReload = false): Promise<void> {
@@ -663,8 +675,8 @@ export class WebviewProvider {
 
         case 'getNodeContent': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
-          const { frontmatter, body } = await this.nodeIndex.getNodeDetail(msg.id);
-          this.send({ type: 'nodeDetail', id: msg.id, frontmatter, body });
+          const detail = await this.nodeIndex.getNodeDetail(msg.id);
+          this.send({ type: 'nodeDetail', id: msg.id, ...detail });
           break;
         }
 
@@ -709,9 +721,16 @@ export class WebviewProvider {
           break;
         }
 
+        case 'approveRemark': {
+          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
+          await this.loopHost.approveRemark(msg.id);
+          if (this.nodeIndex.getById(msg.nodeId)) this.send({ type: 'nodeDetail', id: msg.nodeId, ...await this.nodeIndex.getNodeDetail(msg.nodeId) });
+          break;
+        }
+
         case 'createNode': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
-          await this.nodeIndex.createNode(msg.nodeType as NodeType, msg.title, msg.targetAsset);
+          await this.nodeIndex.createNode(msg.nodeType as NodeType, msg.title, msg.targetAsset, msg.definitionKind);
           await this.refreshNodes();
           break;
         }

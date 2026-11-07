@@ -348,3 +348,37 @@ test('an adopted manuscript compiles to the same labels and numbering', { skip: 
     assert.equal(compile(p.root), before);
   } finally { p.cleanup(); }
 });
+
+test('a remark the researcher approved for the paper may be a brief source; an edit makes the section stale until approved again', async () => {
+  const { researchDigest } = bundled('src/domain/digests.ts');
+  const p = fixture();
+  try {
+    await p.fileService.ensureProjectStructure(p.config, p.paths, true, []);
+    addAsset(p);
+    const loop = path.resolve(__dirname, '../out/research-loop.cjs');
+    const added = spawnSync(process.execPath, [loop, 'remark', 'add', '--target', 'main_theorem', '--title', 'The idea', '--body', 'Compactness does the work.', '--origin', 'researcher', '--from', 'teaching', '--json', '--project', p.root], { encoding: 'utf8' });
+    assert.equal(added.status, 0, added.stderr);
+    const { remarkId, path: remarkFile } = JSON.parse(added.stdout);
+    p.write(p.paths.writingOutline, '# Manuscript outline\n\n## Sections\n\n1. [Main result](sections/main_result.md)\n');
+    p.write(path.join(p.paths.writingSections, 'main_result.md'), `---\ntitle: Main result\nassets: []\nsources:\n  - id: main_theorem\n    role: central_result\n  - id: ${remarkId}\n    role: remark\n---\n\n## Purpose\n\nState the result.\n`);
+    const refused = p.run('prepare', 'main_result', '--preview');
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /has not approved it for the paper/);
+    const approve = (raw) => p.write(`research/approvals/remarks/${remarkId}.json`, JSON.stringify({ kind: 'remark', target: remarkId, digest: researchDigest(raw, 'asset'), approvedAt: 'now' }));
+    approve(p.read(remarkFile));
+    const prepared = p.run('prepare', 'main_result', '--apply');
+    assert.equal(prepared.status, 0, prepared.stderr);
+    assert.match(prepared.stdout, new RegExp(`Remark: ${remarkFile} \\(on main_theorem\\)`));
+    const texPath = path.join(p.paths.sections, 'main_result.tex');
+    assert.match(p.read(texPath), new RegExp(`sources=${remarkId} policy=assisted`));
+    assert.equal(p.run('lock', 'main_result', '--apply').status, 0, 'every source is approved');
+    assert.match(p.run('impact', 'main_result').stdout, /current/);
+    // An edit to the remark needs a new approval, and the section must be looked at again.
+    const edited = spawnSync(process.execPath, [loop, 'remark', 'edit', remarkId, '--body', 'Compactness and a diagonal argument do the work.', '--from', 'teaching', '--project', p.root], { encoding: 'utf8' });
+    assert.equal(edited.status, 0, edited.stderr);
+    assert.match(p.run('impact', 'main_result').stdout, new RegExp(`${remarkId}[^\\n]*unapproved|unapproved[^\\n]*${remarkId}`));
+    assert.equal(p.run('prepare', 'main_result', '--preview').status, 1);
+    approve(p.read(remarkFile));
+    assert.match(p.run('impact', 'main_result').stdout, /stale/);
+  } finally { p.cleanup(); }
+});

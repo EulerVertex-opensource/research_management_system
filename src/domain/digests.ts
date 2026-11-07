@@ -27,6 +27,8 @@ const UNAPPROVED_KEYS = ['status', 'title', 'used_in', 'tags', 'proof_digest', '
 export function approvedData(data: Record<string, any>): Record<string, any> {
   const result = { ...data };
   for (const key of UNAPPROVED_KEYS) delete result[key];
+  // `definition` is the default kind: writing it out changes nothing that was agreed.
+  if (result.definition_kind === 'definition') delete result.definition_kind;
   if (result.source && typeof result.source === 'object' && LEGACY_SOURCE_KINDS[result.source.kind]) result.source = { ...result.source, kind: LEGACY_SOURCE_KINDS[result.source.kind] };
   return result;
 }

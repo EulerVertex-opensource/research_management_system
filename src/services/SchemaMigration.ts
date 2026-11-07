@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
-import { LoopFiles, researchDigest } from './ResearchLoopModel';
+import { LoopFiles, researchDigest, sharedFolders, statementDigest } from './ResearchLoopModel';
 import { parseMarkdown } from './Frontmatter';
 import { AssetInput, ordinalTitleFixes } from './AssetOrder';
 import { planDefinitionMigration } from './DefinitionMigration';
@@ -8,6 +8,10 @@ import { MANAGED_LINK_BLOCK, ideaPlanProblems, resolveIdeaType, stripManagedLink
 import { readApprovals, writeApprovals } from './ApprovalStore';
 import { isLegacyProject, legacyRequiredResults } from '../domain/project';
 import { sectionContent, sectionHeadings } from '../domain/sections';
+import { SCHEMA_VERSION, definitionTitle } from '../domain/nodeKinds';
+import { assetComponents } from '../domain/digests';
+import { remarkTargetDigest } from '../domain/remarks';
+import { REMARKS_BLOCK_PATTERN, remarksOf } from '../domain/revisions';
 
 /**
  * Upgrade a research project to the current schema in one pass:
@@ -124,7 +128,9 @@ export async function migrationReasons(files: LoopFiles, paths: ProjectPaths): P
   const reasons = new Set<string>();
   const project = await files.readFile(paths.projectMd).catch(() => '');
   if (project.trim() && isLegacyProject(project)) reasons.add('project.md predates required_results frontmatter');
+  for (const { raw } of [...await readAll(files, paths.assets), ...await readAll(files, paths.definitions)]) if (REMARKS_BLOCK_PATTERN.test(raw)) reasons.add('remarks stored inside result files');
   for (const { raw } of await readAll(files, paths.assets)) {
+    if (/^type:\s*remark\s*$/m.test(raw)) reasons.add('remark assets (type: remark) to sort into assumptions, conventions, results, and remarks');
     if (/^type:\s*definition\s*$/m.test(raw)) reasons.add('definitions stored under assets');
     if (ORDINAL_TITLE.test(raw)) reasons.add('numbered titles');
     if (/^used_in:/m.test(raw)) reasons.add('stored used_in lists');
@@ -157,7 +163,7 @@ async function moveDefinitionsOutOfAssets(files: LoopFiles, paths: ProjectPaths,
   for (const item of plan.moved) {
     await files.writeFile(`${paths.definitions}/${item.id}.md`, item.raw);
     await files.deleteFile!(`${paths.assets}/${item.id}.md`);
-    report.review.push(`${paths.definitions}/${item.id}.md: moved from assets; confirm it defines a concept a result uses; keep standing assumptions and conventions that define nothing as linked remark assets.`);
+    report.review.push(`${paths.definitions}/${item.id}.md: moved from assets; confirm it defines a concept a result uses, or mark a standing assumption or convention with definition_kind.`);
   }
   report.review.push(...plan.review);
 }
@@ -254,7 +260,7 @@ export function upgradeProjectText(raw: string): { text: string; review: string[
   const background = [section('Background'), ...legacyNotes.map(([heading, text]) => `### Earlier notes: ${heading}\n\n${text}`)].filter(Boolean).join('\n\n');
   if (section('Current Goals')) review.push('project.md: ## Current Goals became ## Intended Contribution; check the wording and fill ## Scope and Assumptions.');
   if (legacyNotes.length) review.push(`project.md: ${legacyNotes.map(([heading]) => heading).join(', ')} moved under ## Background; the dashboard now derives known results, open questions (question ideas), and writing status, so turn open questions into ideas and trim what is redundant.`);
-  const frontmatter = ['---', 'type: project', 'schema_version: 2', required.length ? 'required_results:' : 'required_results: []',
+  const frontmatter = ['---', 'type: project', `schema_version: ${SCHEMA_VERSION}`, required.length ? 'required_results:' : 'required_results: []',
     ...required.flatMap((item) => [`  - id: ${item.id}`, ...(item.role ? [`    role: ${JSON.stringify(item.role)}`] : [])]), '---'].join('\n');
   const body = [
     title,
@@ -285,13 +291,189 @@ async function upgradeProject(files: LoopFiles, paths: ProjectPaths, report: Mig
   }
 }
 
+// ---------- schema 3: remarks become annotations; remark assets are sorted ----------
+
+/** How the researcher sorted one `type: remark` asset (see `migrate --remarks`). */
+export interface RemarkClassification {
+  as: 'assumption' | 'convention' | 'lemma' | 'proposition' | 'example' | 'remark';
+  /** For `remark`: the result or definition it annotates. */
+  target?: string;
+  /** For `remark`: whose it is; researcher by default. */
+  origin?: 'researcher' | 'agent';
+}
+export type RemarkMigrationPlan = Record<string, RemarkClassification>;
+export const REMARK_CLASSES = ['assumption', 'convention', 'lemma', 'proposition', 'example', 'remark'] as const;
+
+export interface MigrationOptions {
+  /** How each remark asset is sorted; remark assets it leaves out stay in place and are listed for review. */
+  remarkPlan?: RemarkMigrationPlan;
+  /** Timestamp for remarks the migration writes. */
+  now?: string;
+}
+
+/** What one migration run must not carry over, and the files it removed. */
+interface CarryState { noCarry: Set<string>; removed: Set<string> }
+
+const remarkIdFor = (source: string) => `remark_${source.replace(/[^a-z0-9]/g, '').slice(0, 24)}`;
+const listOf = (value: unknown) => Array.isArray(value) ? value.map(String) : [];
+
+function remarkFile(paths: ProjectPaths, id: string, data: Record<string, unknown>, body: string): { file: string; raw: string } {
+  const lines = ['---', ...Object.entries(data).map(([key, value]) => `${key}: ${JSON.stringify(value)}`), '---', '', body.trim(), ''];
+  return { file: `${paths.remarks}/${id}.md`, raw: lines.join('\n') };
+}
+
+/** The file of a project asset or definition by ID, as the migration has it now. */
+async function nodeFile(files: LoopFiles, paths: ProjectPaths, id: string): Promise<string | undefined> {
+  for (const folder of [paths.assets, paths.definitions]) if (await files.exists(`${folder}/${id}.md`)) return `${folder}/${id}.md`;
+  return undefined;
+}
+
+/** Sort `type: remark` assets as the researcher decided. Assumptions and conventions become definitions (moved by the next step). */
+async function sortRemarkAssets(files: LoopFiles, paths: ProjectPaths, plan: RemarkMigrationPlan, now: string, report: MigrationReport, carry: CarryState): Promise<void> {
+  const remarkAssets = (await readAll(files, paths.assets)).filter(({ raw }) => /^type:\s*remark\s*$/m.test(raw));
+  if (!remarkAssets.length) return;
+  const unsorted: string[] = [];
+  const toRemarks: Array<{ id: string; file: string; raw: string; sort: RemarkClassification }> = [];
+  for (const { file, raw } of remarkAssets) {
+    const id = idOf(file);
+    const sort = plan[id];
+    if (!sort) { unsorted.push(id); continue; }
+    if (!(REMARK_CLASSES as readonly string[]).includes(sort.as)) throw new Error(`${id}: sort it as one of ${REMARK_CLASSES.join(', ')}, not ${String(sort.as)}.`);
+    const data = parseMarkdown(raw).data;
+    if (sort.as === 'assumption' || sort.as === 'convention') {
+      const assetDeps = listOf(data.depends_on);
+      if (assetDeps.length) throw new Error(`${file}: it depends on the results ${assetDeps.join(', ')}, but an ${sort.as} rests only on definitions. Remove those dependencies or sort it differently, then migrate again.`);
+      const concept = String(data.title ?? id).replace(/^(?:Remark|Assumption|Convention|Definition)\s*\((.*)\)$/, '$1');
+      const uses = listOf(data.uses_definitions);
+      const updated = editFrontmatter(raw, (lines) => {
+        let next = removeKey(removeKey(lines, 'uses_definitions'), 'depends_on');
+        next = setKey(setKey(next, 'type', 'definition'), 'definition_kind', sort.as);
+        next = setKey(next, 'title', JSON.stringify(definitionTitle(sort.as as 'assumption' | 'convention', concept)));
+        return [...next, uses.length ? 'depends_on:' : 'depends_on: []', ...uses.map((use) => `  - ${use}`)];
+      });
+      await files.writeFile(file, updated);
+      report.notes.push(`${id}: now a definition with definition_kind ${sort.as}; results that depended on it list it in uses_definitions.`);
+    } else if (sort.as === 'remark') {
+      toRemarks.push({ id, file, raw, sort });
+    } else {
+      const provable = sort.as !== 'example';
+      await files.writeFile(file, editFrontmatter(raw, (lines) => provable ? setKey(setKey(lines, 'type', sort.as), 'status', 'draft') : setKey(lines, 'type', sort.as)));
+      if (provable) { carry.noCarry.add(id); report.review.push(`${file}: now a ${sort.as} to prove (status draft); its earlier approval agreed to a remark, not to a proof.`); }
+      else report.notes.push(`${id}: now an example.`);
+    }
+  }
+  for (const { id, file, raw, sort } of toRemarks) {
+    if (!sort.target) throw new Error(`${id}: a remark needs the target it annotates ("target": "<asset or definition ID>").`);
+    if (toRemarks.some((other) => other.id === sort.target)) throw new Error(`${id}: its target ${sort.target} becomes a remark too; a remark annotates a result or definition.`);
+    const targetFile = await nodeFile(files, paths, sort.target);
+    if (!targetFile) throw new Error(`${id}: no asset or definition named ${sort.target}.`);
+    const parsed = parseMarkdown(raw);
+    const remark = remarkFile(paths, remarkIdFor(id), {
+      type: 'remark', title: String(parsed.data.title ?? id), target: sort.target, origin: sort.origin === 'agent' ? 'agent' : 'researcher', from: 'other', status: 'active',
+      target_digest: remarkTargetDigest(parseMarkdown(await files.readFile(targetFile)).content), at: now,
+    }, parsed.content);
+    if (await files.exists(remark.file)) throw new Error(`${remark.file} already exists.`);
+    await files.writeFile(remark.file, remark.raw);
+    await files.deleteFile!(file);
+    carry.removed.add(id);
+    // Nothing may depend on a remark: drop it from the dependencies of the results that listed it.
+    for (const node of await readAll(files, paths.assets)) {
+      const data = parseMarkdown(node.raw).data;
+      if (!listOf(data.depends_on).includes(id)) continue;
+      const deps = listOf(data.depends_on).filter((dep) => dep !== id);
+      await files.writeFile(node.file, editFrontmatter(node.raw, (lines) => [...removeKey(lines, 'depends_on'), deps.length ? 'depends_on:' : 'depends_on: []', ...deps.map((dep) => `  - ${dep}`)]));
+      report.review.push(`${node.file}: no longer depends on ${id}, which became a remark on ${sort.target}; add a real dependency if its proof used it.`);
+    }
+    for (const idea of await readAll(files, paths.ideas)) if (listOf(parseMarkdown(idea.raw).data.related_assets).includes(id)) report.review.push(`${idea.file}: related_assets names ${id}, now the remark ${remarkIdFor(id)} on ${sort.target}; point it at ${sort.target}.`);
+    report.notes.push(`${id}: now the remark ${remarkIdFor(id)} on ${sort.target}.`);
+  }
+  if (unsorted.length) report.review.push(`Remark assets still to sort: ${unsorted.join(', ')}. Decide for each whether it is an assumption, a convention, a result (lemma, proposition, example), or a remark on another result, write the decisions to a JSON file such as {"${unsorted[0]}": {"as": "assumption"}} ({"as": "remark", "target": "<id>"} for a remark), and run migrate --remarks <file>.`);
+}
+
+/** Remarks kept inside result files (the old teaching-chat remarks block) move into remark files of their own. */
+async function moveRemarkBlocks(files: LoopFiles, paths: ProjectPaths, now: string, report: MigrationReport): Promise<void> {
+  let moved = 0;
+  for (const folder of [paths.assets, paths.definitions]) {
+    for (const { file, raw } of await readAll(files, folder)) {
+      if (!REMARKS_BLOCK_PATTERN.test(raw)) continue;
+      const parsed = parseMarkdown(raw);
+      const text = remarksOf(parsed.content);
+      const stripped = raw.replace(new RegExp(REMARKS_BLOCK_PATTERN.source), '\n').replace(/\n{3,}$/, '\n').replace(/\s*$/, '\n');
+      if (text) {
+        const remark = remarkFile(paths, remarkIdFor(`${idOf(file)}notes`), {
+          type: 'remark', title: 'Remarks from the teaching chat', target: idOf(file), origin: 'researcher', from: 'teaching', status: 'active',
+          target_digest: remarkTargetDigest(parseMarkdown(stripped).content), at: now,
+        }, text);
+        await files.writeFile(remark.file, remark.raw);
+      }
+      await files.writeFile(file, stripped);
+      moved++;
+    }
+  }
+  if (moved) report.notes.push(`Moved the remarks of ${moved} result(s) into ${paths.remarks}/; they no longer live inside the result files.`);
+}
+
+/**
+ * Carry approvals and stored digests over to the migrated files. Only nodes
+ * whose approval matched before the migration are carried, and only the
+ * changes the migration made: a node it turned into a result to prove is not.
+ * Approvals move with a node from assets to definitions; plans, checks,
+ * candidates, and manuscript bindings that recorded an old digest get the new one.
+ */
+async function carryDigests(files: LoopFiles, paths: ProjectPaths, before: Map<string, { kind: 'asset' | 'definition'; raw: string }>, carry: CarryState, report: MigrationReport): Promise<void> {
+  const map = new Map<string, string>();
+  const approvals = await readApprovals(files, paths.researchRoot);
+  let carried = 0;
+  for (const [id, old] of before) {
+    if (carry.noCarry.has(id) || carry.removed.has(id)) continue;
+    const file = await nodeFile(files, paths, id);
+    if (!file) continue;
+    const raw = await files.readFile(file);
+    if (raw === old.raw) continue;
+    const kind = file.startsWith(`${paths.definitions}/`) ? 'definition' : 'asset';
+    const pairs: Array<[string, string]> = [[statementDigest(old.raw), statementDigest(raw)], [researchDigest(old.raw, old.kind), researchDigest(raw, kind)]];
+    const oldParts = assetComponents(old.raw); const newParts = assetComponents(raw);
+    for (const part of ['statement', 'proof', 'source'] as const) pairs.push([oldParts[part], newParts[part]]);
+    for (const [from, to] of pairs) if (from !== to) map.set(from, to);
+    const record = approvals.records.find((item) => item.kind === old.kind && item.target === id);
+    if (record && record.digest === researchDigest(old.raw, old.kind)) {
+      record.kind = kind;
+      record.digest = researchDigest(raw, kind);
+      carried++;
+    }
+  }
+  // A node the migration made a result to prove keeps no approval: it agreed to a remark, not to a proof.
+  approvals.records = approvals.records.filter((record) => !((record.kind === 'asset' || record.kind === 'definition') && (carry.noCarry.has(record.target) || carry.removed.has(record.target))));
+  await writeApprovals(files, paths.researchRoot, approvals);
+  if (carried) report.notes.push(`Carried ${carried} approval(s) over to the migrated files; nothing that was not approved became approved.`);
+  if (!map.size) return;
+  const shared = sharedFolders(paths.researchRoot);
+  const writing = paths.writingRoot;
+  let updated = 0;
+  for (const [folder, extension] of [[paths.plans, '.md'], [shared.checks, '.md'], [shared.candidates, '.md'], [`${writing}/bindings`, '.json'], [paths.writingSections, '.md']] as const) {
+    for (const file of await files.listFiles(folder, extension)) {
+      const raw = await files.readFile(file);
+      const next = raw.replace(/\b[0-9a-f]{64}\b/g, (digest) => map.get(digest) ?? digest);
+      if (next !== raw) { await files.writeFile(file, next); updated++; }
+    }
+  }
+  if (updated) report.notes.push(`Updated the recorded versions in ${updated} plan, check, or manuscript file(s), so the migration marks nothing stale.`);
+}
+
 /** Run every migration step on `files` (use an OverlayFiles to preview). Throws before writing when a step cannot proceed safely. */
-export async function migrateProject(files: LoopFiles, paths: ProjectPaths): Promise<MigrationReport> {
+export async function migrateProject(files: LoopFiles, paths: ProjectPaths, options: MigrationOptions = {}): Promise<MigrationReport> {
   const report: MigrationReport = { notes: [], review: [] };
+  const now = options.now ?? new Date().toISOString();
+  const before = new Map<string, { kind: 'asset' | 'definition'; raw: string }>();
+  for (const [kind, folder] of [['asset', paths.assets], ['definition', paths.definitions]] as const) for (const { file, raw } of await readAll(files, folder)) before.set(idOf(file), { kind, raw });
+  const carry: CarryState = { noCarry: new Set(), removed: new Set() };
+  await sortRemarkAssets(files, paths, options.remarkPlan ?? {}, now, report, carry);
   await moveDefinitionsOutOfAssets(files, paths, report);
+  await moveRemarkBlocks(files, paths, now, report);
   await movePlansOutOfIdeas(files, paths, report);
   await upgradeNodes(files, paths, report);
   await upgradeProject(files, paths, report);
+  await carryDigests(files, paths, before, carry, report);
   report.review.push(...ideaPlanProblems((await readAll(files, paths.assets)).map(({ file, raw }) => ({ filePath: file, raw })), [...await readAll(files, paths.ideas), ...await readAll(files, paths.plans)].map(({ file, raw }) => ({ filePath: file, raw }))));
   return report;
 }

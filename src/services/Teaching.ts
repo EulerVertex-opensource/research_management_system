@@ -4,7 +4,9 @@ import { parseMarkdown } from './Frontmatter';
 import { EVENTS_PATH, LoopFiles, dashboardLinkPath, isApproved, proofDigest, statementDigest, writeDashboardLinks } from './ResearchLoopModel';
 import { readApprovals } from './ApprovalStore';
 import { normalizeProse, sha } from '../domain/digests';
-import { INACTIVE_STATUSES } from '../domain/nodeKinds';
+import { INACTIVE_STATUSES, definitionKindOf } from '../domain/nodeKinds';
+import { remarkLabel } from '../domain/remarks';
+import { Remarks } from './Remarks';
 import { requiredAssetIds } from '../domain/project';
 import { listNodeFiles, locateNodeFile } from '../domain/registry';
 import { sectionContent, stripManagedBlocks } from '../domain/sections';
@@ -116,7 +118,7 @@ export class Teaching {
     }
     for (const node of [...definitions.values()].filter(usable)) {
       if (!(node.data.status === 'approved' && isApproved(approvals, 'definition', node.id, node.raw))) continue;
-      inputs.push({ id: node.id, kind: 'definition', type: 'definition', title: String(node.data.title ?? node.id), raw: node.raw, verified: 'approved', prerequisites: list(node.data.depends_on), required: false, failedPlans: 0, verifiedAt: approvedAt('definition', node.id) });
+      inputs.push({ id: node.id, kind: 'definition', type: definitionKindOf(node.data), title: String(node.data.title ?? node.id), raw: node.raw, verified: 'approved', prerequisites: list(node.data.depends_on), required: false, failedPlans: 0, verifiedAt: approvedAt('definition', node.id) });
     }
     return { assets, definitions, plans, required, inputs, reports };
   }
@@ -197,8 +199,13 @@ export class Teaching {
       `## Statement\n\n${statementText(parts.statement)}`,
       parts.proof ? `## Proof\n\n${strip(parts.proof)}` : item.kind === 'asset' ? '## Proof\n\nNo proof in the file (a cited or supporting result).' : '',
     ];
-    const remarks = remarksOf(node.body);
-    if (remarks) blocks.push(`## The researcher's remarks (not part of the proof)\n\n${remarks}`);
+    const legacyRemarks = remarksOf(node.body);
+    if (legacyRemarks) blocks.push(`## The researcher's remarks (not part of the proof)\n\n${legacyRemarks}`);
+    const remarks = await new Remarks(this.files, this.paths).list({ target: id });
+    if (remarks.length) blocks.push([
+      '## Remarks on it (explanations, not part of the proof; no check covers them)',
+      ...remarks.map((remark) => `### ${remark.title} (${remark.id}${remark.anchor ? `, at ${remark.anchor}` : ''}; ${remarkLabel(remark, remark.stale)})\n\n${remark.body}`),
+    ].join('\n\n'));
     const pending = (await this.pendingRevisions()).find((revision) => revision.id === id);
     if (pending) blocks.push([`## A rewording waiting for the loop (proposed ${day(pending.at)})`, pending.changes ? `What changes: ${pending.changes}` : '', pending.proof ? `### Reworded proof\n\n${pending.proof}` : '', pending.remarks !== undefined ? `### Remarks\n\n${pending.remarks || '(remove the remarks)'}` : ''].filter(Boolean).join('\n\n'));
     const style = await this.styleText();
@@ -215,7 +222,9 @@ export class Teaching {
     const nodeLink = (other: string) => { const found = assets.get(other) ?? definitions.get(other); return `- ${this.reference(other, titleOf(other), found?.file)}`; };
     const planLink = (plan: Node) => `- ${this.reference(plan.id, `${String(plan.data.title ?? plan.id)} (${plan.data.status} plan)`, plan.file)}`;
     blocks.push(['## Links for the researcher', nodeLink(id), ...[...new Set([...prerequisites, ...adapts, ...holdsUp])].map(nodeLink), ...(proofPlan ? [planLink(proofPlan)] : []), ...failed.map(planLink),
-      ...ideas.map((idea) => `- ${this.reference(idea.id, idea.title, `${this.paths.ideas}/${idea.id}.md`)}`)].join('\n'));
+      ...ideas.map((idea) => `- ${this.reference(idea.id, idea.title, `${this.paths.ideas}/${idea.id}.md`)}`),
+      // A remark is no dashboard node: it shows under its result there, so link the file itself.
+      ...remarks.map((remark) => `- Remark: ${remark.title} (file: [${remark.file}](${remark.file}))`)].join('\n'));
     await this.flushLinks();
     return blocks.filter(Boolean).join('\n\n') + '\n';
   }
@@ -243,8 +252,8 @@ export class Teaching {
   }
 
   /**
-   * Propose a rewording of a verified result: its proof (checked independently
-   * before it stands) and/or the researcher's remarks. The loop applies it
+   * Propose a rewording of a verified result's proof, checked independently
+   * before it stands. The loop applies it
    * between stages; a newer proposal for the same result replaces this one.
    */
   async propose(id: string, draft: string, at: string): Promise<ProofRevision> {
@@ -254,7 +263,7 @@ export class Teaching {
     if (!input) throw new Error(`${id} is not a verified result; only verified results are reworded from the teaching chat.`);
     const parts = understandingParts(input.raw);
     if (parsed.proof) {
-      if (input.kind !== 'asset' || !parts.proof) throw new Error(`${id} has no proof to reword; only its remarks can change.`);
+      if (input.kind !== 'asset' || !parts.proof) throw new Error(`${id} has no proof to reword; an explanation of it goes into a remark (add_remark).`);
       const problem = proofDraftProblem(parsed.proof);
       if (problem) throw new Error(problem);
       if (sha(normalizeProse(parsed.proof)) === parts.proofDigest) throw new Error('The reworded proof is the same as the current one.');

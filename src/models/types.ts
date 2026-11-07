@@ -1,7 +1,7 @@
-import type { IdeaKind, NodeType, ResearchStatus } from '../domain/nodeKinds';
+import type { DefinitionKind, IdeaKind, NodeType, ResearchStatus } from '../domain/nodeKinds';
 import type { NodeSource } from '../domain/schema';
 
-export type { IdeaKind, NodeStatus, NodeType, PlanStatus, IdeaStatus, ResearchStatus } from '../domain/nodeKinds';
+export type { DefinitionKind, IdeaKind, NodeStatus, NodeType, PlanStatus, IdeaStatus, ResearchStatus } from '../domain/nodeKinds';
 export type { NodeSource } from '../domain/schema';
 
 /** Frontmatter as the dashboard edits it: forward relations only; reverse ones are derived. */
@@ -20,6 +20,24 @@ export interface NodeFrontmatter {
   /** Only on a conjecture: the results it would unblock or strengthen. */
   serves?: string[];
   idea_kind?: IdeaKind;
+  /** Only on a definition: definition (absent), assumption, or convention. */
+  definition_kind?: DefinitionKind;
+}
+
+/** A remark as the dashboard shows it under its result (see domain/remarks.ts). */
+export interface RemarkView {
+  id: string;
+  title: string;
+  body: string;
+  anchor?: string;
+  origin: 'researcher' | 'agent';
+  from: 'teaching' | 'loop' | 'other';
+  /** Written for an earlier version of the result. */
+  stale: boolean;
+  /** The researcher approved this exact text for the paper. */
+  approved: boolean;
+  file: string;
+  at: string;
 }
 
 export interface ResearchNode extends NodeFrontmatter {
@@ -117,6 +135,8 @@ export interface ResearchAssistantConfig {
     localSourcePdfs: string;
     /** Known results imported from earlier work or papers; defaults to `<root>/library`. */
     library?: string;
+    /** Remarks (annotations on results); defaults to `remarks` beside the ideas folder. */
+    remarks?: string;
   };
 }
 
@@ -135,6 +155,8 @@ export interface ProjectPaths {
   definitions: string;
   ideas: string;
   plans: string;
+  /** Remarks: annotations on results and definitions, one file each; not nodes. */
+  remarks: string;
   /** Library of known results: `<library>/<collection>/assets|definitions/lib_*.md`. */
   library: string;
   writingRoot: string;

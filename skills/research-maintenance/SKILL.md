@@ -34,3 +34,13 @@ Library nodes (`library/<collection>/assets|definitions/`, IDs starting `lib_`) 
 ## migrate
 
 `migrate [--force]` upgrades a project written by an older version in one reviewable step: definitions stored under assets move to the definitions folder, plans stored under ideas move to the plans folder, `proof_record` files become plans with `status: succeeded`, stored `used_in` lists, numbered titles, and managed link blocks are dropped, `source.kind: self_proved` becomes `original`, and project.md moves its required results into `required_results` frontmatter without discarding any text. A still-valid project approval is carried over; nothing new is approved. Preview first and read every `REVIEW` line; `--apply` refuses while research files have uncommitted changes (commit first so the migration is one diff, or pass `--force`). Report the review items to the researcher.
+
+Schema 3 retires `type: remark` assets and the remarks block inside result files. The block's text moves into a remark file on its own (`remarks/remark_<id>.md`, an annotation, not a node). Remark assets need a decision the command cannot make, so the preview lists them (`Remark assets still to sort`). Read each one and propose its sort to the researcher, one line each, with why:
+
+- `assumption`: a hypothesis part of the project takes for granted; it becomes a definition with `definition_kind: assumption`, and the results that depended on it list it in `uses_definitions`. A project-wide assumption may instead go into project.md (say so).
+- `convention`: notation or a normalization without mathematical content; a definition with `definition_kind: convention`.
+- `lemma` or `proposition`: it claims something; it becomes a draft result to prove, and its old approval is dropped.
+- `example`: it is an example.
+- `remark` with a `target`: it only explains another result; it becomes a remark on that result, and results that listed it in `depends_on` drop it (each is reported).
+
+Once the researcher agrees, write the decisions to a JSON file outside the research folders, `{"<id>": {"as": "assumption"}, "<id2>": {"as": "remark", "target": "<result id>"}}`, and run `migrate --remarks <file>` (preview, then `--apply`). Approvals and the versions plans, checks, and manuscript bindings recorded are carried over for everything the migration changes, except a remark asset that became a result to prove. Remark assets left out stay as they are and keep failing validation until sorted.

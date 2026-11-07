@@ -24,11 +24,13 @@ import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
-import { ProofRevision, REVISIONS_DIR, withProof, withRemarks } from '../domain/revisions';
+import { ProofRevision, REVISIONS_DIR, withProof } from '../domain/revisions';
 import { understandingParts } from '../domain/understanding';
 import { layoutReport } from '../domain/layout';
 import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
+import { RemarkInput, Remarks } from './Remarks';
+import { Remark, RemarkFrom, remarkReferenceProblems } from '../domain/remarks';
 import {
   CheckInfo, DecisionExtra, DecisionInfo, DecisionKind, Provenance, checkMarkdown, sortDecisions, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
   failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampSearchRecord,
@@ -1413,6 +1415,62 @@ export class ResearchLoopCore {
     return target;
   }
 
+  // ---------- remarks ----------
+
+  /** Remarks on results (see domain/remarks.ts); outside the stage change set, so writing one never disturbs a stage. */
+  remarks(): Remarks { return new Remarks(this.files, this.paths); }
+
+  /** Add a remark; one the loop writes must be on the result it is working on. */
+  async addRemark(input: RemarkInput): Promise<Remark> {
+    const state = this.state;
+    const remark = await this.remarks().add(input, { at: this.now(), loop: { running: state?.status === 'running', assetId: state?.current.assetId, stageStartedAt: state?.current.stageStartedAt } });
+    await this.event('remark_added', { assetId: input.target, remarkId: remark.id, origin: input.origin, from: input.from });
+    return remark;
+  }
+
+  async editRemark(id: string, changes: { title?: string; body?: string; anchor?: string }, by: RemarkFrom): Promise<Remark> {
+    const remark = await this.remarks().edit(id, changes, by, this.now());
+    await this.event('remark_edited', { assetId: remark.target, remarkId: id, from: by });
+    return remark;
+  }
+
+  /**
+   * The researcher agrees a remark may appear in the paper, as written. Only the
+   * extension calls this (a click in the dashboard); an edit afterwards needs a
+   * new approval. It approves the remark's text, never a result.
+   */
+  async approveRemark(id: string, source: string): Promise<void> {
+    const remark = await this.remarks().get(id);
+    if (remark.status !== 'active') throw new Error(`${id} is archived; restore it before approving it for the paper.`);
+    await this.record('remark', id, await this.files.readFile(remark.file), source);
+    await this.event('remark_approved', { assetId: remark.target, remarkId: id, source });
+  }
+
+  /** Remark files that are malformed or name no target, and nodes whose relations name a remark. */
+  private async remarkProblems(targets: ReadonlySet<string>): Promise<string[]> {
+    const remarks = this.remarks();
+    const problems = await remarks.problems(targets);
+    const ids = new Set((await remarks.all()).map((remark) => remark.id));
+    if (!ids.size) return problems;
+    for (const kind of ['asset', 'definition'] as const) {
+      for (const file of await listNodeFiles(this.files, this.paths, kind)) {
+        try { problems.push(...remarkReferenceProblems(file, parseMarkdown(await this.files.readFile(file)).data, ids)); } catch { /* reported elsewhere */ }
+      }
+    }
+    for (const folder of [this.paths.ideas, this.paths.plans]) {
+      for (const file of await this.files.listFiles(folder)) {
+        try { problems.push(...remarkReferenceProblems(file, parseMarkdown(await this.files.readFile(file)).data, ids)); } catch { /* reported elsewhere */ }
+      }
+    }
+    return problems;
+  }
+
+  async archiveRemark(id: string, by: RemarkFrom): Promise<Remark> {
+    const remark = await this.remarks().archive(id, by, this.now());
+    await this.event('remark_archived', { assetId: remark.target, remarkId: id, from: by });
+    return remark;
+  }
+
   // ---------- ideas ----------
 
   async saveIdea(title: string, body: string, relatedAssets: string[], origin: 'researcher' | 'agent' = 'agent', tags: string[] = [], ideaKind: IdeaKind = 'approach', extra: Record<string, string> = {}): Promise<string> {
@@ -1937,10 +1995,16 @@ export class ResearchLoopCore {
     else await this.files.writeFile(file, '');
   }
 
+  /** Remarks a rewording proposed before remarks had files of their own: the researcher's, from the teaching chat. */
+  private async legacyRemarks(assetId: string, text: string): Promise<void> {
+    if (!text.trim()) return;
+    await this.remarks().add({ target: assetId, title: 'Remarks from the teaching chat', body: text, origin: 'researcher', from: 'teaching' }, { at: this.now() });
+    await this.event('remark_added', { assetId, origin: 'researcher', from: 'teaching' });
+  }
+
   /**
    * Apply one rewording the teaching chat proposed (see revisions.ts). Remarks
-   * are written at once; they change nothing that was approved or verified. A
-   * reworded proof replaces the old one, which its rewrite plan keeps, and the
+   * an older proposal carried become a remark file at once. A reworded proof replaces the old one, which its rewrite plan keeps, and the
    * independent check runs on it next, whatever the researcher's check
    * setting. A proposal made against an older version is dropped. Returns
    * true when it started that check.
@@ -1957,12 +2021,8 @@ export class ResearchLoopCore {
       const parts = understandingParts(raw);
       if (parts.statementDigest !== revision.baseStatement || (revision.proof && parts.proofDigest !== revision.baseProof)) { await drop('the result changed after the rewording was proposed'); continue; }
       const parsed = parseMarkdown(raw);
-      if (!revision.proof) {
-        await this.files.writeFile(nodeFile, stringifyMarkdown(withRemarks(parsed.content, revision.remarks ?? ''), parsed.data));
-        await this.removeFile(file);
-        await this.event('remarks_updated', { assetId: revision.id });
-        continue;
-      }
+      if (revision.remarks) await this.legacyRemarks(revision.id, revision.remarks);
+      if (!revision.proof) { await this.removeFile(file); continue; }
       const wasApproved = parsed.data.status === 'approved' && isApproved((await this.approvals()).records, 'asset', revision.id, raw);
       // The changed proof is not what the researcher approved: it is a draft again until they accept it.
       const data = { ...parsed.data, status: parsed.data.status === 'approved' ? 'draft' : parsed.data.status };
@@ -1977,7 +2037,6 @@ export class ResearchLoopCore {
         '## Verification\n\nAn independent check of the reworded proof against the statement, as for any proof.',
         `## Changes\n\n${revision.changes ?? 'Rewording.'}`,
         `## Previous proof\n\n${previous}`,
-        ...(revision.remarks !== undefined ? [`## Remarks to add\n\n${revision.remarks.trim() || '(remove the remarks)'}`] : []),
         `## Outcome\n\nThe reworded proof is in [${String(parsed.data.title ?? revision.id)}](../assets/${revision.id}.md).`,
       ].join('\n\n');
       await this.files.writeFile(`${this.paths.plans}/${planId}.md`, stringifyMarkdown(`\n${body}\n`, {
@@ -1993,14 +2052,11 @@ export class ResearchLoopCore {
     return false;
   }
 
-  /** A confirmed rewording: its remarks are written, and the researcher's understanding moves to the wording they asked for. */
+  /** A confirmed rewording: the researcher's understanding moves to the wording they asked for (and remarks an older rewording plan carried become a remark file). */
   private async finishRewrite(assetId: string, planContent: string, planData: Record<string, any>, assetRaw: string): Promise<void> {
-    const file = `${this.paths.assets}/${assetId}.md`;
     if (/^## Remarks to add[ \t]*$/m.test(planContent)) {
       const remarks = sectionContent(planContent, 'Remarks to add');
-      const asset = parseMarkdown(assetRaw);
-      assetRaw = stringifyMarkdown(withRemarks(asset.content, remarks === '(remove the remarks)' ? '' : remarks), asset.data);
-      await this.writeOwned(file, assetRaw);
+      if (remarks !== '(remove the remarks)') await this.legacyRemarks(assetId, remarks);
     }
     await new Teaching(this.files, this.paths).carryMark(assetId, String(planData.rewrites_proof_digest ?? ''), assetRaw, this.now());
   }
@@ -2305,7 +2361,7 @@ export class ResearchLoopCore {
       case 'scaffold': {
         const brief = state.scaffoldBrief;
         if (brief?.missingDefinitions?.length && !brief.missing?.length && !brief.incomplete?.length) {
-          return `Stage scaffold. These definitions are used but have no file: ${brief.missingDefinitions.join(', ')}. Draft each in ${this.paths.definitions}/<id>.md with type: definition, a title "Definition (concept)", status: draft, source (original, or paper/textbook with paper_id and location when the meaning is taken from a source), depends_on for the definitions it uses, and the defining statement with its notation. Read the results that use it so the definition says what they need; search the library first (${LOOP_COMMAND} library search <words>) and, if a lib_ definition means the same, point the users at it instead of drafting. Do not modify existing assets or definitions; never approve a definition. Run research-maintenance validate and links.${input}${report('complete|question')}`;
+          return `Stage scaffold. These definitions are used but have no file: ${brief.missingDefinitions.join(', ')}. Draft each in ${this.paths.definitions}/<id>.md with type: definition, a title "Definition (concept)", status: draft, source (original, or paper/textbook with paper_id and location when the meaning is taken from a source), depends_on for the definitions it uses, and the defining statement with its notation. When the ID names a hypothesis the results take for granted rather than a concept, add definition_kind: assumption and title it "Assumption (...)"; for notation or a normalization with no mathematical content, definition_kind: convention and "Convention (...)". Read the results that use it so the definition says what they need; search the library first (${LOOP_COMMAND} library search <words>) and, if a lib_ definition means the same, point the users at it instead of drafting. Do not modify existing assets or definitions; never approve a definition. Run research-maintenance validate and links.${input}${report('complete|question')}`;
         }
         return `Stage scaffold. Create missing draft assets in ${this.paths.assets}/ for ${brief?.missing?.length ? `missing IDs: ${brief.missing.join(', ')}` : 'every required result and dependency'}${brief?.incomplete?.length ? `; complete the statements of: ${brief.incomplete.join(', ')}` : ''}. Each needs type, title, status: draft, source.kind original (or paper/textbook with paper_id and location when genuinely cited), depends_on, uses_definitions, and a precise ## Statement. A construction the loop should search for lists its required properties in the statement, one per line as \`- P1: ...\`, \`- P2: ...\` (the researcher approves them before the search); a construction of a given object states the object. Create draft definitions in ${this.paths.definitions}/ as needed. Before creating a dependency or definition, search the library of known results (${LOOP_COMMAND} library search <words>) and reference a matching lib_ ID in depends_on/uses_definitions instead of re-creating it. Do not modify existing assets or definitions. Use the extract-research-nodes skill, then run research-maintenance validate and links.${input}${report('complete|question')}`;
       }
@@ -2942,6 +2998,7 @@ export class ResearchLoopCore {
       }
     }
     problems.push(...(await layoutReport(this.files, this.paths)).problems);
+    problems.push(...await this.remarkProblems(new Set([...assets.keys(), ...definitions.keys()])));
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);
     const { cycle } = assetClosure([...assets.keys()], assets);

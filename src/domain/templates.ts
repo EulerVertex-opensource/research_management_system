@@ -17,7 +17,6 @@ const NODE_TEMPLATES: Record<string, string> = {
   proposition: statementTemplate('proposition', 'Write the proposition statement here.', 'paper'),
   example: statementTemplate('example', 'Describe the example here.', 'original'),
   construction: statementTemplate('construction', 'Describe the construction here.', 'original'),
-  remark: statementTemplate('remark', 'Write the remark here.', undefined),
   conjecture: `---
 type: conjecture
 title: {title}
@@ -47,6 +46,32 @@ tags: []
 ---
 
 Write the defining statement and the notation it introduces here.
+`,
+  assumption: `---
+type: definition
+definition_kind: assumption
+title: {title}
+status: draft
+source:
+  kind: original
+depends_on: []
+tags: []
+---
+
+State the assumption and where it holds (from which point on, for which results).
+`,
+  convention: `---
+type: definition
+definition_kind: convention
+title: {title}
+status: draft
+source:
+  kind: original
+depends_on: []
+tags: []
+---
+
+State the convention: the notation or normalization it fixes.
 `,
   plan: `---
 type: plan
@@ -84,8 +109,10 @@ Describe the intuition, possible approach, open question, or test case here.
 `,
 };
 
-export function nodeTemplate(type: string, fields: { title: string; targetAsset?: string; targetLink?: string }): string {
-  const template = NODE_TEMPLATES[type] ?? NODE_TEMPLATES.remark;
+export function nodeTemplate(type: string, fields: { title: string; targetAsset?: string; targetLink?: string; definitionKind?: string }): string {
+  const key = type === 'definition' && fields.definitionKind && fields.definitionKind !== 'definition' ? fields.definitionKind : type;
+  const template = NODE_TEMPLATES[key];
+  if (!template) throw new Error(`No template for node type ${type}.`);
   return template
     .replace('{title}', JSON.stringify(fields.title))
     .replace(/\{target_link\}/g, fields.targetLink ?? '')

@@ -9,6 +9,7 @@ import { lockBinding, renderImpact, sectionImpact } from '../domain/manuscriptIm
 import { ProjectPaths } from '../models/types';
 import { isCited } from '../domain/schema';
 import { findNodeFile } from '../domain/registry';
+import { Remarks } from '../services/Remarks';
 
 type Mode = 'preview' | 'apply';
 interface Paths {
@@ -61,7 +62,8 @@ async function readBrief(paths: Paths, section: WritingSection, checkAssetFiles:
   if (brief.title !== section.title) throw new Error(`Outline title and brief title differ for ${section.id}`);
   if (checkAssetFiles) {
     for (const id of brief.assets) {
-      const found = Boolean(await findNodeFile(paths.files, paths.config, 'asset', id) ?? await findNodeFile(paths.files, paths.config, 'definition', id));
+      const found = Boolean(await findNodeFile(paths.files, paths.config, 'asset', id) ?? await findNodeFile(paths.files, paths.config, 'definition', id))
+        || (id.startsWith('remark_') && await paths.files.exists(`${paths.config.remarks}/${id}.md`));
       if (!found) throw new Error(`Section ${section.id} references unknown asset: ${id}`);
     }
   }
@@ -131,7 +133,20 @@ async function prepare(paths: Paths, id: string, mode: Mode, full: boolean): Pro
       for (const dependency of nodeIds(data.depends_on, 'depends_on', nodeId)) await visit('definition', dependency);
     }
   };
-  for (const asset of selectedAssets) await visit('asset', asset);
+  // Remarks the brief presents: approved for the paper, presented as written (as a remark after the result, or folded into the prose).
+  const remarkLines: string[] = [];
+  const remarkSources = brief.sources.filter((source) => source.id.startsWith('remark_'));
+  if (remarkSources.length) {
+    const listed = new Map((await new Remarks(paths.files, paths.config).list({ includeArchived: true })).map((remark) => [remark.id, remark]));
+    for (const source of remarkSources) {
+      const remark = listed.get(source.id);
+      if (!remark) throw new Error(`Missing remark: ${source.id}`);
+      if (remark.status !== 'active') throw new Error(`Cannot draft from remark ${source.id}: it is archived.`);
+      if (!remark.approved) throw new Error(`Cannot draft from remark ${source.id}: the researcher has not approved it for the paper (dashboard: the remark under its result, "approve for the paper").`);
+      remarkLines.push(`Remark: ${remark.file} (on ${remark.target}${remark.anchor ? `, ${remark.anchor}` : ''}${remark.stale ? '; written for an earlier version of the result: check it still fits, and tell the researcher if it does not' : ''})`);
+    }
+  }
+  for (const asset of selectedAssets.filter((id) => !id.startsWith('remark_'))) await visit('asset', asset);
 
   if (paperIds.size) {
     const bib = await fs.readFile(paths.bibliography, 'utf8');
@@ -181,6 +196,7 @@ async function prepare(paths: Paths, id: string, mode: Mode, full: boolean): Pro
     context = context.filter(isChanged);
   }
   for (const file of context) process.stdout.write(`Context: ${path.relative(paths.root, file)}\n`);
+  for (const line of remarkLines) process.stdout.write(`${line}\n`);
   for (const file of [paths.main, ...paths.macros, ...(paths.notations ? [paths.notations] : [])]) process.stdout.write(`Preamble: ${path.relative(paths.root, file)}\n`);
   for (const key of paperIds) process.stdout.write(`Citation: ${key}\n`);
   if (mode === 'apply' && !existing) {

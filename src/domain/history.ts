@@ -51,6 +51,8 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'revision_rejected': return entry(`The rewording of ${name}'s proof did not pass the check; the previous proof is back.`, 'warning');
     case 'revision_discarded': return entry(`A rewording of ${name} was dropped: ${text(event.reason)}.`, 'warning');
     case 'remarks_updated': return entry(`Your remarks on ${name} were saved.`);
+    case 'remark_approved': return entry(`You approved a remark on ${name} for the paper.`, 'success');
+    case 'remark_added': return entry(text(event.origin) === 'researcher' ? `Your remark on ${name} was saved.` : text(event.from) === 'loop' ? `The loop added a remark on ${name}.` : `A remark on ${name} was added.`);
     case 'approved': return entry(text(event.source) === 'auto' ? `${name} was approved automatically.` : `You accepted ${name}.`, 'success');
     case 'auto_approved': return entry(`${name} was approved automatically.`, 'success');
     case 'approval_requested': return entry(`Asked you: ${approvalTitle(text(event.kind), name, type(asset))}.`, 'warning');

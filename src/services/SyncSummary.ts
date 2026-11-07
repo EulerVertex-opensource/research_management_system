@@ -58,6 +58,9 @@ export async function summarizeResearchChanges(changes: NameStatus[], context: S
       else if (change.status === 'A') lines.push(`New ${String(now?.data.status ?? '')} plan ${name} for ${target}.`);
     } else if (folder === paths.ideas) {
       if (change.status === 'A') lines.push(`New idea ${name}: ${String(now?.data.title ?? '')}.`);
+    } else if (paths.remarks && folder === paths.remarks) {
+      if (change.status === 'A') lines.push(`New remark on ${String(now?.data.target ?? '?')}: ${String(now?.data.title ?? '')}.`);
+      else if (now?.data.status === 'archived' && old?.data.status !== 'archived') lines.push(`Remark on ${String(now.data.target ?? '?')} archived: ${String(now.data.title ?? '')}.`);
     } else if (folder === shared.checks) {
       if (change.status !== 'A') continue;
       if (now?.data.type === 'search_round') lines.push(`Search round ${String(now.data.round ?? '?')} on ${String(now.data.target_asset ?? '?')} by ${String(now.data.performed_by ?? 'unknown')}: ${firstLine(sectionContent(now.content, 'Obstructions')) || 'no obstructions recorded'}`);

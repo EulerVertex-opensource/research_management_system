@@ -1,11 +1,12 @@
 import * as path from 'path';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
-import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, ProjectPaths } from '../models/types';
+import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, ProjectPaths, RemarkView } from '../models/types';
+import { Remarks } from './Remarks';
 import { FileService } from './FileService';
 import { resolveIdeaType } from './ProofIdeas';
 import { computeAssetOrder } from './AssetOrder';
 import { proofDigest } from './ResearchLoopModel';
-import { ASSET_TYPES, NodeKind, nodeKindOf, statusesFor } from '../domain/nodeKinds';
+import { ASSET_TYPES, DefinitionKind, NodeKind, definitionConcept, definitionKindOf, definitionTitle, nodeKindOf, statusesFor } from '../domain/nodeKinds';
 import { nodeProblems, planProblems, stripForeignFields } from '../domain/schema';
 import { nodeTemplate } from '../domain/templates';
 import { libraryFolders, libraryProblems, locateNodeFile } from '../domain/registry';
@@ -25,7 +26,8 @@ const list = (value: unknown): string[] => Array.isArray(value) ? value.filter((
 function frontmatterOf(data: Record<string, any>): NodeFrontmatter {
   const legacyRecord = data.type === 'proof_record';
   const role = resolveIdeaType(data);
-  const type = (legacyRecord ? 'plan' : role ?? data.type ?? 'remark') as NodeType;
+  // An untyped file shows as such; validate reports it.
+  const type = (legacyRecord ? 'plan' : role ?? data.type ?? 'untyped') as NodeType;
   return {
     type,
     title: typeof data.title === 'string' ? data.title : '',
@@ -40,6 +42,7 @@ function frontmatterOf(data: Record<string, any>): NodeFrontmatter {
     refutes: typeof data.refutes === 'string' ? data.refutes : undefined,
     ...(data.type === 'conjecture' ? { serves: list(data.serves) } : {}),
     idea_kind: typeof data.idea_kind === 'string' ? data.idea_kind as NodeFrontmatter['idea_kind'] : undefined,
+    ...(type === 'definition' && data.definition_kind !== undefined ? { definition_kind: definitionKindOf(data) } : {}),
   };
 }
 
@@ -143,9 +146,9 @@ export class NodeIndexService {
     return this.nodes.get(id);
   }
 
-  async createNode(nodeType: NodeType, title: string, targetAsset?: string): Promise<ResearchNode> {
+  async createNode(nodeType: NodeType, title: string, targetAsset?: string, definitionKind: DefinitionKind = 'definition'): Promise<ResearchNode> {
     const kind = nodeKindOf(nodeType) ?? 'asset';
-    const concept = nodeType === 'definition' ? title.replace(/^Definition \((.*)\)$/, '$1') : title;
+    const concept = nodeType === 'definition' ? definitionConcept(title) : title;
     const slug = slugify(concept) || 'untitled';
     const relativePath = `${this.folderOf(kind)}/${slug}.md`;
     if (this.nodes.has(slug) || await this.fileService.exists(relativePath)) {
@@ -157,7 +160,8 @@ export class NodeIndexService {
     }
     const targetLink = targetAsset ? path.posix.relative(path.posix.dirname(relativePath), `${this.paths.assets}/${targetAsset}.md`) : '';
     const content = nodeTemplate(nodeType, {
-      title: nodeType === 'definition' ? `Definition (${concept})` : concept,
+      title: nodeType === 'definition' ? definitionTitle(definitionKind, concept) : concept,
+      definitionKind,
       targetAsset,
       targetLink: targetLink.startsWith('.') ? targetLink : `./${targetLink}`,
     });
@@ -190,7 +194,7 @@ export class NodeIndexService {
     node.status = status;
   }
 
-  async getNodeDetail(id: string): Promise<{ frontmatter: NodeFrontmatter; body: string }> {
+  async getNodeDetail(id: string): Promise<{ frontmatter: NodeFrontmatter; body: string; remarks: RemarkView[] }> {
     const node = this.nodes.get(id);
     if (!node) {
       throw new Error(`Node not found: ${id}`);
@@ -198,7 +202,13 @@ export class NodeIndexService {
     const raw = await this.fileService.readFile(node.filePath);
     const { data, content } = parseMarkdown(raw);
     const frontmatter = frontmatterOf(data);
-    return { frontmatter: { ...frontmatter, title: frontmatter.title || node.title }, body: content.trim() };
+    const kind = nodeKindOf(frontmatter.type);
+    const remarks = kind === 'asset' || kind === 'definition'
+      ? (await new Remarks(this.fileService, this.paths).list({ target: id }).catch(() => [])).map((remark): RemarkView => ({
+        id: remark.id, title: remark.title, body: remark.body, ...(remark.anchor ? { anchor: remark.anchor } : {}), origin: remark.origin, from: remark.from, stale: remark.stale, approved: remark.approved, file: remark.file, at: String(remark.at),
+      }))
+      : [];
+    return { frontmatter: { ...frontmatter, title: frontmatter.title || node.title }, body: content.trim(), remarks };
   }
 
   async saveNode(id: string, frontmatter: NodeFrontmatter, body: string): Promise<void> {

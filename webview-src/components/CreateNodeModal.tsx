@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { NodeType } from '../../src/models/types';
+import { DefinitionKind, NodeType } from '../../src/models/types';
 import { ResearchNode } from '../../src/models/types';
+import { DEFINITION_KIND_LIST } from '../../src/domain/nodeKinds';
 
 interface Props {
   allowedTypes: NodeType[];
   assets: ResearchNode[];
-  onConfirm: (nodeType: NodeType, title: string, targetAsset?: string) => void;
+  onConfirm: (nodeType: NodeType, title: string, targetAsset?: string, definitionKind?: DefinitionKind) => void;
   onCancel: () => void;
 }
 
@@ -13,13 +14,14 @@ export function CreateNodeModal({ allowedTypes, assets, onConfirm, onCancel }: P
   const [nodeType, setNodeType] = useState<NodeType>(allowedTypes[0]);
   const [title, setTitle] = useState('');
   const [targetAsset, setTargetAsset] = useState('');
+  const [definitionKind, setDefinitionKind] = useState<DefinitionKind>('definition');
 
   const singleType = allowedTypes.length === 1;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (title.trim() && (nodeType !== 'plan' || targetAsset)) {
-      onConfirm(nodeType, title.trim(), nodeType === 'plan' ? targetAsset : undefined);
+      onConfirm(nodeType, title.trim(), nodeType === 'plan' ? targetAsset : undefined, nodeType === 'definition' ? definitionKind : undefined);
     }
   };
 
@@ -91,6 +93,16 @@ export function CreateNodeModal({ allowedTypes, assets, onConfirm, onCancel }: P
               }}
             />
           </div>
+
+          {nodeType === 'definition' && <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>Kind</label>
+            <select value={definitionKind} onChange={(e) => setDefinitionKind(e.target.value as DefinitionKind)} style={{ width: '100%', padding: '6px 10px' }}>
+              {DEFINITION_KIND_LIST.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+            <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
+              {definitionKind === 'assumption' ? 'A hypothesis results in part of the project take for granted; project-wide ones belong in project.md.' : definitionKind === 'convention' ? 'Notation or a normalization, with no mathematical content.' : 'A concept or notation results use.'}
+            </div>
+          </div>}
 
           {nodeType === 'plan' && <div style={{ marginBottom: 20 }}>
             <label style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>Target asset</label>

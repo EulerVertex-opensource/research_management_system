@@ -274,6 +274,9 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
     if (shellWrites && (under(target, shared.decisions, root) || under(target, shared.handoffs, root))) {
       return { deny: true, reason: `Research loop: ${target} is a shared decision or handoff record written only by the loop (${LOOP_COMMAND} park/unpark/handoff, or the researcher's answers).` };
     }
+    if (paths.remarks && under(target, paths.remarks, root) && (shellWrites || !isShell)) {
+      return { deny: true, reason: `Research loop: ${target} is a remark; write remarks only with ${LOOP_COMMAND} remark add|edit|archive (or add_remark), which check the target and stamp the version it was written for.` };
+    }
     if ((under(target, paths.assets, root) || under(target, paths.definitions, root)) && APPROVED.test(text)) {
       return { deny: true, reason: `Research loop: ${target} may not be set to status: approved by the agent. Leave it draft and call request_approval so the researcher can approve it.` };
     }
@@ -363,6 +366,7 @@ function teachingMayRun(call: { command: string; sub?: string }): boolean {
   if (['status', 'show', 'teach', 'library'].includes(call.command)) return true;
   if (call.command === 'search') return call.sub === 'status';
   if (call.command === 'idea') return call.sub === 'add';
+  if (call.command === 'remark') return ['add', 'edit', 'archive', 'list'].includes(call.sub ?? '');
   return false;
 }
 
@@ -378,16 +382,57 @@ function unattributedIdeas(input: HookInput): boolean {
   return adds > 0 && [...command.matchAll(/--origin[\s=]+["']?(?:agent|researcher)\b/g)].length < adds;
 }
 
+const commandOf = (input: HookInput) => { const args = input.tool_input ?? {}; return typeof args.command === 'string' ? args.command : Array.isArray(args.command) ? args.command.join(' ') : ''; };
+
+/** Where the remarks a call writes say they come from: add_remark's from, or each remark add|edit|archive's --from (undefined when one does not say). */
+function remarkSources(input: HookInput): Array<string | undefined> {
+  const args = input.tool_input ?? {};
+  if (/add_remark$/.test(input.tool_name ?? '')) return [typeof args.from === 'string' ? args.from : undefined];
+  const writes = loopCalls(input).filter((call) => call.command === 'remark' && call.sub !== 'list').length;
+  if (!writes) return [];
+  const said = [...commandOf(input).matchAll(/--from[\s=]+["']?([a-z]+)/g)].map((match) => match[1]);
+  return Array.from({ length: writes }, (_, index) => said[index]);
+}
+
+/** remark add calls (or add_remark) that do not say whose remark it is. */
+function unattributedRemarks(input: HookInput): boolean {
+  const args = input.tool_input ?? {};
+  if (/add_remark$/.test(input.tool_name ?? '')) return args.origin !== 'agent' && args.origin !== 'researcher';
+  const adds = loopCalls(input).filter((call) => call.command === 'remark' && call.sub === 'add').length;
+  return adds > 0 && [...commandOf(input).matchAll(/--origin[\s=]+["']?(?:agent|researcher)\b/g)].length < adds;
+}
+
+export const TEACHING_REMARK_REASON = 'This chat is the teaching chat: write remarks with from teaching (add_remark from: "teaching", or remark ... --from teaching), and say whose each one is (origin researcher when the researcher said it, even if you worded it; origin agent for your own explanation).';
+
 /** A teaching chat reads and explains; it never drives the loop or edits the project, and says whose each idea it records is. */
 export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
   const tool = (input.tool_name ?? '').toLowerCase();
   const refused = loopCalls(input).find((call) => !teachingMayRun(call));
   if (refused) return { deny: true, reason: `This chat is the teaching chat: it explains verified results and never drives the loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there.` };
   if (unattributedIdeas(input)) return { deny: true, reason: TEACHING_ORIGIN_REASON };
+  if (unattributedRemarks(input) || remarkSources(input).some((from) => from !== 'teaching')) return { deny: true, reason: TEACHING_REMARK_REASON };
   if (/shell|bash/.test(tool) || !/write|edit|patch|notebook/.test(tool)) return { deny: false };
   const inProject = targetsOf(input).filter((target) => !path.isAbsolute(target) || (root !== undefined && (target === root || target.startsWith(root + path.sep))));
-  if (inProject.length) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (${inProject[0]}). Record a doubt or idea with record_idea; changes are made in the loop's own chat.` };
+  if (inProject.length) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (${inProject[0]}). Record a doubt or idea with record_idea and an explanation with add_remark; changes are made in the loop's own chat.` };
   return { deny: false };
+}
+
+/** Stages that check work independently: the checker never sees remarks, which are explanations nobody checked. */
+const CHECKING_STAGES = new Set(['verify_proof', 'verify_counterexample', 'verify_construction']);
+
+/**
+ * Remark rules in the loop's own chat: its remarks say from loop (never posing
+ * as the teaching chat), and a checking stage reads no remarks at all.
+ */
+export function loopRemarkDecision(paths: ProjectPaths, input: HookInput, stage: string | undefined, root?: string): ToolDecision {
+  if (remarkSources(input).some((from) => from === 'teaching')) return { deny: true, reason: 'Research loop: remarks written in the loop\'s chat say from loop (add_remark from: "loop", or remark add --from loop); from teaching is the teaching chat\'s.' };
+  if (!stage || !CHECKING_STAGES.has(stage) || !paths.remarks) return { deny: false };
+  const tool = input.tool_input ?? {};
+  const named = ['file_path', 'path', 'pattern', 'glob'].map((key) => tool[key]).filter((value): value is string => typeof value === 'string');
+  const command = commandOf(input);
+  const readsRemarks = named.some((value) => under(value, paths.remarks, root) || value.includes(`${paths.remarks}/`) || value.endsWith(paths.remarks))
+    || (command && (command.includes(paths.remarks) || loopCalls(input).some((call) => call.command === 'remark')));
+  return readsRemarks ? { deny: true, reason: `Research loop: a checking stage does not read remarks (${paths.remarks}/). They are explanations nobody checked; check the proof against the statement and what it cites.` } : { deny: false };
 }
 
 /**

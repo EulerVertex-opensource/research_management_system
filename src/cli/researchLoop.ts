@@ -6,7 +6,7 @@ import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, isWaitingForHuman, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole } from '../services/ResearchLoopHooks';
+import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, loopRemarkDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole } from '../services/ResearchLoopHooks';
 import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
@@ -22,6 +22,7 @@ import { toIdeaKind } from '../domain/nodeKinds';
 import { vocabularyReminder } from '../domain/researcherText';
 import { LEVEL_LABEL, toLevel } from '../domain/understanding';
 import { Teaching } from '../services/Teaching';
+import { REMARK_FROM_LIST, RemarkFrom, remarkLabel } from '../domain/remarks';
 
 declare const __EXTENSION_VERSION__: string | undefined;
 const EXTENSION_VERSION = typeof __EXTENSION_VERSION__ === 'string' ? __EXTENSION_VERSION__ : undefined;
@@ -58,12 +59,16 @@ const USAGE = `Usage: research-loop <command> [options]
   teach list [--json]   (verified results, those new to the researcher first, each after what it rests on)
   teach pack <id>   (the material for teaching one verified result)
   teach mark <id> --level black_box|idea|full|none [--note "..."] --interactive   (the researcher, in their own terminal)
-  teach revise <id> --file <draft.md|->   (a rewording the researcher asked for: ## Proof with ## Changes, and/or ## Remarks; the loop checks and applies it)
+  teach revise <id> --file <draft.md|->   (a rewording the researcher asked for: ## Proof with ## Changes; the loop checks and applies it)
   teach style [--add "rule"]   (the project's proof style; --add after the researcher agreed to keep a rule)
   validate [--fix]
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
   idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk|conjecture] [--asset ID]... [--tag TAG]... [--origin agent|researcher]   (agent by default; researcher only for the researcher's own idea in their words)
+  remark add --target ID --title "..." --body "..." --origin researcher|agent --from teaching|loop|other [--anchor "step 3"] [--tag TAG]...   (an annotation on a result: an explanation for people, never a claim a result relies on)
+  remark edit <remarkId> [--title "..."] [--body "..."] [--anchor "..."] --from teaching|loop|other   (the loop edits only its own remarks)
+  remark archive <remarkId> --from teaching|loop|other
+  remark list [--target ID] [--all] [--json]
   idea resolve <ideaId> --by <decision, plan, or asset ID> [--note "..."]
   idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
   conjecture list [--json]   (conjectures ranked against the goals, best first)
@@ -288,9 +293,9 @@ async function noteSessionRole(root: string, core: ResearchLoopCore, event: stri
 }
 
 /** What happens to a rewording now, said so the teacher can tell the researcher; a rewording is applied only by a running loop. */
-function revisionNext(core: ResearchLoopCore, proof: boolean): string {
+function revisionNext(core: ResearchLoopCore): string {
   const state = core.current;
-  const applied = proof ? 'checks the reworded proof independently and, if it holds, puts it in place (the previous proof stays until then)' : 'adds the remarks';
+  const applied = 'checks the reworded proof independently and, if it holds, puts it in place (the previous proof stays until then)';
   if (!state || state.status === 'idle' || state.status === 'stopped') return `Nothing applies it yet: the research loop is not running. Tell the researcher to start it (Research Assistant: Start Research Loop, then /research-loop or $research-loop in a chat); the loop then ${applied}.`;
   if (state.status === 'paused') return `The research loop is paused. Tell the researcher to resume it (Research Assistant: Resume Research Loop); the loop then ${applied}.`;
   if (state.stage === 'waiting' || state.stage === 'ready') return `The loop is waiting. Tell the researcher to ask the agent in the loop's chat to continue; it then ${applied}.`;
@@ -367,8 +372,12 @@ async function runHook(event: string, args: Args): Promise<void> {
       return;
     }
     case 'PreToolUse': {
-      await note({ kind: 'active', sessionId: session, tool: toolPhase('start'), throttle: true });
       const paths = await loadProjectPaths(root);
+      const remarkRule = loopRemarkDecision(paths, input, state?.status === 'running' ? state.stage : undefined, root);
+      if (remarkRule.deny) { process.stdout.write(denyOutput(remarkRule.reason ?? 'Denied by the research loop.') + '\n'); return; }
+      // Read tools reach this hook only for the remark rule above.
+      if (/^(read|grep|glob)$/i.test(input.tool_name ?? '')) return;
+      await note({ kind: 'active', sessionId: session, tool: toolPhase('start'), throttle: true });
       const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
       if (decision.deny) { process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n'); return; }
       // The driver starts the next stage in a fresh chat once this one has grown large.
@@ -673,6 +682,37 @@ async function main(): Promise<void> {
       }
       throw new Error('idea add|convert|resolve');
     }
+    case 'remark': {
+      const from = (): RemarkFrom => {
+        const value = args.flags.from;
+        if (!(REMARK_FROM_LIST as readonly unknown[]).includes(value)) throw new Error(`--from must be one of ${REMARK_FROM_LIST.join(', ')}: where the remark is written.`);
+        return value as RemarkFrom;
+      };
+      const optional = (key: string) => typeof args.flags[key] === 'string' ? args.flags[key] as string : undefined;
+      if (sub === 'add') {
+        const origin = args.flags.origin;
+        if (origin !== 'agent' && origin !== 'researcher') throw new Error('--origin must be researcher or agent: whose remark it is.');
+        const remark = await core.addRemark({ target: text(args.flags.target, 'target'), title: text(args.flags.title, 'title'), body: text(args.flags.body, 'body'), origin, from: from(), anchor: optional('anchor'), tags: args.lists.tag ?? [] });
+        out(json ? { remarkId: remark.id, path: remark.file } : `Saved remark ${remark.id} on ${remark.target} (${remark.file}).`);
+        return;
+      }
+      if (sub === 'edit') {
+        const remark = await core.editRemark(text(third, 'remarkId'), { title: optional('title'), body: optional('body'), anchor: optional('anchor') }, from());
+        out(json ? { remarkId: remark.id } : `Updated remark ${remark.id}.`);
+        return;
+      }
+      if (sub === 'archive') {
+        const remark = await core.archiveRemark(text(third, 'remarkId'), from());
+        out(json ? { remarkId: remark.id } : `Archived remark ${remark.id}.`);
+        return;
+      }
+      if (sub === 'list') {
+        const remarks = await core.remarks().list({ target: optional('target'), includeArchived: args.flags.all === true });
+        out(json ? { remarks } : remarks.length ? remarks.map((remark) => `${remark.id} on ${remark.target}${remark.anchor ? ` (${remark.anchor})` : ''}: ${remark.title} [${remarkLabel(remark, remark.stale)}]`).join('\n') : 'No remarks.');
+        return;
+      }
+      throw new Error('remark add|edit|archive|list');
+    }
     case 'conjecture': {
       if (sub === 'list') {
         const ranked = await core.conjectureList();
@@ -761,8 +801,7 @@ async function main(): Promise<void> {
         const source = text(args.flags.file, 'file');
         const draft = source === '-' ? await readStdin() : fs.readFileSync(path.resolve(source), 'utf8');
         const revision = await teaching.propose(id, draft, new Date().toISOString());
-        const what = [revision.proof ? 'the reworded proof' : '', revision.remarks !== undefined ? (revision.remarks ? 'the remarks' : 'removing the remarks') : ''].filter(Boolean).join(' and ');
-        out(json ? revision : `Saved ${what} for ${id}. ${revisionNext(core, Boolean(revision.proof))}`);
+        out(json ? revision : `Saved the reworded proof for ${id}. ${revisionNext(core)}`);
         return;
       }
       if (sub === 'style') {

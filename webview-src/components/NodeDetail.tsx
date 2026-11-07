@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { NodeFrontmatter, NodeType, NodeSource, LayoutMode, ResearchNode, PaperEntry, ResearchStatus, IdeaKind } from '../../src/models/types';
-import { ASSET_TYPE_LIST, IDEA_KIND_LIST, SOURCE_KIND_LIST, statusesFor } from '../../src/domain/nodeKinds';
+import { NodeFrontmatter, NodeType, NodeSource, LayoutMode, ResearchNode, PaperEntry, ResearchStatus, IdeaKind, DefinitionKind, RemarkView } from '../../src/models/types';
+import { ASSET_TYPE_LIST, DEFINITION_KIND_LIST, IDEA_KIND_LIST, SOURCE_KIND_LIST, statusesFor } from '../../src/domain/nodeKinds';
 import { hasSectionContent } from '../../src/domain/sections';
 import { reverseRelations } from '../../src/domain/relations';
 import { isCited, sourceKind } from '../../src/domain/schema';
@@ -14,6 +14,8 @@ interface Props {
   id: string;
   frontmatter: NodeFrontmatter;
   body: string;
+  /** Remarks on this result (annotations; not part of the node). */
+  remarks?: RemarkView[];
   layoutMode: LayoutMode;
   splitRatio: number;
   metadataHeight: number;
@@ -29,12 +31,17 @@ interface Props {
   onOpenPdf: (slug: string) => void;
   onNavigateNode: (node: ResearchNode) => void;
   onOpenNodeLink: (href: string) => boolean;
+  /** Open a project file (a remark) in the editor. */
+  onOpenFile?: (filePath: string) => void;
+  /** The researcher approves a remark's text for the paper. */
+  onApproveRemark?: (remarkId: string) => void;
 }
 
 export function NodeDetail({
   id,
   frontmatter: initialFm,
   body: initialBody,
+  remarks = [],
   layoutMode,
   splitRatio,
   metadataHeight,
@@ -50,6 +57,8 @@ export function NodeDetail({
   onOpenPdf,
   onNavigateNode,
   onOpenNodeLink,
+  onOpenFile,
+  onApproveRemark,
 }: Props) {
   const isDefinition = initialFm.type === 'definition';
   // Project and library nodes alike, so a project result can pick a library dependency.
@@ -207,6 +216,12 @@ export function NodeDetail({
               {statusesFor(fm.type).map((s) => <option key={s} value={s} disabled={s !== fm.status && statusBlocked(s)}>{s}</option>)}
             </select>
           </div>
+          {isDefinition && <div style={{ flex: 1 }}>
+            <label style={lbl}>Kind</label>
+            <select value={fm.definition_kind ?? 'definition'} onChange={(e) => update('definition_kind', e.target.value as DefinitionKind)} style={inp}>
+              {DEFINITION_KIND_LIST.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+          </div>}
           {isIdea && <div style={{ flex: 1 }}>
             <label style={lbl}>Kind</label>
             <select value={fm.idea_kind ?? 'approach'} onChange={(e) => update('idea_kind', e.target.value as IdeaKind)} style={inp}>
@@ -335,6 +350,27 @@ export function NodeDetail({
             <div style={{ fontSize: 11, opacity: 0.7, marginTop: 6 }}>Add a Failure section with the obstruction before choosing failed. After putting a successful proof in the asset, add an Outcome section saying where it lives, then choose succeeded.</div>
           </div>
         )}
+
+        {/* Remarks: annotations stored in their own files, written from the teaching chat or by the loop; not part of this node. */}
+        {remarks.length > 0 && <div style={{ marginTop: 10 }}>
+          <label style={lbl}>Remarks ({remarks.length})</label>
+          {remarks.map((remark) => (
+            <div key={remark.id} style={{ borderLeft: '2px solid var(--vscode-textBlockQuote-border, #888)', padding: '4px 8px', margin: '4px 0', fontSize: 12 }}>
+              <div style={{ fontWeight: 600 }}>
+                {remark.title}{remark.anchor ? <span style={{ fontWeight: 400, opacity: 0.7 }}> · {remark.anchor}</span> : null}
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.7 }}>
+                {remark.origin === 'researcher' ? "The researcher's" : remark.from === 'loop' ? "The loop's (not checked)" : "An agent's (not checked)"}
+                {remark.stale ? ' · written for an earlier version' : ''}
+                {' · '}<a href={remark.file} onClick={(event) => { event.preventDefault(); onOpenFile?.(remark.file); }}>file</a>
+                {' · '}{remark.approved
+                  ? <span title="You approved this text; the paper may present it as a remark.">approved for the paper</span>
+                  : <a href="#" title="Agree that this text, as written, may appear in the paper as a remark. An edit needs a new approval." onClick={(event) => { event.preventDefault(); onApproveRemark?.(remark.id); }}>approve for the paper</a>}
+              </div>
+              <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{remark.body}</div>
+            </div>
+          ))}
+        </div>}
       </div>
 
       {/* ── Horizontal splitter ── */}

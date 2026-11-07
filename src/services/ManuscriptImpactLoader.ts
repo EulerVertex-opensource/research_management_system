@@ -13,7 +13,7 @@ import { SectionBrief, WritingSection, parseSectionBrief, parseWritingOutline } 
  * manuscript CLI and the research loop (extension, CLI, hooks) share one reader.
  */
 
-export type ManuscriptPaths = Pick<ProjectPaths, 'researchRoot' | 'projectMd' | 'assets' | 'definitions' | 'library' | 'sections' | 'writingRoot' | 'writingOutline' | 'writingSections'>;
+export type ManuscriptPaths = Pick<ProjectPaths, 'researchRoot' | 'projectMd' | 'assets' | 'definitions' | 'library' | 'sections' | 'writingRoot' | 'writingOutline' | 'writingSections'> & Partial<Pick<ProjectPaths, 'remarks'>>;
 
 export const bindingsFolder = (paths: ManuscriptPaths) => path.posix.join(paths.writingRoot, 'bindings');
 export const bindingPath = (paths: ManuscriptPaths, id: string) => `${bindingsFolder(paths)}/${id}.json`;
@@ -31,6 +31,18 @@ export async function loadImpactNodes(files: LoopFiles, paths: ManuscriptPaths):
       const id = path.posix.basename(file, '.md');
       const record = approvals.find((entry) => entry.kind === kind && entry.target === id);
       nodes.set(id, { id, kind, raw, data, approved: data.status === 'approved' && (!record || record.digest === researchDigest(raw, kind)) });
+    }
+  }
+  // Remarks a brief may present: approved only with a record for this exact text (remarks carry no status: approved).
+  if (paths.remarks) {
+    for (const file of await files.listFiles(paths.remarks, '.md')) {
+      const raw = await files.readFile(file).catch(() => '');
+      let data: Record<string, any>;
+      try { data = parseMarkdown(raw).data; } catch { continue; }
+      if (data.type !== 'remark') continue;
+      const id = path.posix.basename(file, '.md');
+      const record = approvals.find((entry) => entry.kind === 'remark' && entry.target === id);
+      nodes.set(id, { id, kind: 'remark', raw, data, approved: data.status === 'active' && Boolean(record) && record!.digest === researchDigest(raw, 'asset') });
     }
   }
   return nodes;

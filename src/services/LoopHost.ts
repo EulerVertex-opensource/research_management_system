@@ -284,6 +284,12 @@ export class LoopHost implements vscode.Disposable {
     if (recorded) this.output.appendLine(`[loop] Recorded ${source} approval of ${id}`);
   }
 
+  /** The researcher clicked "Approve for the paper" on a remark in the dashboard. */
+  async approveRemark(id: string): Promise<void> {
+    await this.withCore((core) => core.approveRemark(id, 'dashboard'));
+    this.output.appendLine(`[loop] Recorded dashboard approval of remark ${id} for the paper`);
+  }
+
   async reconcile(id: string): Promise<void> {
     const reverted = await this.withCore((core) => core.reconcile(id)).catch(() => [] as string[]);
     if (reverted.length) {

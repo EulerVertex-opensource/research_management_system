@@ -1,5 +1,5 @@
 import React, { useReducer, useCallback, useEffect, useRef, useState } from 'react';
-import { ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from '../src/models/types';
+import { DefinitionKind, RemarkView, ResearchNode, NodeType, NodeFrontmatter, LayoutMode, UIState, DEFAULT_UI_STATE, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from '../src/models/types';
 import { ExtensionMessage } from '../src/models/messages';
 import { useExtension } from './hooks/useExtension';
 import { Sidebar, SidebarView } from './components/Sidebar';
@@ -28,6 +28,7 @@ import type { SyncBadge, SyncNotice } from '../src/models/sync';
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
   body: string;
+  remarks: RemarkView[];
 }
 
 interface State {
@@ -59,7 +60,7 @@ interface State {
 type Action =
   | { type: 'INIT'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'NODES_UPDATED'; nodes: ResearchNode[] }
-  | { type: 'NODE_DETAIL'; id: string; frontmatter: NodeFrontmatter; body: string }
+  | { type: 'NODE_DETAIL'; id: string; frontmatter: NodeFrontmatter; body: string; remarks: RemarkView[] }
   | { type: 'PROJECT_MD'; content: string; summary?: ProjectSummary }
   | { type: 'PAPERS_DATA'; papers: PaperEntry[] }
   | { type: 'SELECT_NODE'; id: string }
@@ -96,7 +97,7 @@ function reducer(state: State, action: Action): State {
     case 'NODES_UPDATED':
       return { ...state, nodes: action.nodes };
     case 'NODE_DETAIL':
-      return { ...state, nodeDetails: { ...state.nodeDetails, [action.id]: { frontmatter: action.frontmatter, body: action.body } } };
+      return { ...state, nodeDetails: { ...state.nodeDetails, [action.id]: { frontmatter: action.frontmatter, body: action.body, remarks: action.remarks } } };
     case 'PROJECT_MD':
       return { ...state, projectMd: action.content, projectSummary: action.summary ?? null };
     case 'PAPERS_DATA':
@@ -207,7 +208,7 @@ export function App() {
         dispatch({ type: 'NODES_UPDATED', nodes: msg.nodes });
         break;
       case 'nodeDetail':
-        dispatch({ type: 'NODE_DETAIL', id: msg.id, frontmatter: msg.frontmatter, body: msg.body });
+        dispatch({ type: 'NODE_DETAIL', id: msg.id, frontmatter: msg.frontmatter, body: msg.body, remarks: msg.remarks ?? [] });
         break;
       case 'projectMd':
         dispatch({ type: 'PROJECT_MD', content: msg.content, summary: msg.summary });
@@ -345,8 +346,8 @@ export function App() {
     send({ type: 'saveProjectMd', content });
   };
 
-  const handleCreateNode = (nodeType: NodeType, title: string, targetAsset?: string) => {
-    send({ type: 'createNode', nodeType, title, targetAsset });
+  const handleCreateNode = (nodeType: NodeType, title: string, targetAsset?: string, definitionKind?: DefinitionKind) => {
+    send({ type: 'createNode', nodeType, title, targetAsset, definitionKind });
     dispatch({ type: 'TOGGLE_CREATE_MODAL' });
   };
 
@@ -602,6 +603,7 @@ export function App() {
                 id={selectedNode.id}
                 frontmatter={selectedDetail.frontmatter}
                 body={selectedDetail.body}
+                remarks={selectedDetail.remarks}
                 layoutMode={layoutMode}
                 splitRatio={splitRatio}
                 metadataHeight={metadataHeight}
@@ -617,6 +619,8 @@ export function App() {
                 onOpenPdf={handleOpenPdf}
                 onNavigateNode={handleNavigateNode}
                 onOpenNodeLink={(href) => handleOpenResearchLink(selectedNode.filePath, href)}
+                onOpenFile={(filePath) => send({ type: 'openFile', filePath })}
+                onApproveRemark={(remarkId) => send({ type: 'approveRemark', id: remarkId, nodeId: selectedNode.id })}
               />
             ) : selectedNode ? (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Loading…</div>

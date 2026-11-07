@@ -180,7 +180,8 @@ export interface LoopState {
 }
 
 export interface ApprovalRecord {
-  kind: 'project' | 'asset' | 'definition' | 'specification'; target: string; digest: string; approvedAt: string; source?: string;
+  /** `remark`: the researcher agreed a remark may appear in the paper; it covers the remark's text, not any result. */
+  kind: 'project' | 'asset' | 'definition' | 'specification' | 'remark'; target: string; digest: string; approvedAt: string; source?: string;
   statement?: string; performed_by?: string; base_commit?: string; extension_version?: string;
 }
 export interface ApprovalFile { version: 1; records: ApprovalRecord[] }
@@ -203,7 +204,7 @@ export { researchDigest, statementDigest, proofDigest } from '../domain/digests'
 
 /** A specification approval covers the statement only, so writing the construction found later keeps it. */
 export function approvalDigest(raw: string, kind: ApprovalRecord['kind']): string {
-  return kind === 'specification' ? statementDigest(raw) : researchDigest(raw, kind);
+  return kind === 'specification' ? statementDigest(raw) : researchDigest(raw, kind === 'remark' ? 'asset' : kind);
 }
 
 export function isApproved(records: ApprovalRecord[], kind: ApprovalRecord['kind'], target: string, raw: string): boolean {

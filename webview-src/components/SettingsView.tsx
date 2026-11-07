@@ -20,7 +20,7 @@ interface Props {
 /** One entry per auto-approve rule; a Record so a new rule without a checkbox does not compile. */
 const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?: string }> = {
   proofs: { label: 'Proofs', hint: 'a proof a succeeded plan produced, over approved dependencies' },
-  supporting: { label: 'Supporting assets', hint: 'remarks and examples a required result uses' },
+  supporting: { label: 'Supporting assets', hint: 'examples a required result uses' },
   citations: { label: 'Citations & library', hint: 'results citing an indexed paper with a location, and library results' },
   definitions: { label: 'Definitions', hint: 'definitions the results use' },
   conjectures: { label: 'Conjecture statements', hint: 'conjectures to state in the paper, once a counterexample search found nothing' },

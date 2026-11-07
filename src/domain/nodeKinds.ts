@@ -4,12 +4,13 @@
  */
 
 /** Current on-disk schema; `research-maintenance migrate` upgrades older projects. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
-export const ASSET_TYPE_LIST = ['theorem', 'lemma', 'proposition', 'example', 'construction', 'remark', 'conjecture'] as const;
+/** Schema 3 retired `remark`: assumptions and conventions are definitions, explanations are remarks (domain/remarks.ts). */
+export const ASSET_TYPE_LIST = ['theorem', 'lemma', 'proposition', 'example', 'construction', 'conjecture'] as const;
 export type AssetType = (typeof ASSET_TYPE_LIST)[number];
 export const ASSET_TYPES: ReadonlySet<string> = new Set(ASSET_TYPE_LIST);
-/** Asset types the loop falsifies and proves; examples and remarks are not proved. */
+/** Asset types the loop falsifies and proves; examples are not proved. */
 export const PROVABLE_TYPES: ReadonlySet<string> = new Set(['theorem', 'lemma', 'proposition', 'construction']);
 /**
  * A conjecture is a precise statement the project believes but has not committed to prove: it
@@ -21,6 +22,26 @@ export const CONJECTURE_TYPE = 'conjecture';
 export const PROMOTED_TYPES = ['theorem', 'lemma', 'proposition'] as const;
 
 export const NODE_TYPE_LIST = [...ASSET_TYPE_LIST, 'definition', 'idea', 'plan'] as const;
+
+/**
+ * What a definition node fixes. All three are agreed on, never proved, and the results that rely
+ * on one list it in `uses_definitions`, so a change makes them stale. `definition` introduces a
+ * concept or notation; `assumption` is a hypothesis results take for granted in part of the
+ * project ("from here on, $\Omega$ is bounded"); `convention` fixes notation or a normalization
+ * without mathematical content. Assumptions for the whole project stay in project.md.
+ */
+export const DEFINITION_KIND_LIST = ['definition', 'assumption', 'convention'] as const;
+export type DefinitionKind = (typeof DEFINITION_KIND_LIST)[number];
+/** A definition node's kind; absent means `definition`. */
+export function definitionKindOf(data: { definition_kind?: unknown } | undefined): DefinitionKind {
+  const value = data?.definition_kind;
+  return (DEFINITION_KIND_LIST as readonly unknown[]).includes(value) ? value as DefinitionKind : 'definition';
+}
+/** Title prefix per kind: `Definition (concept)`, `Assumption (bounded domain)`, `Convention (constants)`. */
+export const DEFINITION_TITLE_PREFIX: Readonly<Record<DefinitionKind, string>> = { definition: 'Definition', assumption: 'Assumption', convention: 'Convention' };
+/** A definition node's title from its concept, and the concept back from a title of any kind. */
+export const definitionTitle = (kind: DefinitionKind, concept: string) => `${DEFINITION_TITLE_PREFIX[kind]} (${concept})`;
+export const definitionConcept = (title: string) => title.replace(/^(?:Definition|Assumption|Convention) \((.*)\)$/, '$1');
 export type NodeType = (typeof NODE_TYPE_LIST)[number];
 
 /** Review and lifecycle status of assets and definitions. */

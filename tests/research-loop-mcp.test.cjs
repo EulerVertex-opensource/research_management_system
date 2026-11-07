@@ -42,7 +42,7 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
     const init = await c.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
     assert.equal(init.result.protocolVersion, '2025-03-26');
     const tools = (await c.request('tools/list', {})).result.tools.map((tool) => tool.name);
-    assert.deepEqual(tools, ['ask_researcher', 'request_approval', 'await_answer', 'record_idea', 'mark_understood', 'loop_status']);
+    assert.deepEqual(tools, ['ask_researcher', 'request_approval', 'await_answer', 'record_idea', 'add_remark', 'mark_understood', 'loop_status']);
     assert.deepEqual(await c.call('ask_researcher', { question: 'Goal?', kind: 'goals' }), { answered: false, reason: 'extension not running' });
     const idea = await c.call('record_idea', { title: 'Hunch', body: 'Try compactness.' });
     assert.equal(idea.ok, true);
@@ -50,6 +50,15 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
     // The teaching chat records the researcher's own doubts as theirs.
     const doubt = await c.call('record_idea', { title: 'Step 4?', body: 'I do not see why the constant is uniform.', kind: 'risk', origin: 'researcher' });
     assert.match(fs.readFileSync(path.join(p.root, doubt.path), 'utf8'), /origin: researcher/);
+    // A remark is saved at once as its own file, on an existing result; the loop may write one only while it works on that result.
+    p.write('research/assets/key_lemma.md', '---\ntype: lemma\ntitle: Key lemma\nstatus: draft\nsource:\n  kind: original\n---\n\nA statement.\n\n## Proof\n\nA proof.\n');
+    const remark = await c.call('add_remark', { target: 'key_lemma', title: 'Why it works', body: 'Compactness does the work.', origin: 'researcher', from: 'teaching', anchor: 'step 2' });
+    assert.equal(remark.ok, true);
+    const saved = fs.readFileSync(path.join(p.root, remark.path), 'utf8');
+    assert.match(saved, /type: remark/); assert.match(saved, /target: key_lemma/); assert.match(saved, /origin: researcher/); assert.match(saved, /from: teaching/); assert.match(saved, /target_digest: /);
+    assert.equal(fs.readFileSync(path.join(p.root, 'research/assets/key_lemma.md'), 'utf8').includes('Compactness'), false, 'the result file is untouched');
+    const fromIdleLoop = await c.request('tools/call', { name: 'add_remark', arguments: { target: 'key_lemma', title: 't', body: 'b', origin: 'agent', from: 'loop' } });
+    assert.match(JSON.stringify(fromIdleLoop), /only while it works on a result/);
     // Without VS Code nothing is marked; the researcher is told how to do it themselves.
     const mark = await c.call('mark_understood', { target: 'key_lemma', suggested: 'idea' });
     assert.equal(mark.answered, false);
