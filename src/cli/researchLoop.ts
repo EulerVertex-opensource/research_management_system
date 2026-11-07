@@ -164,7 +164,7 @@ function confirmOnTty(text: string, word = 'publish', elsewhere = 'run sync publ
 }
 
 /** Told to every chat on the project, so the results it names in chat open in the dashboard when clicked (see dashboardLinkPath). */
-const LINK_HINT = `When you name a result, definition, plan, or idea in chat, write its title as a dashboard link, which opens its page in the Research Assistant dashboard: [Title](${dashboardLinkPath('<id>')}), with exactly this relative path (not an absolute one, not vscode://). Link the research file itself only when the researcher wants the raw file.`;
+const LINK_HINT = `When you name a result, definition, plan, or idea in chat, write its title as a dashboard link, which opens its page in the Research Assistant dashboard: [Title](${dashboardLinkPath('<id>')}), with exactly this relative path (not an absolute one, not vscode://). For a remark, copy the link add_remark or remark add|list returns (it opens the page of the result the remark is on). Link the research file itself only when the researcher wants the raw file.`;
 
 /** Ask the researcher in VS Code through the extension bridge; undefined when the extension is not running. */
 async function confirmInExtension(root: string, text: string): Promise<boolean | undefined> {
@@ -693,7 +693,7 @@ async function main(): Promise<void> {
         const origin = args.flags.origin;
         if (origin !== 'agent' && origin !== 'researcher') throw new Error('--origin must be researcher or agent: whose remark it is.');
         const remark = await core.addRemark({ target: text(args.flags.target, 'target'), title: text(args.flags.title, 'title'), body: text(args.flags.body, 'body'), origin, from: from(), anchor: optional('anchor'), tags: args.lists.tag ?? [] });
-        out(json ? { remarkId: remark.id, path: remark.file } : `Saved remark ${remark.id} on ${remark.target} (${remark.file}).`);
+        out(json ? { remarkId: remark.id, path: remark.file, link: remark.link } : `Saved remark ${remark.id} on ${remark.target} (${remark.file}). Link it in chat as ${remark.link}; it opens the result's page in the dashboard, where the remark is listed.`);
         return;
       }
       if (sub === 'edit') {
@@ -707,8 +707,9 @@ async function main(): Promise<void> {
         return;
       }
       if (sub === 'list') {
-        const remarks = await core.remarks().list({ target: optional('target'), includeArchived: args.flags.all === true });
-        out(json ? { remarks } : remarks.length ? remarks.map((remark) => `${remark.id} on ${remark.target}${remark.anchor ? ` (${remark.anchor})` : ''}: ${remark.title} [${remarkLabel(remark, remark.stale)}]`).join('\n') : 'No remarks.');
+        const service = core.remarks();
+        const remarks = await Promise.all((await service.list({ target: optional('target'), includeArchived: args.flags.all === true })).map(async (remark) => ({ ...remark, link: await service.link(remark) })));
+        out(json ? { remarks } : remarks.length ? remarks.map((remark) => `${remark.id} on ${remark.target}${remark.anchor ? ` (${remark.anchor})` : ''}: ${remark.link} [${remarkLabel(remark, remark.stale)}]`).join('\n') : 'No remarks.');
         return;
       }
       throw new Error('remark add|edit|archive|list');

@@ -223,8 +223,8 @@ export class Teaching {
     const planLink = (plan: Node) => `- ${this.reference(plan.id, `${String(plan.data.title ?? plan.id)} (${plan.data.status} plan)`, plan.file)}`;
     blocks.push(['## Links for the researcher', nodeLink(id), ...[...new Set([...prerequisites, ...adapts, ...holdsUp])].map(nodeLink), ...(proofPlan ? [planLink(proofPlan)] : []), ...failed.map(planLink),
       ...ideas.map((idea) => `- ${this.reference(idea.id, idea.title, `${this.paths.ideas}/${idea.id}.md`)}`),
-      // A remark is no dashboard node: it shows under its result there, so link the file itself.
-      ...remarks.map((remark) => `- Remark: ${remark.title} (file: [${remark.file}](${remark.file}))`)].join('\n'));
+      // A remark has no page of its own: its link opens the result's page, where it is listed.
+      ...remarks.map((remark) => `- Remark: ${this.reference(remark.id, remark.title, remark.file)}`)].join('\n'));
     await this.flushLinks();
     return blocks.filter(Boolean).join('\n\n') + '\n';
   }

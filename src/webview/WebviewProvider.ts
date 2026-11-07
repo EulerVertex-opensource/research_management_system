@@ -85,7 +85,12 @@ export class WebviewProvider {
   private async followDashboardLink(uri: vscode.Uri): Promise<void> {
     const folder = vscode.Uri.joinPath(this.fileService.rootUri, DASHBOARD_LINKS_DIR).fsPath + path.sep;
     if (uri.scheme !== 'file' || !uri.fsPath.startsWith(folder) || !uri.fsPath.endsWith('.md')) return;
-    const id = path.basename(uri.fsPath, '.md');
+    let id = path.basename(uri.fsPath, '.md');
+    // A remark has no page of its own: open the result it is on, where the dashboard lists it.
+    if (id.startsWith('remark_') && this.paths) {
+      const target = await this.fileService.readFile(`${this.paths.remarks}/${id}.md`).then((raw) => /^target:\s*['"]?([a-z][a-z0-9_]*)/m.exec(raw)?.[1]).catch(() => undefined);
+      if (target) id = target;
+    }
     const tabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs).filter((tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === uri.fsPath);
     await vscode.window.tabGroups.close(tabs).then(undefined, () => undefined);
     await this.showNode(id);

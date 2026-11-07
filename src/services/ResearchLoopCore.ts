@@ -1421,11 +1421,13 @@ export class ResearchLoopCore {
   remarks(): Remarks { return new Remarks(this.files, this.paths); }
 
   /** Add a remark; one the loop writes must be on the result it is working on. */
-  async addRemark(input: RemarkInput): Promise<Remark> {
+  /** Add a remark; one the loop writes must be on the result it is working on. `link` is the chat link to it (it opens the result's dashboard page). */
+  async addRemark(input: RemarkInput): Promise<Remark & { link: string }> {
     const state = this.state;
-    const remark = await this.remarks().add(input, { at: this.now(), loop: { running: state?.status === 'running', assetId: state?.current.assetId, stageStartedAt: state?.current.stageStartedAt } });
+    const remarks = this.remarks();
+    const remark = await remarks.add(input, { at: this.now(), loop: { running: state?.status === 'running', assetId: state?.current.assetId, stageStartedAt: state?.current.stageStartedAt } });
     await this.event('remark_added', { assetId: input.target, remarkId: remark.id, origin: input.origin, from: input.from });
-    return remark;
+    return { ...remark, link: await remarks.link(remark) };
   }
 
   async editRemark(id: string, changes: { title?: string; body?: string; anchor?: string }, by: RemarkFrom): Promise<Remark> {

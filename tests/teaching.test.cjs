@@ -374,6 +374,9 @@ test('a remark is saved at once in its own file, touches no approval, and shows 
   assert.equal(matter(f.map.get(LEMMA)).data.status, 'approved');
   assert.deepEqual((await f.core.validateWorkspace()).problems, []);
   assert.match(await f.teaching.packText('key_lemma'), /## Remarks on it \(explanations, not part of the proof; no check covers them\)\n\n### A mirror \(remark_[0-9a-f]+, at step 1; the researcher's\)\n\nThink of it as a mirror\./);
+  assert.equal(remark.link, `[A mirror](.research-assistant-loop/open/${remark.id}.md)`);
+  assert.ok(f.map.has(`.research-assistant-loop/open/${remark.id}.md`), 'a chat link to the remark opens');
+  assert.match(await f.teaching.packText('key_lemma'), new RegExp(`- Remark: \\[A mirror\\]\\(\\.research-assistant-loop/open/${remark.id}\\.md\\) \\(file: \\[research/remarks/${remark.id}\\.md\\]`));
   await assert.rejects(f.core.addRemark({ target: 'nothing', title: 't', body: 'b', origin: 'agent', from: 'teaching' }), /No asset or definition named nothing/);
   // The loop writes remarks only on its current result, at most two per stage; it never edits the researcher's.
   await assert.rejects(f.core.addRemark({ target: 'key_lemma', title: 't', body: 'b', origin: 'agent', from: 'loop' }), /only while it works on a result|only on the result it is working on/);

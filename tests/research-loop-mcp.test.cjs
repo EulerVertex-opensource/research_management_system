@@ -54,6 +54,8 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
     p.write('research/assets/key_lemma.md', '---\ntype: lemma\ntitle: Key lemma\nstatus: draft\nsource:\n  kind: original\n---\n\nA statement.\n\n## Proof\n\nA proof.\n');
     const remark = await c.call('add_remark', { target: 'key_lemma', title: 'Why it works', body: 'Compactness does the work.', origin: 'researcher', from: 'teaching', anchor: 'step 2' });
     assert.equal(remark.ok, true);
+    assert.equal(remark.link, `[Why it works](.research-assistant-loop/open/${remark.remark_id}.md)`);
+    assert.match(fs.readFileSync(path.join(p.root, `.research-assistant-loop/open/${remark.remark_id}.md`), 'utf8'), new RegExp(`^# Remark: Why it works\n[\\s\\S]*${remark.path}`), 'the link file the chat link points to exists');
     const saved = fs.readFileSync(path.join(p.root, remark.path), 'utf8');
     assert.match(saved, /type: remark/); assert.match(saved, /target: key_lemma/); assert.match(saved, /origin: researcher/); assert.match(saved, /from: teaching/); assert.match(saved, /target_digest: /);
     assert.equal(fs.readFileSync(path.join(p.root, 'research/assets/key_lemma.md'), 'utf8').includes('Compactness'), false, 'the result file is untouched');

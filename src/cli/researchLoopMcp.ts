@@ -92,7 +92,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
     if (args.origin !== 'researcher' && args.origin !== 'agent') throw new Error('origin must be researcher or agent: whose remark it is.');
     if (args.from !== 'teaching' && args.from !== 'loop') throw new Error('from must be teaching or loop.');
     const remark = await core.addRemark({ target: String(args.target ?? ''), title: String(args.title ?? ''), body: String(args.body ?? ''), anchor: typeof args.anchor === 'string' ? args.anchor : undefined, origin: args.origin, from: args.from, tags: Array.isArray(args.tags) ? args.tags.map(String) : [] });
-    return { ok: true, remark_id: remark.id, path: remark.file };
+    return { ok: true, remark_id: remark.id, path: remark.file, link: remark.link, note: 'Name the remark in chat with this link; it opens the page of the result it is on, where the remark is listed.' };
   }
   if (name === 'record_idea') {
     const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];

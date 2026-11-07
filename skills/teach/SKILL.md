@@ -93,6 +93,7 @@ The researcher wants to read the files themselves. `teach list` gives each resul
 
 - The first time you name a result, definition, plan, or doubt in a reply, write its title as that dashboard link, copied exactly from the list or pack, e.g. `[Key lemma](.research-assistant-loop/open/key_lemma.md)`. Keep the relative path: never make it absolute, and never use `vscode://`, which agent chats do not open.
 - When you point to a step, link the result and say which step ("step 3 of the [Key lemma](…)").
+- A remark has no page of its own. Name it with the `link` that `add_remark` (or `remark add`, `remark list`) returns, or the one in the pack's links, e.g. `[Why reflexivity](.research-assistant-loop/open/remark_1a2b3c.md)`: it opens the page of the result the remark is on, where the remark is listed. Never make up a link for a remark; the remark file itself is `research/remarks/<remark id>.md`.
 - Give the research file's own link only when the researcher wants the raw file. A research file open in the editor also has a **Show in Dashboard** button (the book icon in the editor title).
 
 ## Writing

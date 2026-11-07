@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
-import { LoopFiles, isApproved } from './ResearchLoopModel';
+import { LoopFiles, dashboardLinkPath, isApproved, writeDashboardLinks } from './ResearchLoopModel';
 import { readApprovals } from './ApprovalStore';
 import { findNodeFile } from '../domain/registry';
 import {
@@ -138,6 +138,16 @@ export class Remarks {
     const next = { ...data, status: 'archived', archived_at: at } as RemarkData;
     await this.write(id, next, body);
     return { ...next, id, body, file: this.file(id) };
+  }
+
+  /**
+   * A Markdown link for chat replies: clicking it opens the page of the result
+   * the remark is on, in the dashboard, where the remark is listed. Writes the
+   * small link file it points to (see dashboardLinkPath).
+   */
+  async link(remark: Pick<Remark, 'id' | 'title' | 'file'>): Promise<string> {
+    await writeDashboardLinks(this.files, [{ id: remark.id, title: `Remark: ${remark.title}`, file: remark.file }]);
+    return `[${remark.title.replace(/[[\]]/g, '')}](${dashboardLinkPath(remark.id)})`;
   }
 
   /** Every problem with the remark files, given all asset and definition IDs. */
