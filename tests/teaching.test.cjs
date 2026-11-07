@@ -15,7 +15,7 @@ const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
 const { Teaching } = load('../src/services/Teaching.ts');
 const { markFor, studyItems, understandingState, UNDERSTANDING_PATH } = load('../src/domain/understanding.ts');
 const { TEACH_PROMPT_PATTERN, teachPrompt } = load('../src/domain/understandingLevels.ts');
-const { loopRemarkDecision, parseSessionRoles, preToolUseDecision, roleSignal, sessionRole, teachingToolDecision, withSessionRole } = load('../src/services/ResearchLoopHooks.ts');
+const { loopRemarkDecision, nextSessionRole, parseSessionRoles, preToolUseDecision, roleSignal, sessionRole, teachingToolDecision, withSessionRole, writingToolDecision } = load('../src/services/ResearchLoopHooks.ts');
 
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', remarks: 'research/remarks', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
 const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n    role: the central claim\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n\n## Background\n\nNone.\n';
@@ -224,6 +224,41 @@ test('a chat that names the teach skill is a teaching chat; one that has driven 
   assert.equal(sessionRole(parseSessionRoles(JSON.stringify(roles)), 's2'), 'teach');
 });
 
+test('a chat that names a manuscript skill is a writing chat; teaching and writing switch only on the researcher\'s own prompt', () => {
+  const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
+  for (const prompt of ['/draft-latex intro', '$plan-manuscript', 'Use the plan-manuscript skill to place main_theorem', 'run the revise-manuscript-prose skill on section 2', '/check-notation']) {
+    assert.equal(roleSignal('UserPromptSubmit', { prompt }, TEACH_PROMPT_PATTERN), 'write', prompt);
+  }
+  assert.equal(roleSignal('UserPromptSubmit', { prompt: 'how is the draft going?' }, TEACH_PROMPT_PATTERN), undefined);
+  assert.equal(roleSignal('UserPromptSubmit', { prompt: 'Continue the research loop: run research-loop next and follow it.' }, TEACH_PROMPT_PATTERN), 'drive');
+  assert.equal(roleSignal('PreToolUse', bash('node .agents/skills/draft-latex/scripts/manuscript-writing.cjs impact'), TEACH_PROMPT_PATTERN), 'write');
+  assert.equal(roleSignal('PreToolUse', { tool_name: 'Bash', tool_input: { command: ['bash', '-lc', 'node .agents/skills/research-loop/scripts/research-loop.cjs next'] } }, TEACH_PROMPT_PATTERN), 'drive');
+  // A driver stays the driver; a chat beside the loop never becomes one.
+  assert.equal(nextSessionRole('drive', 'write', true), undefined);
+  assert.equal(nextSessionRole('write', 'drive', true), undefined);
+  assert.equal(nextSessionRole('teach', 'drive', false), undefined);
+  assert.equal(nextSessionRole(undefined, 'write', false), 'write');
+  assert.equal(nextSessionRole(undefined, 'drive', false), 'drive');
+  // The researcher switches a teaching chat to writing and back; the agent running a preview does not.
+  assert.equal(nextSessionRole('teach', 'write', true), 'write');
+  assert.equal(nextSessionRole('write', 'teach', true), 'teach');
+  assert.equal(nextSessionRole('teach', 'write', false), undefined);
+  assert.equal(nextSessionRole('write', 'teach', false), undefined);
+  let roles = withSessionRole(parseSessionRoles(''), 'teach', 's1', 'now');
+  roles = withSessionRole(roles, 'write', 's1', 'later');
+  assert.equal(sessionRole(roles, 's1'), 'write');
+  assert.equal(roles.teach.s1, undefined, 'a chat is teaching or writing, not both');
+  assert.equal(sessionRole(withSessionRole(roles, 'teach', 's1', 'again'), 's1'), 'teach');
+  // A writing chat never drives the loop, but reads it and records what the paper needs.
+  const loop = 'node .agents/skills/research-loop/scripts/research-loop.cjs';
+  for (const command of ['next', 'report proved --summary x', 'resume', 'pause', 'park a --reason x', 'focus a', 'search request a', 'idea convert idea_1 --asset a', 'budget allocate a 2 --reason x']) {
+    assert.match(writingToolDecision(bash(`${loop} ${command}`)).reason ?? '', /writes the manuscript/, command);
+  }
+  for (const command of ['status --brief', 'show main_theorem', 'remark list --target a', 'idea add --title t --body b --kind question', 'teach list', 'sync status']) {
+    assert.equal(writingToolDecision(bash(`${loop} ${command}`)).deny, false, command);
+  }
+});
+
 test('a teaching chat may read and record doubts, but not drive the loop or edit the project', () => {
   const root = '/work/project';
   const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
@@ -235,6 +270,29 @@ test('a teaching chat may read and record doubts, but not drive the loop or edit
     assert.match(teachingToolDecision(paths, bash(`${loop} ${command}`), root).reason ?? '', /teaching chat/, command);
   }
   assert.equal(teachingToolDecision(paths, { tool_name: 'Edit', tool_input: { file_path: `${root}/research/assets/key_lemma.md` } }, root).deny, true);
+  // The manuscript script previews and reports freely, but never writes from the teaching chat.
+  const manuscript = 'node .agents/skills/draft-latex/scripts/manuscript-writing.cjs';
+  for (const command of ['impact', 'impact intro --json', 'prepare intro --preview', 'prepare intro', 'lock intro --preview', 'sync --preview', 'adopt --preview']) {
+    assert.equal(teachingToolDecision(paths, bash(`${manuscript} ${command}`), root).deny, false, command);
+  }
+  for (const command of ['prepare intro --apply', 'lock intro --apply', 'sync --apply', 'adopt --apply', 'impact && node .claude/skills/draft-latex/scripts/manuscript-writing.cjs lock intro --apply']) {
+    assert.match(teachingToolDecision(paths, bash(`${manuscript} ${command}`), root).reason ?? '', /does not change the manuscript/, command);
+  }
+  assert.match(teachingToolDecision(paths, { tool_name: 'shell', tool_input: { command: ['node', 'manuscript-writing.cjs', 'sync', '--apply'] } }, root).reason ?? '', /does not change the manuscript/);
+  // An --apply belonging to another command in the same line is not the manuscript script's.
+  assert.equal(teachingToolDecision(paths, bash(`${manuscript} impact; echo --apply`), root).deny, false);
+  const maintenance = 'node .agents/skills/research-maintenance/scripts/research-maintenance.cjs';
+  assert.equal(teachingToolDecision(paths, bash(`${maintenance} validate`), root).deny, false);
+  assert.match(teachingToolDecision(paths, bash(`${maintenance} links --apply`), root).reason ?? '', /does not edit project files/);
+  // Nor does it edit by shell; scratch files outside the project are fine.
+  for (const command of ['sed -i "s/a/b/" research/assets/key_lemma.md', 'echo x > research/ideas/a.md', `cat /tmp/d.md > ${root}/sections/intro.tex`, 'cd research && rm -rf plans', "python3 -c \"open('main.tex','w').write('')\"", 'git checkout -- research']) {
+    assert.match(teachingToolDecision(paths, bash(command), root).reason ?? '', /does not edit project files, and this command would write/, command);
+  }
+  for (const command of ["cat > /tmp/draft.md <<'EOF'\n## Proof\nx\nEOF", `${loop} teach revise key_lemma --file /tmp/draft.md`, 'python3 -c "print(2**10)"', 'git log -3']) {
+    assert.equal(teachingToolDecision(paths, bash(command), root).deny, false, command);
+  }
+  assert.equal(teachingToolDecision(paths, { ...bash('echo x > notes.md'), cwd: '/tmp' }, root).deny, false);
+  assert.equal(teachingToolDecision(paths, bash('python3 /tmp/s.py'), root, () => "open('research/a.md', 'w')").deny, true);
   // Every idea recorded here says whose it is: the teaching chat decides, the hooks refuse an idea without it.
   assert.match(teachingToolDecision(paths, bash(`${loop} idea add --title t --body b`), root).reason ?? '', /say whose it is/);
   assert.equal(teachingToolDecision(paths, bash(`${loop} idea add --title t --body b --origin agent && ${loop} idea add --title u --body c`), root).deny, true);

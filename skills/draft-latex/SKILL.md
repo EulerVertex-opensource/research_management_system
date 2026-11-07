@@ -5,6 +5,8 @@ description: Write or revise a manuscript section in LaTeX from approved researc
 
 # Draft manuscript LaTeX
 
+A chat opened for the manuscript, beside the research loop's own chat, never drives the loop (the loop's own chat may use this skill when its `ready` stage asks it to). There, do not run `research-loop next`, `report`, `resume`, or other commands that move the loop, and do not prove results here: a result the paper needs but nobody proved goes under `## Gaps` of its brief (or as an idea) for the loop, which runs in its own chat.
+
 The bundled script prepares context and syncs inputs (Claude Code has the identical copy under `.claude/skills/draft-latex/scripts/`):
 
 ```bash

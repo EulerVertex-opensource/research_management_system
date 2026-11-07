@@ -4,6 +4,8 @@ import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchL
 import { LOOP_COMMAND, MAINTENANCE_COMMAND } from './AgentProviders';
 import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/layout';
 import { UNDERSTANDING_PATH } from '../domain/understandingLevels';
+import { projectShellWrite, shellScriptOf } from './ShellWrites';
+import { WRITE_PROMPT_PATTERN } from '../domain/chatRoles';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
 export interface HookInput {
@@ -305,60 +307,87 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
 }
 
 /**
- * Which chats teach and which drive the loop, by session ID. A teaching chat
- * (the teach skill, opened beside the loop's own chat) never takes the loop's
- * lock, is never sent on by the Stop hook, and may only read; a session that
- * has driven the loop is never taken for a teaching one.
+ * Which chats teach, which write the manuscript, and which drive the loop, by
+ * session ID. A teaching chat (the teach skill) and a writing chat (the
+ * manuscript skills) work beside the loop's own chat: they never take the
+ * loop's lock, are never sent on by the Stop hook, and never drive the loop.
+ * A session that has driven the loop is never taken for either.
  */
 export const SESSIONS_PATH = `${STATE_DIR}/sessions.json`;
-export type SessionRole = 'teach' | 'drive';
+export type SessionRole = 'teach' | 'write' | 'drive';
 export type SessionRoles = Record<SessionRole, Record<string, string>>;
 const ROLES_KEPT = 20;
+const ROLE_NAMES = ['teach', 'write', 'drive'] as const;
 
 export function parseSessionRoles(text: string | undefined): SessionRoles {
-  const roles: SessionRoles = { teach: {}, drive: {} };
+  const roles: SessionRoles = { teach: {}, write: {}, drive: {} };
   try {
     const raw = JSON.parse(text ?? '') as Partial<SessionRoles>;
-    for (const role of ['teach', 'drive'] as const) if (raw?.[role] && typeof raw[role] === 'object') roles[role] = { ...raw[role] };
+    for (const role of ROLE_NAMES) if (raw?.[role] && typeof raw[role] === 'object') roles[role] = { ...raw[role] };
   } catch { /* none yet */ }
   return roles;
 }
 
+/** Record a session's role; a chat beside the loop is either teaching or writing, never both. */
 export function withSessionRole(roles: SessionRoles, role: SessionRole, session: string, at: string): SessionRoles {
-  const entries = Object.entries(roles[role]).filter(([id]) => id !== session);
-  return { ...roles, [role]: Object.fromEntries([...entries, [session, at]].slice(-ROLES_KEPT)) };
+  const next = { ...roles };
+  const beside: SessionRole[] = role === 'drive' ? [] : ['teach', 'write'];
+  for (const name of [role, ...beside]) {
+    const entries = Object.entries(roles[name]).filter(([id]) => id !== session);
+    next[name] = Object.fromEntries(name === role ? [...entries, [session, at]].slice(-ROLES_KEPT) : entries);
+  }
+  return next;
 }
 
 export function sessionRole(roles: SessionRoles, session: string | undefined): SessionRole | undefined {
   if (!session) return undefined;
   if (roles.drive[session]) return 'drive';
-  return roles.teach[session] ? 'teach' : undefined;
+  if (roles.teach[session]) return 'teach';
+  return roles.write[session] ? 'write' : undefined;
 }
 
-/** A prompt invoking the research-loop skill (Claude Code /research-loop, Codex $research-loop). */
-export const LOOP_PROMPT_PATTERN = /(?:^|\s)[/$]research-loop\b/i;
+/**
+ * The role a chat takes from a turn's signal, or undefined to keep the one it
+ * has. A driver stays the driver, and a chat beside the loop never becomes
+ * one. Only the researcher's own prompt moves a chat between teaching and
+ * writing: a teaching chat running a manuscript preview stays a teaching chat.
+ */
+export function nextSessionRole(known: SessionRole | undefined, signal: SessionRole | undefined, fromPrompt: boolean): SessionRole | undefined {
+  if (!signal || known === 'drive' || known === signal) return undefined;
+  if (!known) return signal;
+  if (signal === 'drive') return undefined;
+  return fromPrompt ? signal : undefined;
+}
+
+/** A prompt invoking the research-loop skill (Claude Code /research-loop, Codex $research-loop), or the dashboard's "continue the research loop". */
+export const LOOP_PROMPT_PATTERN = /(?:^|\s)[/$]research-loop\b|\bcontinue the research loop\b/i;
 const LOOP_CALL = /research-loop\.cjs["']?\s+([a-z-]+)(?:\s+([a-z-]+))?/g;
 const DRIVING_COMMANDS = new Set(['start', 'resume', 'extend', 'next', 'report']);
+const MANUSCRIPT_CALL = /manuscript-writing\.cjs\b/;
 
 /** The research-loop commands a shell call runs, as `command sub`. */
 function loopCalls(input: HookInput): Array<{ command: string; sub?: string }> {
-  const tool = input.tool_input ?? {};
-  const command = typeof tool.command === 'string' ? tool.command : Array.isArray(tool.command) ? tool.command.join(' ') : '';
-  return [...command.matchAll(LOOP_CALL)].map((match) => ({ command: match[1], sub: match[2] }));
+  return [...shellScriptOf(input.tool_input?.command).matchAll(LOOP_CALL)].map((match) => ({ command: match[1], sub: match[2] }));
 }
 
-/** What a turn says about its chat: a prompt naming the teach skill, a teach command, or a command that drives the loop. */
-export function roleSignal(event: string, input: HookInput, teachPrompt: RegExp): SessionRole | undefined {
+/**
+ * What a turn says about its chat: a prompt naming the teach skill, a
+ * manuscript skill, or the loop's; or a command that teaches, writes the
+ * manuscript, or drives the loop.
+ */
+export function roleSignal(event: string, input: HookInput, teachPrompt: RegExp, writePrompt: RegExp = WRITE_PROMPT_PATTERN): SessionRole | undefined {
   if (event === 'UserPromptSubmit') {
     if (typeof input.prompt !== 'string') return undefined;
     if (teachPrompt.test(input.prompt)) return 'teach';
+    if (writePrompt.test(input.prompt)) return 'write';
     // The researcher invoking the loop's skill in a chat asks that chat to drive.
     return LOOP_PROMPT_PATTERN.test(input.prompt) ? 'drive' : undefined;
   }
   if (event !== 'PreToolUse') return undefined;
   const calls = loopCalls(input);
   if (calls.some((call) => DRIVING_COMMANDS.has(call.command))) return 'drive';
-  return calls.some((call) => call.command === 'teach') ? 'teach' : undefined;
+  if (calls.some((call) => call.command === 'teach')) return 'teach';
+  return MANUSCRIPT_CALL.test(shellScriptOf(input.tool_input?.command)) ? 'write' : undefined;
 }
 
 /** Commands a teaching chat may run: reading, the teach commands, and recording the researcher's doubts as ideas. */
@@ -402,18 +431,58 @@ function unattributedRemarks(input: HookInput): boolean {
   return adds > 0 && [...commandOf(input).matchAll(/--origin[\s=]+["']?(?:agent|researcher)\b/g)].length < adds;
 }
 
-export const TEACHING_REMARK_REASON = 'This chat is the teaching chat: write remarks with from teaching (add_remark from: "teaching", or remark ... --from teaching), and say whose each one is (origin researcher when the researcher said it, even if you worded it; origin agent for your own explanation).';
+/**
+ * manuscript-writing and research-maintenance calls that write (the
+ * invocation, up to the next shell separator, carries --apply). Without it
+ * every subcommand only previews or reports, which a teaching chat may run.
+ */
+const APPLY_CALL = /(manuscript-writing|research-maintenance)\.cjs["']?\s+([^;&|\n]*)/g;
+function applyWrites(input: HookInput): { script: string; sub: string } | undefined {
+  for (const match of shellScriptOf(input.tool_input?.command).matchAll(APPLY_CALL)) {
+    if (/(?:^|\s)["']?--apply\b/.test(match[2])) return { script: match[1], sub: match[2].trim().split(/\s+/)[0] || '' };
+  }
+  return undefined;
+}
 
-/** A teaching chat reads and explains; it never drives the loop or edits the project, and says whose each idea it records is. */
-export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root?: string): ToolDecision {
+export const TEACHING_REMARK_REASON ='This chat is the teaching chat: write remarks with from teaching (add_remark from: "teaching", or remark ... --from teaching), and say whose each one is (origin researcher when the researcher said it, even if you worded it; origin agent for your own explanation).';
+
+/**
+ * A teaching chat reads and explains; it never drives the loop or edits the
+ * project, by an edit tool or by shell, and says whose each idea it records
+ * is. `readFile` (absolute path) lets it see whether a script a shell command
+ * runs writes files.
+ */
+export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root?: string, readFile?: (absolute: string) => string | undefined): ToolDecision {
   const tool = (input.tool_name ?? '').toLowerCase();
   const refused = loopCalls(input).find((call) => !teachingMayRun(call));
   if (refused) return { deny: true, reason: `This chat is the teaching chat: it explains verified results and never drives the loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there.` };
+  const applied = applyWrites(input);
+  if (applied?.script === 'manuscript-writing') return { deny: true, reason: `This chat is the teaching chat: it does not change the manuscript (manuscript-writing ${applied.sub} --apply). It may run impact or a --preview to show how the paper presents a result; the paper is written with the manuscript skills. Tell the researcher: invoking one themselves (/draft-latex or /plan-manuscript; Codex $draft-latex) turns this chat into a writing chat, or they can open a new chat for it.` };
+  if (applied) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (research-maintenance ${applied.sub} --apply). It may run validate or a --preview; maintenance is done in the loop's own chat or another chat.` };
   if (unattributedIdeas(input)) return { deny: true, reason: TEACHING_ORIGIN_REASON };
   if (unattributedRemarks(input) || remarkSources(input).some((from) => from !== 'teaching')) return { deny: true, reason: TEACHING_REMARK_REASON };
-  if (/shell|bash/.test(tool) || !/write|edit|patch|notebook/.test(tool)) return { deny: false };
+  if (/shell|bash/.test(tool)) {
+    const write = projectShellWrite(shellScriptOf(input.tool_input?.command), { root, cwd: input.cwd ?? root, readFile });
+    return write ? { deny: true, reason: `This chat is the teaching chat: it does not edit project files, and this command would write ${write}. Read with the teach commands; record a doubt or idea with record_idea and an explanation with add_remark. A scratch file (a rewording draft, a worked example) goes in a temporary folder outside the project, such as $TMPDIR, named by its path.` } : { deny: false };
+  }
+  if (!/write|edit|patch|notebook/.test(tool)) return { deny: false };
   const inProject = targetsOf(input).filter((target) => !path.isAbsolute(target) || (root !== undefined && (target === root || target.startsWith(root + path.sep))));
   if (inProject.length) return { deny: true, reason: `This chat is the teaching chat: it does not edit project files (${inProject[0]}). Record a doubt or idea with record_idea and an explanation with add_remark; changes are made in the loop's own chat.` };
+  return { deny: false };
+}
+
+/** research-loop commands that drive the loop or change what it works on: the loop's own chat runs them, never a writing chat. */
+const WRITING_REFUSED = new Set([...DRIVING_COMMANDS, 'pause', 'stop', 'park', 'unpark', 'focus', 'handoff']);
+const writingRefuses = (call: { command: string; sub?: string }) => WRITING_REFUSED.has(call.command)
+  || (call.command === 'search' && call.sub === 'request') || (call.command === 'conjecture' && call.sub === 'request')
+  || (call.command === 'budget' && call.sub === 'allocate') || (call.command === 'idea' && call.sub === 'convert');
+
+export const WRITING_NOTE = 'Research Assistant: this chat writes the manuscript (plan-manuscript, draft-latex, revise-manuscript-prose, check-notation). It never drives the research loop: do not run research-loop next, report, resume, or other commands that move the loop, and do not prove results here. A result the paper needs but nobody proved goes under ## Gaps of its brief (or as an idea) for the loop. The loop runs in its own chat.';
+
+/** A writing chat edits the manuscript and its plans; it never drives the loop, which runs in its own chat. */
+export function writingToolDecision(input: HookInput): ToolDecision {
+  const refused = loopCalls(input).find(writingRefuses);
+  if (refused) return { deny: true, reason: `This chat writes the manuscript; it never drives the research loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there. Record what the paper needs from the loop under ## Gaps of the section brief or with idea add.` };
   return { deny: false };
 }
 

@@ -2,6 +2,7 @@ import type { LoopState } from '../services/ResearchLoopModel';
 import type { AttentionButton, AttentionItem, AttentionPriority, GraphNodeView, SectionView } from '../models/graph';
 import { URGENCY_LABEL, acceptLabel, approvalTitle, isProvable, listTitles, parkClause } from './copy';
 import { setAsideButtons } from './loopHealth';
+import { MANUSCRIPT_CHAT_NOTE } from './chatRoles';
 
 /**
  * The researcher's "Needs you" list, derived from the loop state, the research
@@ -131,7 +132,7 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
         reason: section.reasons.join('; '), why: 'Readers would see statements that are not proved.', ifIgnored: 'The paper stays wrong in this section.',
         section: section.id, blocks: [], sections: [section.id],
         buttons: [
-          { label: 'Discuss it in chat', action: { action: 'agent', prompt: `Manuscript section ${section.id} is invalid: ${section.reasons.join('; ')}. Run manuscript-writing prepare ${section.id}, explain what no longer holds, and propose options before editing anything.` }, kind: 'primary' },
+          { label: 'Discuss it in chat', action: { action: 'agent', prompt: `Use the draft-latex skill: manuscript section ${section.id} is invalid (${section.reasons.join('; ')}). Run manuscript-writing prepare ${section.id}, explain what no longer holds, and propose options before editing anything. ${MANUSCRIPT_CHAT_NOTE}` }, kind: 'primary' },
           { label: 'Open the TeX', action: { action: 'openTex', section: section.id, line: section.blocks.find((block) => block.state === 'invalid')?.lines?.[0] }, kind: 'secondary' },
         ],
       });
@@ -144,7 +145,7 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
         reason: section.reasons.join('; '), why: statement ? 'A statement it shows changed after you marked it as reviewed.' : 'The research changed after you marked it as reviewed.',
         ifIgnored: 'Nothing breaks. The paper lags behind the research.', section: section.id, blocks: [], sections: [section.id],
         buttons: [
-          { label: 'Update it in chat', action: { action: 'agent', prompt: `Use the draft-latex skill to update manuscript section ${section.id}: run manuscript-writing prepare ${section.id} and revise only the stale blocks and passages it lists (${section.reasons.join('; ')}). Respect each block's policy and leave current blocks unchanged. Do not lock the section; I will review it.` }, kind: 'primary' },
+          { label: 'Update it in chat', action: { action: 'agent', prompt: `Use the draft-latex skill to update manuscript section ${section.id}: run manuscript-writing prepare ${section.id} and revise only the stale blocks and passages it lists (${section.reasons.join('; ')}). Respect each block's policy and leave current blocks unchanged. Do not lock the section; I will review it. ${MANUSCRIPT_CHAT_NOTE}` }, kind: 'primary' },
           { label: 'Open the TeX', action: { action: 'openTex', section: section.id, line: blocks[0]?.lines?.[0] }, kind: 'secondary' },
           { label: 'Mark as reviewed', action: { action: 'lock', section: section.id }, kind: 'secondary' },
         ],
@@ -198,7 +199,7 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
       key: `uncovered:${item.id}`, priority: 2, category: 'uncovered', title: `${title(item.id)} is proved but not in the paper yet`,
       reason: '', why: 'No section of the paper presents this main result.', ifIgnored: 'The paper leaves out a main result.',
       target: item.id, blocks: [], sections: [],
-      buttons: [{ label: 'Plan it in chat', action: { action: 'agent', prompt: `Use the plan-manuscript skill to place the required result ${item.id} into the manuscript outline (an existing section brief or a new section), and update the introduction or conclusion briefs if the contribution changed. Leave current sections unchanged; then draft only the affected sections with draft-latex.` }, kind: 'primary' }, open(item.id)],
+      buttons: [{ label: 'Plan it in chat', action: { action: 'agent', prompt: `Use the plan-manuscript skill to place the required result ${item.id} into the manuscript outline (an existing section brief or a new section), and update the introduction or conclusion briefs if the contribution changed. Leave current sections unchanged; then draft only the affected sections with draft-latex. ${MANUSCRIPT_CHAT_NOTE}` }, kind: 'primary' }, open(item.id)],
     });
   }
 

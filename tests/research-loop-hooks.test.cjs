@@ -125,6 +125,9 @@ test('hook entry point blocks Stop while running and stays silent otherwise', ()
     assert.equal(hook('UserPromptSubmit', {}).stdout, '');
     assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root, '--iteration-cap', '2'], { encoding: 'utf8' }).status, 0);
     const blocked = (result) => result.status === 0 && result.stdout.trim() !== '' && JSON.parse(result.stdout).decision === 'block';
+    // A chat the hooks cannot place is not sent on; the researcher invoking the loop's skill makes it the driver.
+    assert.equal(hook('Stop', {}).stdout, '');
+    hook('UserPromptSubmit', { prompt: '/research-loop' });
     const first = hook('Stop', {});
     assert.equal(first.status, 0, first.stderr);
     assert.ok(blocked(first));
@@ -175,10 +178,12 @@ test('a teaching chat beside the loop never takes its lock, is never sent on at 
     write('.research-assistant-loop/state.json', JSON.stringify(loopState));
     hook('SessionStart', 'teacher');
     assert.equal(state().lock.sessionId, 'driver');
-    // A teaching chat that took a free lock before it named the skill gives it back.
+    // A chat the hooks cannot place yet never takes a free lock either.
     const freed = state(); delete freed.lock; write('.research-assistant-loop/state.json', JSON.stringify(freed));
     hook('SessionStart', 'teacher');
-    assert.equal(state().lock.sessionId, 'teacher');
+    assert.equal(state().lock, undefined);
+    // A teaching chat that holds the lock (taken before the hooks knew it) gives it back.
+    const held = state(); held.lock = { sessionId: 'teacher', provider: 'claude', acquiredAt: 'now', heartbeatAt: new Date().toISOString() }; write('.research-assistant-loop/state.json', JSON.stringify(held));
     const context = JSON.parse(hook('UserPromptSubmit', 'teacher', { prompt: '/teach' }).stdout);
     assert.match(context.hookSpecificOutput.additionalContext, /this chat is the teaching chat/);
     assert.equal(state().lock, undefined, 'naming the teach skill gives the lock back');
@@ -233,6 +238,56 @@ test('a chat that only looks at the loop never inherits a quiet driver\'s lock a
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('a chat writing the manuscript never takes the loop\'s lock or is sent on to drive it, even after the loop resumes', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-writer-'));
+  try {
+    const write = (relative, content) => { fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true }); fs.writeFileSync(path.join(root, relative), content); };
+    write('.research-assistant.json', JSON.stringify({ version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [], notations: null, sections: 'sections' }, research: { root: 'research', project: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' } }));
+    write('research/project.md', '# Project\n');
+    const hook = (event, session, input = {}) => spawnSync(process.execPath, [cli, 'hook', event], { encoding: 'utf8', input: JSON.stringify({ cwd: root, session_id: session, ...input }) });
+    const statePath = path.join(root, '.research-assistant-loop/state.json');
+    const state = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    const free = () => { const s = state(); delete s.lock; fs.writeFileSync(statePath, JSON.stringify(s)); };
+    const run = (...args) => spawnSync(process.execPath, [cli, ...args, '--project', root], { encoding: 'utf8' });
+    const loop = 'node .claude/skills/research-loop/scripts/research-loop.cjs';
+    const manuscript = 'node .claude/skills/draft-latex/scripts/manuscript-writing.cjs';
+    assert.equal(run('start', '--provider', 'claude', '--goal', 'Prove').status, 0);
+    hook('UserPromptSubmit', 'driver', { prompt: 'go' });
+    hook('PreToolUse', 'driver', { tool_name: 'Bash', tool_input: { command: `${loop} next` } });
+    assert.equal(state().lock.sessionId, 'driver', 'running next makes a chat the driver and takes the lock');
+    // The driver's chat grew large and gave the lock back; the researcher works on the paper meanwhile.
+    free();
+    const context = JSON.parse(hook('UserPromptSubmit', 'writer', { prompt: 'Use the draft-latex skill to update manuscript section intro. This chat is only for the manuscript; the loop runs in its own chat.' }).stdout).hookSpecificOutput.additionalContext;
+    assert.match(context, /this chat writes the manuscript/);
+    assert.doesNotMatch(context, /stage draft_project/);
+    assert.equal(state().lock, undefined, 'a writing chat never takes the lock');
+    assert.equal(hook('Stop', 'writer').stdout, '', 'a writing chat is not sent on to drive the loop');
+    assert.match(hook('PreToolUse', 'writer', { tool_name: 'Bash', tool_input: { command: `${loop} next` } }).stdout, /"permissionDecision":"deny"[\s\S]*writes the manuscript/);
+    assert.equal(hook('PreToolUse', 'writer', { tool_name: 'Edit', tool_input: { file_path: path.join(root, 'sections/intro.tex') } }).stdout, '', 'it edits the TeX');
+    assert.equal(hook('PreToolUse', 'writer', { tool_name: 'Bash', tool_input: { command: `${manuscript} lock intro --apply` } }).stdout, '');
+    assert.match(hook('PreToolUse', 'writer', { tool_name: 'Write', tool_input: { file_path: path.join(root, 'research/assets/a.md'), content: '---\nstatus: approved\n---\n' } }).stdout, /"permissionDecision":"deny"/, 'the usual guards still hold');
+    // Paused while the paper is written, then resumed from the dashboard: the writer still is not sent on.
+    run('pause');
+    free();
+    hook('UserPromptSubmit', 'writer2', { prompt: '/plan-manuscript' });
+    assert.equal(state().lock, undefined);
+    run('resume');
+    assert.equal(hook('Stop', 'writer2').stdout, '');
+    assert.equal(state().lock, undefined);
+    hook('UserPromptSubmit', 'driver', { prompt: 'continue' });
+    assert.equal(state().lock.sessionId, 'driver', 'the loop\'s own chat takes the loop back');
+    assert.equal(JSON.parse(hook('Stop', 'driver').stdout).decision, 'block');
+    // A chat the hooks cannot place, with the lock free, is told about the loop but neither takes it nor is sent on.
+    free();
+    assert.match(JSON.parse(hook('UserPromptSubmit', 'other', { prompt: 'what does section 2 say?' }).stdout).hookSpecificOutput.additionalContext, /no chat is driving it right now/);
+    assert.equal(state().lock, undefined);
+    assert.equal(hook('Stop', 'other').stdout, '');
+    // The dashboard's continue prompt asks a fresh chat to drive.
+    hook('UserPromptSubmit', 'fresh', { prompt: 'Continue the research loop: run research-loop next and follow it.' });
+    assert.equal(state().lock.sessionId, 'fresh');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a large driver chat pauses the loop before next and frees the lock; hand-backs get a compact status', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-context-'));
   try {
@@ -244,7 +299,7 @@ test('a large driver chat pauses the loop before next and frees the lock; hand-b
     const state = () => JSON.parse(fs.readFileSync(path.join(root, '.research-assistant-loop/state.json'), 'utf8'));
     const next = { tool_name: 'Bash', tool_input: { command: 'node .claude/skills/research-loop/scripts/research-loop.cjs next' } };
     assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root], { encoding: 'utf8' }).status, 0);
-    const full = JSON.parse(hook('UserPromptSubmit', { prompt: 'continue' }).stdout).hookSpecificOutput.additionalContext;
+    const full = JSON.parse(hook('UserPromptSubmit', { prompt: '/research-loop' }).stdout).hookSpecificOutput.additionalContext;
     assert.match(full, /dashboard link/);
     const compact = JSON.parse(hook('UserPromptSubmit', { prompt: 'Another Claude session sent a message:\n<agent-message from="a1">done</agent-message>' }).stdout).hookSpecificOutput.additionalContext;
     assert.match(compact, /^Research loop: running/);

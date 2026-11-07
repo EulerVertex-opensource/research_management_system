@@ -6,7 +6,7 @@ import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, isWaitingForHuman, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, loopRemarkDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole } from '../services/ResearchLoopHooks';
+import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, loopRemarkDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole, nextSessionRole, writingToolDecision, WRITING_NOTE } from '../services/ResearchLoopHooks';
 import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
@@ -278,7 +278,8 @@ async function guardStop(root: string, core: ResearchLoopCore, session: string):
 /**
  * Record what this turn says about its chat (see SessionRoles) and return the
  * chat's role. A chat that has driven the loop stays the driver; one that
- * becomes a teaching chat gives back a lock it took while the loop was idle.
+ * becomes a teaching or writing chat gives back a lock it took before the
+ * hooks knew what it was.
  */
 async function noteSessionRole(root: string, core: ResearchLoopCore, event: string, input: HookInput): Promise<SessionRole | undefined> {
   const session = input.session_id;
@@ -286,10 +287,11 @@ async function noteSessionRole(root: string, core: ResearchLoopCore, event: stri
   const roles = parseSessionRoles(await files.readFile(SESSIONS_PATH).catch(() => ''));
   const known = sessionRole(roles, session);
   const signal = roleSignal(event, input, TEACH_PROMPT_PATTERN);
-  if (!session || !signal || known === 'drive' || (known === 'teach' && signal === 'drive')) return known;
-  await files.writeFile(SESSIONS_PATH, JSON.stringify(withSessionRole(roles, signal, session, new Date().toISOString())) + '\n');
-  if (signal === 'teach') await core.releaseLock(session);
-  return signal;
+  const role = session ? nextSessionRole(known, signal, event === 'UserPromptSubmit') : undefined;
+  if (!session || !role) return known;
+  await files.writeFile(SESSIONS_PATH, JSON.stringify(withSessionRole(roles, role, session, new Date().toISOString())) + '\n');
+  if (role !== 'drive') await core.releaseLock(session);
+  return role;
 }
 
 /** What happens to a rewording now, said so the teacher can tell the researcher; a rewording is applied only by a running loop. */
@@ -322,8 +324,12 @@ async function runHook(event: string, args: Args): Promise<void> {
   let role: SessionRole | undefined;
   try { role = stale ? undefined : await noteSessionRole(root, core, event, input); } catch { role = undefined; }
   if (role === 'teach') { await runTeachingHook(event, root, input); return; }
+  if (role === 'write') { await runWritingHook(event, root, core, input); return; }
+  // Only the driver, or a chat already holding the lock, acts for the loop. Any other chat (one the hooks cannot
+  // place yet) never takes a free lock, is never sent on at Stop, and never consumes the researcher's answers.
+  const mayDrive = role === 'drive' || Boolean(session && state?.lock?.sessionId === session);
   // Liveness for the dashboard: only a running loop's agent, and never a stale driver.
-  const note = (signal: AgentSignal) => (state?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), signal) : Promise.resolve());
+  const note = (signal: AgentSignal) => (mayDrive && state?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), signal) : Promise.resolve());
   const shellTool = state ? AGENT_PROVIDERS[state.provider]?.shellTool : undefined;
   const toolPhase = (phase: 'start' | 'end') => (shellTool && input.tool_name === shellTool ? { name: shellTool, phase } : undefined);
   switch (event) {
@@ -336,7 +342,12 @@ async function runHook(event: string, args: Args): Promise<void> {
         if (event === 'SessionStart') process.stdout.write(contextOutput(event, `Research Assistant: ${LINK_HINT}`) + '\n');
         return;
       }
-      // Only a chat that drives the loop takes over a lock its holder let go quiet; any chat may take a free one.
+      if (!mayDrive) {
+        const holder = state.lock && state.lock.sessionId !== session ? `another session (${state.lock.sessionId}) is driving the loop` : 'no chat is driving it right now';
+        process.stdout.write(contextOutput(event, `Research loop: the loop is ${state.status} (stage ${state.stage}); ${holder}. This chat drives it only when the researcher asks for the loop here (the research-loop skill); otherwise do what the researcher asked, and do not run research-loop next.\n${LINK_HINT}`) + '\n');
+        return;
+      }
+      // Only a chat that drives the loop takes over a lock its holder let go quiet.
       if (session && !core.heartbeat(session, false, role === 'drive')) {
         process.stdout.write(contextOutput(event, `Research loop: another session (${state.lock?.sessionId}) is driving the loop. Do not run research-loop next here unless the researcher asks you to take over with --force.`) + '\n');
         return;
@@ -366,7 +377,7 @@ async function runHook(event: string, args: Args): Promise<void> {
     case 'PostToolUse': {
       await note({ kind: 'active', sessionId: session, tool: toolPhase('end'), throttle: true });
       // Audit only: note research files read outside the current context pack.
-      if (!state || state.status !== 'running') return;
+      if (!mayDrive || !state || state.status !== 'running') return;
       const paths = await loadProjectPaths(root);
       for (const file of researchReads(paths, input, root)) await core.noteRead(file, input.tool_name ?? '');
       return;
@@ -378,6 +389,8 @@ async function runHook(event: string, args: Args): Promise<void> {
       // Read tools reach this hook only for the remark rule above.
       if (/^(read|grep|glob)$/i.test(input.tool_name ?? '')) return;
       await note({ kind: 'active', sessionId: session, tool: toolPhase('start'), throttle: true });
+      // A chat that has just started driving (it runs next) takes the loop's lock now, not only at Stop.
+      if (role === 'drive' && session && state && state.lock?.sessionId !== session) await core.touch(session, false, true);
       const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
       if (decision.deny) { process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n'); return; }
       // The driver starts the next stage in a fresh chat once this one has grown large.
@@ -403,7 +416,7 @@ async function runHook(event: string, args: Args): Promise<void> {
       }
       if (!state || state.status !== 'running') return;
       // A chat that does not hold the lock is never sent on: the driver may only be waiting on a long subagent.
-      if (session && !core.heartbeat(session, false, role === 'drive')) return;
+      if (!mayDrive || (session && !core.heartbeat(session, false, role === 'drive'))) return;
       await core.validateWorkspace({ fix: true });
       let instruction: string | undefined;
       try { const next = await core.next(); instruction = next.blocked ? undefined : next.instruction; } catch { instruction = undefined; }
@@ -454,9 +467,42 @@ async function runTeachingHook(event: string, root: string, input: HookInput): P
   if (event === 'SessionStart' || event === 'UserPromptSubmit') { process.stdout.write(contextOutput(event, `${TEACHING_NOTE}\n${LINK_HINT}`) + '\n'); return; }
   if (event !== 'PreToolUse') return;
   const paths = await loadProjectPaths(root);
-  const teaching = teachingToolDecision(paths, input, root);
+  const readScript = (file: string) => { try { return fs.statSync(file).size <= 1_000_000 ? fs.readFileSync(file, 'utf8') : undefined; } catch { return undefined; } };
+  const teaching = teachingToolDecision(paths, input, root, readScript);
   const decision = teaching.deny ? teaching : preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
   if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
+}
+
+/**
+ * Hooks in a writing chat: it edits the manuscript beside the loop, so like
+ * the teaching chat it never takes the lock, consumes the driver's answers,
+ * counts as the agent's activity, or is sent on at Stop. It keeps the checks
+ * on files it writes (layout, approvals, research problems it leaves) and may
+ * not drive the loop.
+ */
+async function runWritingHook(event: string, root: string, core: ResearchLoopCore, input: HookInput): Promise<void> {
+  const session = input.session_id ?? 'unknown';
+  if (event === 'SessionStart' || event === 'UserPromptSubmit') {
+    try { await guardBaseline(root, core, session, event === 'UserPromptSubmit'); } catch { /* the guard never blocks a turn from starting */ }
+    process.stdout.write(contextOutput(event, `${WRITING_NOTE}\n${LINK_HINT}`) + '\n');
+    return;
+  }
+  if (event === 'PreToolUse') {
+    const paths = await loadProjectPaths(root);
+    const remarkRule = loopRemarkDecision(paths, input, undefined, root);
+    if (remarkRule.deny) { process.stdout.write(denyOutput(remarkRule.reason ?? 'Denied by the research loop.') + '\n'); return; }
+    if (/^(read|grep|glob)$/i.test(input.tool_name ?? '')) return;
+    const writing = writingToolDecision(input);
+    const decision = writing.deny ? writing : preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
+    if (decision.deny) process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n');
+    return;
+  }
+  if (event === 'Stop') {
+    // No interlinking here: it rewrites node files the loop's own chat may be in the middle of editing.
+    let guard: string | undefined;
+    try { guard = await guardStop(root, core, session); } catch { guard = undefined; }
+    if (guard) process.stdout.write(stopBlockOutput(guard) + '\n');
+  }
 }
 
 /** Run git with an optional index file and stdin; rejects on a non-zero exit. */

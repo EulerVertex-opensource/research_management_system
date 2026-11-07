@@ -67,7 +67,7 @@ Remarks are annotations on a result, like notes in a margin: intuition, why a st
 
 ## Reword a proof
 
-When the researcher understands a proof but dislikes how it is written, reword it with them. The result's file is the source of truth. How the paper presents it is a separate layer: for the paper's wording, point them to the manuscript skills, which change only the LaTeX.
+When the researcher understands a proof but dislikes how it is written, reword it with them. The result's file is the source of truth. How the paper presents it is a separate layer: for the paper's wording, point them to the manuscript skills, which change only the LaTeX. This chat cannot change the paper; when they invoke a manuscript skill themselves (`/draft-latex`, `/plan-manuscript`; Codex `$draft-latex`), this chat becomes a writing chat, or they can open a new chat for it.
 
 1. **Work out the wording in the chat first.** Show the reworded proof, or only the steps that change. Iterate until the researcher is satisfied. Follow the project's proof style in the pack. Reword only: the same steps, the same hypotheses used, the same cited results. If a clearer proof needs a different argument, that is a new plan for the loop; record it as an `approach` idea instead.
 2. **Propose it** once the researcher agrees. Write a draft file outside the project (a temporary folder) holding only these sections:

@@ -33,7 +33,8 @@ import { bindingPath, loadImpactNodes, loadProjectRevision, readSectionBriefFile
 import { parseWritingOutline } from './ManuscriptWriting';
 import { lockBinding } from '../domain/manuscriptImpact';
 import { Teaching } from './Teaching';
-import { LEVEL_HINT, LEVEL_LABEL, UNDERSTANDING_LEVELS, UNDERSTANDING_PATH, UnderstandingLevel, teachPrompt, toLevel } from '../domain/understandingLevels';
+import { LEVEL_HINT, LEVEL_LABEL, TEACH_PROMPT_PATTERN, UNDERSTANDING_LEVELS, UNDERSTANDING_PATH, UnderstandingLevel, teachPrompt, toLevel } from '../domain/understandingLevels';
+import { WRITE_PROMPT_PATTERN } from '../domain/chatRoles';
 
 function extensionVersion(): string | undefined {
   return vscode.extensions.all.find((extension) => extension.id.toLowerCase() === EXTENSION_ID)?.packageJSON?.version;
@@ -647,7 +648,9 @@ export class LoopHost implements vscode.Disposable {
       case 'agent': {
         await vscode.env.clipboard.writeText(request.prompt);
         await this.openChat(this.core?.current?.provider);
-        vscode.window.setStatusBarMessage('$(clippy) Instruction copied: paste it into the agent chat', 8000);
+        // Manuscript and teaching work belong in a chat of their own: pasted into the loop's chat, the loop would take it back over.
+        const beside = WRITE_PROMPT_PATTERN.test(request.prompt) || TEACH_PROMPT_PATTERN.test(request.prompt);
+        vscode.window.setStatusBarMessage(beside ? '$(clippy) Instruction copied: start a new chat beside the loop and paste it' : '$(clippy) Instruction copied: paste it into the agent chat', beside ? 10000 : 8000);
         return;
       }
       case 'loop': {
