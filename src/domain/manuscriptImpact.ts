@@ -1,6 +1,7 @@
 import { AssetComponent, ProjectFacet, assetComponents, projectFacets, sha } from './digests';
 import { buildGraph, nodeKey } from './graph';
 import { requiredAssetIds } from './project';
+import { sectionContent } from './sections';
 import { BlockPolicy, BlockSource, parseTexBlocks } from './texBlocks';
 import type { BriefSource, SectionBrief } from '../services/ManuscriptWriting';
 
@@ -160,7 +161,14 @@ export interface ManuscriptImpact {
   projectRevision?: number;
   /** Required results no brief presents; `pending` ones are still under research. */
   uncovered: { id: string; pending: boolean }[];
+  /** Remarks the researcher approved for the paper that no brief presents or excludes, with the result each is on. */
+  unplacedRemarks: { id: string; target: string }[];
   sections: SectionImpact[];
+}
+
+/** Node IDs a brief lists under `## Excluded` (`- id: reason`), so an update never brings them back. */
+export function excludedIds(body: string): string[] {
+  return sectionContent(body, 'Excluded').split(/\r?\n/).map((line) => /^\s*[-*]\s*`?([a-z][a-z0-9_]*)`?\s*(?::|$)/.exec(line)?.[1]).filter((id): id is string => Boolean(id));
 }
 
 export interface ImpactSectionInput { id: string; title: string; brief?: SectionBrief; binding?: SectionBinding; texRaw?: string }
@@ -243,6 +251,10 @@ export function manuscriptImpact(input: { project: string; projectRevision?: num
   const sections = input.sections.map((section) => sectionImpact(section, input.nodes, input.project));
   const presented = new Set(input.sections.flatMap((section) => section.brief?.sources.map((source) => source.id) ?? []));
   const uncovered = requiredAssetIds(input.project).filter((id) => !presented.has(id)).map((id) => ({ id, pending: !input.nodes.get(id)?.approved }));
+  const excluded = new Set(input.sections.flatMap((section) => section.brief ? excludedIds(section.brief.body) : []));
+  const unplacedRemarks = [...input.nodes.values()]
+    .filter((node) => node.kind === 'remark' && node.approved && !presented.has(node.id) && !excluded.has(node.id))
+    .map((node) => ({ id: node.id, target: String(node.data.target ?? '') }));
   const has = (state: SectionState) => sections.some((section) => section.state === state);
   const state: ManuscriptState = !sections.length ? 'unplanned'
     : has('invalid') ? 'invalid'
@@ -250,7 +262,7 @@ export function manuscriptImpact(input: { project: string; projectRevision?: num
     : uncovered.length ? 'uncovered'
     : has('unlocked') ? 'unlocked'
     : 'current';
-  return { state, ...(input.projectRevision ? { projectRevision: input.projectRevision } : {}), uncovered, sections };
+  return { state, ...(input.projectRevision ? { projectRevision: input.projectRevision } : {}), uncovered, unplacedRemarks, sections };
 }
 
 /** Why a section is stale or invalid, one phrase per cause; shared by the CLI and the dashboard. */
@@ -269,6 +281,7 @@ export function sectionReasons(section: SectionImpact): string[] {
 export function renderImpact(impact: ManuscriptImpact): string {
   const lines = [`Manuscript: ${impact.state}${impact.projectRevision ? ` (project revision ${impact.projectRevision})` : ''}`];
   if (impact.uncovered.length) lines.push(`Uncovered required results: ${impact.uncovered.map((item) => `${item.id}${item.pending ? ' (research in progress)' : ''}`).join(', ')}`);
+  if (impact.unplacedRemarks?.length) lines.push(`Remarks approved for the paper but in no brief: ${impact.unplacedRemarks.map((item) => `${item.id} (on ${item.target})`).join(', ')}`);
   for (const section of impact.sections) {
     const details = sectionReasons(section);
     const revision = section.lockedRevision && impact.projectRevision && section.lockedRevision !== impact.projectRevision ? ` [locked at revision ${section.lockedRevision}]` : '';

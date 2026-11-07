@@ -382,3 +382,31 @@ test('a remark the researcher approved for the paper may be a brief source; an e
     assert.match(p.run('impact', 'main_result').stdout, /stale/);
   } finally { p.cleanup(); }
 });
+
+test('impact lists remarks approved for the paper that no brief presents, until a brief presents or excludes them', async () => {
+  const { researchDigest } = bundled('src/domain/digests.ts');
+  const { excludedIds } = bundled('src/domain/manuscriptImpact.ts');
+  assert.deepEqual(excludedIds('## Excluded\n\n- sanity_check: only a test\n- `remark_ab12`: too informal\n* other_lemma\n\nProse.\n'), ['sanity_check', 'remark_ab12', 'other_lemma']);
+  const p = fixture();
+  try {
+    await p.fileService.ensureProjectStructure(p.config, p.paths, true, []);
+    addAsset(p);
+    addSection(p);
+    const loop = path.resolve(__dirname, '../out/research-loop.cjs');
+    const add = (title) => JSON.parse(spawnSync(process.execPath, [loop, 'remark', 'add', '--target', 'main_theorem', '--title', title, '--body', `${title}.`, '--origin', 'researcher', '--from', 'teaching', '--json', '--project', p.root], { encoding: 'utf8' }).stdout);
+    const approved = add('The idea');
+    const unapproved = add('A passing thought');
+    p.write(`research/approvals/remarks/${approved.remarkId}.json`, JSON.stringify({ kind: 'remark', target: approved.remarkId, digest: researchDigest(p.read(approved.path), 'asset'), approvedAt: 'now' }));
+    const before = p.run('impact');
+    assert.equal(before.status, 0, before.stderr);
+    assert.match(before.stdout, new RegExp(`Remarks approved for the paper but in no brief: ${approved.remarkId} \\(on main_theorem\\)`));
+    assert.doesNotMatch(before.stdout, new RegExp(unapproved.remarkId), 'only approved remarks are offered');
+    // The loop's status (and its ready instruction) carries it, even while every section is otherwise as it was.
+    const status = spawnSync(process.execPath, [loop, 'status', '--project', p.root], { encoding: 'utf8' });
+    assert.match(status.stdout, new RegExp(`Remarks approved for the paper but in no brief: ${approved.remarkId}[\\s\\S]*plan-manuscript for uncovered results and approved remarks`));
+    // The researcher keeps it out: listed under ## Excluded, it is not offered again.
+    const brief = path.join(p.paths.writingSections, 'main_result.md');
+    p.write(brief, `${p.read(brief)}\n## Excluded\n\n- ${approved.remarkId}: too informal for the paper\n`);
+    assert.doesNotMatch(p.run('impact').stdout, /Remarks approved for the paper/);
+  } finally { p.cleanup(); }
+});

@@ -2182,8 +2182,8 @@ export class ResearchLoopCore {
     let impact;
     try { impact = await loadManuscriptImpact(this.files, this.paths); } catch (error) { return `Manuscript: unreadable (${error instanceof Error ? error.message : String(error)})`; }
     if (!impact) return undefined;
-    if (impact.state === 'current') return renderImpact(impact).split('\n')[0];
-    return `${renderImpact(impact)}\nUpdate only these sections: plan-manuscript for uncovered results, draft-latex for stale ones (${MANUSCRIPT_COMMAND} prepare <section> lists only what changed). After the researcher reviews a section, they lock it with ${MANUSCRIPT_COMMAND} lock <section> --apply.`;
+    if (impact.state === 'current' && !impact.unplacedRemarks.length) return renderImpact(impact).split('\n')[0];
+    return `${renderImpact(impact)}\nUpdate only these sections: plan-manuscript for uncovered results${impact.unplacedRemarks.length ? ' and approved remarks (propose where each goes, or list it under ## Excluded of the brief of its result; the researcher decides)' : ''}, draft-latex for stale ones (${MANUSCRIPT_COMMAND} prepare <section> lists only what changed). After the researcher reviews a section, they lock it with ${MANUSCRIPT_COMMAND} lock <section> --apply.`;
   }
 
   // ---------- context packs ----------
