@@ -8,6 +8,8 @@ export type ExtensionMessage =
   | { type: 'init'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'nodesUpdated'; nodes: ResearchNode[] }
   | { type: 'nodeDetail'; id: string; frontmatter: NodeFrontmatter; body: string; remarks?: RemarkView[] }
+  /** Every remark (active and archived), for the Remarks view. */
+  | { type: 'remarksData'; remarks: RemarkView[] }
   | { type: 'projectMd'; content: string; summary?: ProjectSummary }
   | { type: 'papersData'; papers: PaperEntry[] }
   | { type: 'manuscriptStatus'; status: ManuscriptStatus }
@@ -34,7 +36,12 @@ export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'getNodeContent'; id: string }
   | { type: 'saveNode'; id: string; frontmatter: NodeFrontmatter; body: string }
-  | { type: 'approveRemark'; id: string; nodeId: string }
+  | { type: 'approveRemark'; id: string; nodeId?: string }
+  | { type: 'getRemarks' }
+  | { type: 'checkRemark'; id: string }
+  | { type: 'addRemark'; target: string; title: string; body: string; anchor?: string }
+  | { type: 'editRemark'; id: string; title?: string; body?: string; anchor?: string }
+  | { type: 'archiveRemark'; id: string; archived: boolean }
   | { type: 'createNode'; nodeType: NodeType; title: string; targetAsset?: string; definitionKind?: DefinitionKind }
   | { type: 'updateStatus'; id: string; status: ResearchStatus }
   /** Approve several library results at once (the extension asks the researcher to confirm). */

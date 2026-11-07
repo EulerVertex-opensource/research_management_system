@@ -36,6 +36,19 @@ export interface RemarkData {
   target_digest: string;
   at: string;
   tags?: string[];
+  /** Set only from the dashboard: the researcher read an agent's remark and agrees with it, as worded then (see remarkCheckDigest). */
+  checked_digest?: string;
+  checked_at?: string;
+}
+
+/** The text a researcher's check covers; an edit afterwards makes the remark unchecked again. */
+export function remarkCheckDigest(remark: Pick<RemarkData, 'title'> & { body: string }): string {
+  return sha(normalizeProse(`${remark.title}\n${remark.body}`));
+}
+
+/** The researcher's own remarks need no check; an agent's counts as checked while the researcher's check matches its text. */
+export function isRemarkChecked(remark: Pick<RemarkData, 'origin' | 'title' | 'checked_digest'> & { body: string }): boolean {
+  return remark.origin === 'researcher' || (Boolean(remark.checked_digest) && remark.checked_digest === remarkCheckDigest(remark));
 }
 
 export interface Remark extends RemarkData { id: string; body: string; file: string }
@@ -88,7 +101,8 @@ export function remarkEditProblem(remark: Pick<RemarkData, 'from'>, by: RemarkFr
 }
 
 /** A one-line label for listings: where it came from, and whether it predates the target's current text. */
-export function remarkLabel(remark: Pick<RemarkData, 'origin' | 'from' | 'status'>, stale: boolean): string {
-  const who = remark.origin === 'researcher' ? "the researcher's" : remark.from === 'loop' ? "the loop's, not checked by anyone" : "an agent's, not checked by anyone";
+export function remarkLabel(remark: Pick<RemarkData, 'origin' | 'from' | 'status'> & { checked?: boolean }, stale: boolean): string {
+  const agent = remark.from === 'loop' ? "the loop's" : "an agent's";
+  const who = remark.origin === 'researcher' ? "the researcher's" : remark.checked ? `${agent}, checked by the researcher` : `${agent}, not checked by anyone`;
   return [who, stale ? 'written for an earlier version of the result' : '', remark.status === 'archived' ? 'archived' : ''].filter(Boolean).join('; ');
 }

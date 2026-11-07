@@ -35,6 +35,10 @@ interface Props {
   onOpenFile?: (filePath: string) => void;
   /** The researcher approves a remark's text for the paper. */
   onApproveRemark?: (remarkId: string) => void;
+  onCheckRemark?: (remarkId: string) => void;
+  /** Open a remark in the Remarks view, or start a new one on this result. */
+  onOpenRemark?: (remarkId: string) => void;
+  onAddRemark?: () => void;
 }
 
 export function NodeDetail({
@@ -59,6 +63,9 @@ export function NodeDetail({
   onOpenNodeLink,
   onOpenFile,
   onApproveRemark,
+  onCheckRemark,
+  onOpenRemark,
+  onAddRemark,
 }: Props) {
   const isDefinition = initialFm.type === 'definition';
   // Project and library nodes alike, so a project result can pick a library dependency.
@@ -357,10 +364,11 @@ export function NodeDetail({
           {remarks.map((remark) => (
             <div key={remark.id} style={{ borderLeft: '2px solid var(--vscode-textBlockQuote-border, #888)', padding: '4px 8px', margin: '4px 0', fontSize: 12 }}>
               <div style={{ fontWeight: 600 }}>
-                {remark.title}{remark.anchor ? <span style={{ fontWeight: 400, opacity: 0.7 }}> · {remark.anchor}</span> : null}
+                <a href="#" title="Open in Remarks" onClick={(event) => { event.preventDefault(); onOpenRemark?.(remark.id); }}>{remark.title}</a>{remark.anchor ? <span style={{ fontWeight: 400, opacity: 0.7 }}> · {remark.anchor}</span> : null}
               </div>
               <div style={{ fontSize: 11, opacity: 0.7 }}>
-                {remark.origin === 'researcher' ? "The researcher's" : remark.from === 'loop' ? "The loop's (not checked)" : "An agent's (not checked)"}
+                {remark.origin === 'researcher' ? "The researcher's" : `${remark.from === 'loop' ? "The loop's" : "An agent's"} (${remark.checked ? 'checked by you' : 'not checked'})`}
+                {remark.origin === 'agent' && !remark.checked && <>{' · '}<a href="#" title="You read it and agree with it as worded now" onClick={(event) => { event.preventDefault(); onCheckRemark?.(remark.id); }}>mark as checked</a></>}
                 {remark.stale ? ' · written for an earlier version' : ''}
                 {' · '}<a href={remark.file} onClick={(event) => { event.preventDefault(); onOpenFile?.(remark.file); }}>file</a>
                 {' · '}{remark.approved
@@ -370,6 +378,9 @@ export function NodeDetail({
               <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{remark.body}</div>
             </div>
           ))}
+        </div>}
+        {!isProofFile && !isIdea && onAddRemark && <div style={{ marginTop: remarks.length ? 2 : 10, fontSize: 12 }}>
+          <a href="#" title="Write a remark on this result: an explanation, not part of it" onClick={(event) => { event.preventDefault(); onAddRemark(); }}>+ Add a remark</a>
         </div>}
       </div>
 

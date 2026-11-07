@@ -205,7 +205,7 @@ export class NodeIndexService {
     const kind = nodeKindOf(frontmatter.type);
     const remarks = kind === 'asset' || kind === 'definition'
       ? (await new Remarks(this.fileService, this.paths).list({ target: id }).catch(() => [])).map((remark): RemarkView => ({
-        id: remark.id, title: remark.title, body: remark.body, ...(remark.anchor ? { anchor: remark.anchor } : {}), origin: remark.origin, from: remark.from, stale: remark.stale, approved: remark.approved, file: remark.file, at: String(remark.at),
+        id: remark.id, title: remark.title, target: remark.target, targetTitle: frontmatter.title || node.title, status: remark.status, body: remark.body, ...(remark.anchor ? { anchor: remark.anchor } : {}), origin: remark.origin, from: remark.from, stale: remark.stale, approved: remark.approved, checked: remark.checked, file: remark.file, at: String(remark.at),
       }))
       : [];
     return { frontmatter: { ...frontmatter, title: frontmatter.title || node.title }, body: content.trim(), remarks };

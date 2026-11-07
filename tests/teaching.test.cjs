@@ -388,6 +388,27 @@ test('a remark is saved at once in its own file, touches no approval, and shows 
   assert.equal((await f.core.remarks().list({ target: 'key_lemma' }))[0].stale, true);
   await f.core.archiveRemark(remark.id, 'teaching');
   assert.deepEqual(await f.core.remarks().list({ target: 'key_lemma' }), []);
+  // An agent's remark is unchecked until the researcher checks it in the dashboard; an edit unchecks it again.
+  const agents = await f.core.addRemark({ target: 'key_lemma', title: 'A guess', body: 'The constant is uniform.', origin: 'agent', from: 'teaching' });
+  const listed = async () => (await f.core.remarks().list({ target: 'key_lemma' })).find((item) => item.id === agents.id);
+  assert.equal((await listed()).checked, false);
+  const { remarkLabel } = load('../src/domain/remarks.ts');
+  assert.match(remarkLabel(await listed(), false), /an agent's, not checked by anyone/);
+  await f.core.checkRemark(agents.id, 'dashboard');
+  assert.equal((await listed()).checked, true);
+  assert.match(remarkLabel(await listed(), false), /an agent's, checked by the researcher/);
+  await f.core.editRemark(agents.id, { body: 'The constant is uniform in t.' }, 'teaching');
+  assert.equal((await listed()).checked, false, 'a check covers the text it was given for');
+  // Approving it for the paper checks it; archiving and restoring keep that approval.
+  await f.core.approveRemark(agents.id, 'dashboard');
+  assert.deepEqual([(await listed()).checked, (await listed()).approved], [true, true]);
+  await f.core.archiveRemark(agents.id, 'other');
+  await f.core.restoreRemark(agents.id, 'other');
+  assert.equal((await listed()).approved, true);
+  await f.core.archiveRemark(agents.id, 'other');
+  await f.core.restoreRemark(remark.id, 'other');
+  assert.deepEqual((await f.core.remarks().list({ target: 'key_lemma' })).map((item) => item.id), [remark.id], 'an archived remark can come back');
+  await f.core.archiveRemark(remark.id, 'other');
   // A proposal from before remarks had files: its remarks become a remark file.
   const { understandingParts } = load('../src/domain/understanding.ts');
   f.map.set('.research-assistant-loop/revisions/key_lemma.json', JSON.stringify({ id: 'key_lemma', remarks: 'An old note.', baseStatement: understandingParts(f.map.get(LEMMA)).statementDigest, at: 'then' }));

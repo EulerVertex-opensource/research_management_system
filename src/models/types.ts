@@ -28,6 +28,10 @@ export interface NodeFrontmatter {
 export interface RemarkView {
   id: string;
   title: string;
+  /** The asset or definition it is on, and that result's title. */
+  target: string;
+  targetTitle?: string;
+  status: 'active' | 'archived';
   body: string;
   anchor?: string;
   origin: 'researcher' | 'agent';
@@ -36,6 +40,8 @@ export interface RemarkView {
   stale: boolean;
   /** The researcher approved this exact text for the paper. */
   approved: boolean;
+  /** The researcher's own, or an agent's they checked as worded now. */
+  checked: boolean;
   file: string;
   at: string;
 }

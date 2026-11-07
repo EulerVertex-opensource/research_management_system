@@ -342,6 +342,7 @@ Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everythin
 | **Library** | Browse known results from earlier work and papers (`lib_` IDs), and approve them in bulk |
 | **Plans** | Browse and edit proof plans, including failed and succeeded attempts |
 | **Ideas** | Browse and edit freeform research ideas |
+| **Remarks** | Every remark on a result (yours, the loop's, the teaching chat's): filter, read, edit, archive, approve one for the paper, or write a new one |
 | **Papers** | Edit the configured bibliography and paper index; add local PDFs plus shared source URLs |
 | **Manuscript** | Compile the configured main TeX file and read the generated PDF inside Research Assistant; *Which results it covers* shows which section presents each result and whether it is up to date |
 | **⚠ File problems** | Appears only when research files do not fit together (duplicate IDs, a dependency on a retired result); lists them and can ask the agent to fix them |

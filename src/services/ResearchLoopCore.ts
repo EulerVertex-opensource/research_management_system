@@ -30,7 +30,7 @@ import { layoutReport } from '../domain/layout';
 import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
 import { LoopGit } from './LoopGit';
 import { RemarkInput, Remarks } from './Remarks';
-import { Remark, RemarkFrom, remarkReferenceProblems } from '../domain/remarks';
+import { Remark, RemarkFrom, isRemarkChecked, remarkReferenceProblems } from '../domain/remarks';
 import {
   CheckInfo, DecisionExtra, DecisionInfo, DecisionKind, Provenance, checkMarkdown, sortDecisions, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
   failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampSearchRecord,
@@ -1442,10 +1442,18 @@ export class ResearchLoopCore {
    * new approval. It approves the remark's text, never a result.
    */
   async approveRemark(id: string, source: string): Promise<void> {
-    const remark = await this.remarks().get(id);
+    let remark = await this.remarks().get(id);
     if (remark.status !== 'active') throw new Error(`${id} is archived; restore it before approving it for the paper.`);
+    // Approving a remark for the paper means the researcher read it: an agent's counts as checked too.
+    if (!isRemarkChecked(remark)) remark = await this.remarks().check(id, this.now());
     await this.record('remark', id, await this.files.readFile(remark.file), source);
     await this.event('remark_approved', { assetId: remark.target, remarkId: id, source });
+  }
+
+  /** The researcher read an agent's remark and agrees with it as worded now (the dashboard only). An edit afterwards unchecks it. */
+  async checkRemark(id: string, source: string): Promise<void> {
+    const remark = await this.remarks().check(id, this.now());
+    await this.event('remark_checked', { assetId: remark.target, remarkId: id, source });
   }
 
   /** Remark files that are malformed or name no target, and nodes whose relations name a remark. */
@@ -1465,6 +1473,12 @@ export class ResearchLoopCore {
       }
     }
     return problems;
+  }
+
+  async restoreRemark(id: string, by: RemarkFrom): Promise<Remark> {
+    const remark = await this.remarks().restore(id, by, this.now());
+    await this.event('remark_restored', { assetId: remark.target, remarkId: id, from: by });
+    return remark;
   }
 
   async archiveRemark(id: string, by: RemarkFrom): Promise<Remark> {

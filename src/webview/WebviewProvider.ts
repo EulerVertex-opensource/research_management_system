@@ -6,7 +6,8 @@ import { FileService } from '../services/FileService';
 import { NodeIndexService } from '../services/NodeIndexService';
 import { PaperIndexService } from '../services/PaperIndexService';
 import { WebviewMessage, ExtensionMessage } from '../models/messages';
-import { NodeType, ResearchNode, ResearchStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig, ManuscriptBuildPhase, ManuscriptStatus } from '../models/types';
+import { NodeType, RemarkView, ResearchNode, ResearchStatus, UIState, DEFAULT_UI_STATE, ProjectPaths, ResearchAssistantConfig, ManuscriptBuildPhase, ManuscriptStatus } from '../models/types';
+import { Remarks } from '../services/Remarks';
 import { generateAgentInstructions } from '../services/CopilotInstructionsService';
 import { SkillInstallerService } from '../services/SkillInstallerService';
 import { ProjectConfigService } from '../services/ProjectConfigService';
@@ -384,6 +385,7 @@ export class WebviewProvider {
     const remarkWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, `${paths.remarks}/*.md`));
     const onRemarkChange = async (uri: vscode.Uri) => {
       this.scheduleGraph();
+      void this.sendRemarks();
       try {
         const raw = await this.fileService.readFile(`${paths.remarks}/${uri.path.split('/').pop()}`);
         const target = /^target:\s*['"]?([a-z][a-z0-9_]*)/m.exec(raw)?.[1];
@@ -392,7 +394,7 @@ export class WebviewProvider {
     };
     remarkWatcher.onDidChange((uri) => { void onRemarkChange(uri); });
     remarkWatcher.onDidCreate((uri) => { void onRemarkChange(uri); });
-    remarkWatcher.onDidDelete(() => this.scheduleGraph());
+    remarkWatcher.onDidDelete(() => { this.scheduleGraph(); void this.sendRemarks(); });
 
     // Watch the configured project description.
     const projectWatcher = vscode.workspace.createFileSystemWatcher(
@@ -569,12 +571,25 @@ export class WebviewProvider {
     this.send({ type: 'projectMd', content, summary });
   }
 
+  /** Every remark, active and archived, with the title of the result each is on, for the Remarks view. */
+  private async sendRemarks(): Promise<RemarkView[]> {
+    if (!this.paths || !this.nodeIndex) return [];
+    const index = this.nodeIndex;
+    const remarks = (await new Remarks(this.fileService, this.paths).list({ includeArchived: true }).catch(() => [])).map((remark): RemarkView => ({
+      id: remark.id, title: remark.title, target: remark.target, targetTitle: index.getById(remark.target)?.title, status: remark.status, body: remark.body,
+      ...(remark.anchor ? { anchor: remark.anchor } : {}), origin: remark.origin, from: remark.from, stale: remark.stale, approved: remark.approved, checked: remark.checked, file: remark.file, at: String(remark.at),
+    }));
+    this.send({ type: 'remarksData', remarks });
+    return remarks;
+  }
+
   private async refreshNodes(): Promise<void> {
     if (!this.nodeIndex || !this.paths) return;
     const nodes = await this.refreshIndex();
     this.send({ type: 'nodesUpdated', nodes });
     this.scheduleGraph();
     this.scheduleSyncState();
+    void this.sendRemarks();
     generateAgentInstructions(nodes, this.fileService, this.paths).catch(() => { /* non-fatal */ });
   }
 
@@ -728,10 +743,27 @@ export class WebviewProvider {
           break;
         }
 
-        case 'approveRemark': {
+        case 'approveRemark':
+        case 'checkRemark':
+        case 'editRemark':
+        case 'archiveRemark':
+        case 'addRemark': {
           if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
-          await this.loopHost.approveRemark(msg.id);
-          if (this.nodeIndex.getById(msg.nodeId)) this.send({ type: 'nodeDetail', id: msg.nodeId, ...await this.nodeIndex.getNodeDetail(msg.nodeId) });
+          let target: string | undefined;
+          if (msg.type === 'approveRemark') await this.loopHost.approveRemark(msg.id);
+          else if (msg.type === 'checkRemark') await this.loopHost.checkRemark(msg.id);
+          else if (msg.type === 'editRemark') await this.loopHost.editRemark(msg.id, { title: msg.title, body: msg.body, anchor: msg.anchor });
+          else if (msg.type === 'archiveRemark') await this.loopHost.archiveRemark(msg.id, msg.archived);
+          else { await this.loopHost.addRemark({ target: msg.target, title: msg.title, body: msg.body, anchor: msg.anchor }); target = msg.target; }
+          const remarks = await this.sendRemarks();
+          target ??= remarks.find((remark) => remark.id === (msg as { id?: string }).id)?.target;
+          if (target && this.nodeIndex.getById(target)) this.send({ type: 'nodeDetail', id: target, ...await this.nodeIndex.getNodeDetail(target) });
+          this.scheduleGraph();
+          break;
+        }
+
+        case 'getRemarks': {
+          await this.sendRemarks();
           break;
         }
 

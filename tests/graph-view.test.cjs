@@ -535,3 +535,43 @@ test('a result shows how many active remarks it has; an assumption is labelled a
   assert.equal(byId.get('bounded').definitionKind, 'assumption');
   assert.equal(byId.get('main').definitionKind, undefined);
 });
+
+test('the Remarks view lists remarks with whose they are and where they stand, and shows one with its actions', () => {
+  const { RemarkList } = load('../webview-src/components/RemarkList.tsx', ['react']);
+  const { RemarkDetail, RemarkCreate } = load('../webview-src/components/RemarkDetail.tsx', ['react']);
+  const base = { target: 'main', targetTitle: 'Main theorem', body: 'Compactness does the work.', file: 'research/remarks/remark_a.md', stale: false, approved: false, status: 'active' };
+  const remarks = [
+    { ...base, id: 'remark_a', title: 'The idea', origin: 'researcher', from: 'teaching', checked: true, anchor: 'step 2', at: '2026-11-02' },
+    { ...base, id: 'remark_b', title: 'Why the obvious route fails', origin: 'agent', from: 'loop', stale: true, approved: true, checked: true, at: '2026-11-03' },
+    { ...base, id: 'remark_c', title: 'An old note', origin: 'researcher', from: 'other', checked: true, status: 'archived', at: '2026-11-01' },
+    { ...base, id: 'remark_d', title: 'A guess about the constant', origin: 'agent', from: 'teaching', checked: false, at: '2026-10-30' },
+  ];
+  const noop = () => {};
+  const list = renderToStaticMarkup(React.createElement(RemarkList, { remarks, selectedId: 'remark_a', onSelect: noop }));
+  assert.match(list, /Why the obvious route fails[\s\S]*The idea/, 'newest first');
+  assert.doesNotMatch(list, /An old note/, 'archived remarks are hidden by default');
+  assert.match(list, /Loop · checked/);
+  assert.match(list, /Agent · unchecked/);
+  assert.match(list, /For the paper/);
+  assert.match(list, /Earlier version/);
+  assert.match(list, /on Main theorem · step 2/);
+  const handlers = { onOpenTarget: noop, onOpenFile: noop, onApprove: noop, onCheck: noop, onSave: noop, onArchive: noop };
+  const detail = renderToStaticMarkup(React.createElement(RemarkDetail, { remark: remarks[0], target: { id: 'main', title: 'Main theorem' }, ...handlers }));
+  assert.doesNotMatch(detail, /Mark as checked/, "the researcher's own remark needs no check");
+  const unchecked = renderToStaticMarkup(React.createElement(RemarkDetail, { remark: remarks[3], target: { id: 'main', title: 'Main theorem' }, ...handlers }));
+  assert.match(unchecked, /Mark as checked/);
+  assert.match(unchecked, /nobody has checked it/);
+  assert.match(detail, /On <a href="#">Main theorem<\/a> · step 2/);
+  assert.match(detail, /Approve for the paper/);
+  assert.match(detail, />Archive</);
+  assert.match(detail, /Compactness does the work/);
+  const approved = renderToStaticMarkup(React.createElement(RemarkDetail, { remark: remarks[1], target: undefined, ...handlers }));
+  assert.doesNotMatch(approved, /Mark as checked/, 'approving it for the paper counts as checking it');
+  assert.doesNotMatch(approved, /Approve for the paper/, 'already approved');
+  assert.match(approved, /The result changed after this remark was written/);
+  const archived = renderToStaticMarkup(React.createElement(RemarkDetail, { remark: remarks[2], ...handlers }));
+  assert.match(archived, />Restore</);
+  assert.doesNotMatch(archived, />Edit</);
+  const create = renderToStaticMarkup(React.createElement(RemarkCreate, { targets: [{ id: 'main', title: 'Main theorem' }], initialTarget: 'main', onCreate: noop, onCancel: noop }));
+  assert.match(create, /<option value="main" selected="">Main theorem<\/option>/);
+});

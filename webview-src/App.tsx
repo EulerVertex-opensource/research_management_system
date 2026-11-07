@@ -4,6 +4,8 @@ import { ExtensionMessage } from '../src/models/messages';
 import { useExtension } from './hooks/useExtension';
 import { Sidebar, SidebarView } from './components/Sidebar';
 import { NodeList } from './components/NodeList';
+import { RemarkList } from './components/RemarkList';
+import { RemarkCreate, RemarkDetail } from './components/RemarkDetail';
 import { NodeDetail } from './components/NodeDetail';
 import { ProjectView } from './components/ProjectView';
 import { PaperList } from './components/PaperList';
@@ -55,11 +57,18 @@ interface State {
   sync: SyncBadge | null;
   notice: SyncNotice | null;
   problems: string[];
+  remarks: RemarkView[];
+  selectedRemarkId: string | null;
+  /** Writing a new remark in the Remarks view; the target it starts on, if any. */
+  creatingRemark: { target?: string } | null;
 }
 
 type Action =
   | { type: 'INIT'; nodes: ResearchNode[]; projectRoot: string; uiState: UIState; initialized: boolean; paths: ProjectPathSummary }
   | { type: 'NODES_UPDATED'; nodes: ResearchNode[] }
+  | { type: 'REMARKS_DATA'; remarks: RemarkView[] }
+  | { type: 'SELECT_REMARK'; id: string | null }
+  | { type: 'CREATE_REMARK'; create: { target?: string } | null }
   | { type: 'NODE_DETAIL'; id: string; frontmatter: NodeFrontmatter; body: string; remarks: RemarkView[] }
   | { type: 'PROJECT_MD'; content: string; summary?: ProjectSummary }
   | { type: 'PAPERS_DATA'; papers: PaperEntry[] }
@@ -96,6 +105,12 @@ function reducer(state: State, action: Action): State {
       };
     case 'NODES_UPDATED':
       return { ...state, nodes: action.nodes };
+    case 'REMARKS_DATA':
+      return { ...state, remarks: action.remarks };
+    case 'SELECT_REMARK':
+      return { ...state, selectedRemarkId: action.id, creatingRemark: null };
+    case 'CREATE_REMARK':
+      return { ...state, creatingRemark: action.create, ...(action.create ? { activeView: 'remarks' as SidebarView, selectedRemarkId: null } : {}) };
     case 'NODE_DETAIL':
       return { ...state, nodeDetails: { ...state.nodeDetails, [action.id]: { frontmatter: action.frontmatter, body: action.body, remarks: action.remarks } } };
     case 'PROJECT_MD':
@@ -107,7 +122,7 @@ function reducer(state: State, action: Action): State {
     case 'SELECT_PAPER':
       return { ...state, selectedPaperSlug: action.slug };
     case 'SET_VIEW':
-      return { ...state, activeView: action.view, selectedNodeId: null, selectedPaperSlug: null };
+      return { ...state, activeView: action.view, selectedNodeId: null, selectedPaperSlug: null, selectedRemarkId: null, creatingRemark: null };
     case 'TOGGLE_CREATE_MODAL':
       return { ...state, showCreateModal: !state.showCreateModal };
     case 'SET_ERROR':
@@ -166,6 +181,9 @@ const initialState: State = {
   sync: null,
   notice: null,
   problems: [],
+  remarks: [],
+  selectedRemarkId: null,
+  creatingRemark: null,
 };
 
 /** Views drawn from the research overview payload. */
@@ -206,6 +224,9 @@ export function App() {
         break;
       case 'nodesUpdated':
         dispatch({ type: 'NODES_UPDATED', nodes: msg.nodes });
+        break;
+      case 'remarksData':
+        dispatch({ type: 'REMARKS_DATA', remarks: msg.remarks });
         break;
       case 'nodeDetail':
         dispatch({ type: 'NODE_DETAIL', id: msg.id, frontmatter: msg.frontmatter, body: msg.body, remarks: msg.remarks ?? [] });
@@ -270,6 +291,9 @@ export function App() {
     }
     if (view === 'manuscript') {
       send({ type: 'getManuscriptStatus' });
+    }
+    if (view === 'remarks') {
+      send({ type: 'getRemarks' });
     }
     if (GRAPH_VIEWS.includes(view)) {
       send({ type: 'getGraph' });
@@ -430,9 +454,13 @@ export function App() {
     state.activeView === 'ideas' ? 'idea' :
     state.activeView === 'plans' ? 'plan' : undefined;
 
+  const showRemarkList = state.activeView === 'remarks';
+  const remarkTargets = state.nodes.filter((node) => ASSET_TYPES.has(node.type) || node.type === 'definition');
+  const selectedRemark = state.remarks.find((remark) => remark.id === state.selectedRemarkId) ?? null;
+  const openRemark = (id: string) => { dispatch({ type: 'SET_VIEW', view: 'remarks' }); dispatch({ type: 'SELECT_REMARK', id }); send({ type: 'getRemarks' }); };
   const showNodeList = state.activeView === 'assets' || state.activeView === 'definitions' || state.activeView === 'library' || state.activeView === 'ideas' || state.activeView === 'plans';
   const showPaperList = state.activeView === 'papers';
-  const showListColumn = showNodeList || showPaperList;
+  const showListColumn = showNodeList || showPaperList || showRemarkList;
 
   const { layoutMode, splitRatio, nodeListWidth, metadataHeight } = state.uiState;
 
@@ -471,7 +499,7 @@ export function App() {
                 }}
               >
                 <span style={{ fontWeight: 600, fontSize: 13 }}>
-                  {state.activeView === 'assets' ? 'Assets' : state.activeView === 'definitions' ? 'Definitions' : state.activeView === 'library' ? 'Library' : state.activeView === 'ideas' ? 'Ideas' : state.activeView === 'plans' ? 'Plans' : 'Papers'}
+                  {state.activeView === 'assets' ? 'Assets' : state.activeView === 'definitions' ? 'Definitions' : state.activeView === 'library' ? 'Library' : state.activeView === 'ideas' ? 'Ideas' : state.activeView === 'plans' ? 'Plans' : state.activeView === 'remarks' ? 'Remarks' : 'Papers'}
                 </span>
                 {showNodeList && state.activeView !== 'library' && (
                   <button
@@ -485,6 +513,15 @@ export function App() {
                 {showPaperList && (
                   <AddPaperButton onAdd={handleAddPaper} />
                 )}
+                {showRemarkList && (
+                  <button
+                    onClick={() => dispatch({ type: 'CREATE_REMARK', create: {} })}
+                    title="Write a remark on a result"
+                    style={{ padding: '1px 9px', fontSize: 16, background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: 3, cursor: 'pointer' }}
+                  >
+                    +
+                  </button>
+                )}
               </div>
 
               {/* List body */}
@@ -497,6 +534,9 @@ export function App() {
                   definitionPath={state.paths?.definitions ?? 'research/definitions'}
                   onApprove={(ids, label) => send({ type: 'approveNodes', ids, label })}
                 />
+              )}
+              {showRemarkList && (
+                <RemarkList remarks={state.remarks} selectedId={state.selectedRemarkId} onSelect={(id) => dispatch({ type: 'SELECT_REMARK', id })} />
               )}
               {showPaperList && (
                 <PaperList
@@ -581,6 +621,31 @@ export function App() {
               onInitProject={() => send({ type: 'initProject' })}
               onRefreshProject={() => send({ type: 'refreshProject' })}
             />
+          ) : showRemarkList ? (
+            state.creatingRemark ? (
+              <RemarkCreate
+                targets={remarkTargets}
+                initialTarget={state.creatingRemark.target}
+                onCreate={(input) => { send({ type: 'addRemark', ...input }); dispatch({ type: 'CREATE_REMARK', create: null }); }}
+                onCancel={() => dispatch({ type: 'CREATE_REMARK', create: null })}
+              />
+            ) : selectedRemark ? (
+              <RemarkDetail
+                key={selectedRemark.id}
+                remark={selectedRemark}
+                target={state.nodes.find((node) => node.id === selectedRemark.target)}
+                onOpenTarget={handleNavigateNode}
+                onOpenFile={(filePath) => send({ type: 'openInEditor', filePath })}
+                onApprove={(id) => send({ type: 'approveRemark', id })}
+                onCheck={(id) => send({ type: 'checkRemark', id })}
+                onSave={(id, changes) => send({ type: 'editRemark', id, title: changes.title, body: changes.body, anchor: changes.anchor })}
+                onArchive={(id, archived) => send({ type: 'archiveRemark', id, archived })}
+              />
+            ) : (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>
+                Select a remark to read and edit
+              </div>
+            )
           ) : showPaperList ? (
             selectedPaper ? (
               <PaperDetail
@@ -619,8 +684,11 @@ export function App() {
                 onOpenPdf={handleOpenPdf}
                 onNavigateNode={handleNavigateNode}
                 onOpenNodeLink={(href) => handleOpenResearchLink(selectedNode.filePath, href)}
-                onOpenFile={(filePath) => send({ type: 'openFile', filePath })}
+                onOpenFile={(filePath) => send({ type: 'openInEditor', filePath })}
                 onApproveRemark={(remarkId) => send({ type: 'approveRemark', id: remarkId, nodeId: selectedNode.id })}
+                onCheckRemark={(remarkId) => send({ type: 'checkRemark', id: remarkId })}
+                onOpenRemark={openRemark}
+                onAddRemark={() => dispatch({ type: 'CREATE_REMARK', create: { target: selectedNode.id } })}
               />
             ) : selectedNode ? (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Loading…</div>

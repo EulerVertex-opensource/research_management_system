@@ -284,6 +284,22 @@ export class LoopHost implements vscode.Disposable {
     if (recorded) this.output.appendLine(`[loop] Recorded ${source} approval of ${id}`);
   }
 
+  /** Remarks the researcher writes, edits, archives, or restores in the dashboard: theirs, from outside the chats. */
+  async addRemark(input: { target: string; title: string; body: string; anchor?: string }): Promise<string> {
+    return (await this.withCore((core) => core.addRemark({ ...input, origin: 'researcher', from: 'other' }))).id;
+  }
+  async editRemark(id: string, changes: { title?: string; body?: string; anchor?: string }): Promise<void> {
+    await this.withCore((core) => core.editRemark(id, changes, 'other'));
+  }
+  async archiveRemark(id: string, archived: boolean): Promise<void> {
+    await this.withCore((core) => archived ? core.archiveRemark(id, 'other') : core.restoreRemark(id, 'other'));
+  }
+
+  /** The researcher clicked "Mark as checked" on an agent's remark in the dashboard. */
+  async checkRemark(id: string): Promise<void> {
+    await this.withCore((core) => core.checkRemark(id, 'dashboard'));
+  }
+
   /** The researcher clicked "Approve for the paper" on a remark in the dashboard. */
   async approveRemark(id: string): Promise<void> {
     await this.withCore((core) => core.approveRemark(id, 'dashboard'));

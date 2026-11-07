@@ -7,7 +7,7 @@ import { readApprovals } from './ApprovalStore';
 import { findNodeFile } from '../domain/registry';
 import {
   LOOP_REMARKS_PER_STAGE, REMARK_FROM_LIST, REMARK_ID, REMARK_ORIGIN_LIST, Remark, RemarkData, RemarkFrom, RemarkOrigin,
-  remarkEditProblem, remarkProblems, remarkTargetDigest,
+  isRemarkChecked, remarkCheckDigest, remarkEditProblem, remarkProblems, remarkTargetDigest,
 } from '../domain/remarks';
 
 /** What the loop is doing, as far as a remark it writes is concerned. */
@@ -23,8 +23,8 @@ export interface RemarkInput {
   tags?: string[];
 }
 
-/** `approved`: the researcher agreed this exact text may appear in the paper. */
-export interface ListedRemark extends Remark { stale: boolean; approved: boolean }
+/** `approved`: the researcher agreed this exact text may appear in the paper. `checked`: theirs, or an agent's they checked (approving it counts). */
+export interface ListedRemark extends Remark { stale: boolean; approved: boolean; checked: boolean }
 
 /**
  * Reads and writes remarks (see domain/remarks.ts). Every write goes through
@@ -77,7 +77,8 @@ export class Remarks {
       if (!digests.has(remark.target)) digests.set(remark.target, await this.digestOf(remark.target).catch(() => undefined));
       const current = digests.get(remark.target);
       const raw = await this.files.readFile(remark.file).catch(() => '');
-      result.push({ ...remark, stale: current !== undefined && current !== remark.target_digest, approved: Boolean(raw) && isApproved(records, 'remark', remark.id, raw) });
+      const approved = Boolean(raw) && isApproved(records, 'remark', remark.id, raw);
+      result.push({ ...remark, stale: current !== undefined && current !== remark.target_digest, approved, checked: approved || isRemarkChecked(remark) });
     }
     return result;
   }
@@ -148,6 +149,27 @@ export class Remarks {
   async link(remark: Pick<Remark, 'id' | 'title' | 'file'>): Promise<string> {
     await writeDashboardLinks(this.files, [{ id: remark.id, title: `Remark: ${remark.title}`, file: remark.file }]);
     return `[${remark.title.replace(/[[\]]/g, '')}](${dashboardLinkPath(remark.id)})`;
+  }
+
+  /** The researcher read an agent's remark and agrees with it as worded now. Only the dashboard calls this. */
+  async check(id: string, at: string): Promise<Remark> {
+    const remark = await this.get(id);
+    const { id: _id, body, file: _file, ...data } = remark;
+    const next: RemarkData = { ...data, checked_digest: remarkCheckDigest(remark), checked_at: at };
+    await this.write(id, next, body);
+    return { ...next, id, body, file: this.file(id) };
+  }
+
+  /** Bring back an archived remark; it again speaks to the target's current text only if it is edited. */
+  async restore(id: string, by: RemarkFrom, at: string): Promise<Remark> {
+    const remark = await this.get(id);
+    const problem = remarkEditProblem(remark, by, id);
+    if (problem) throw new Error(problem);
+    const { id: _id, body, file: _file, ...data } = remark;
+    const next = { ...data, status: 'active', restored_at: at } as RemarkData & { archived_at?: string };
+    delete next.archived_at;
+    await this.write(id, next, body);
+    return { ...next, id, body, file: this.file(id) };
   }
 
   /** Every problem with the remark files, given all asset and definition IDs. */

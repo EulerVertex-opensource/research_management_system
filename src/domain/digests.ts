@@ -21,7 +21,7 @@ export function normalizeProse(text: string): string {
 }
 
 /** Frontmatter keys a digest ignores: presentation, lifecycle, and fields older schemas stored. */
-const UNAPPROVED_KEYS = ['status', 'title', 'used_in', 'tags', 'proof_digest', 'resolved_by'];
+const UNAPPROVED_KEYS = ['status', 'title', 'used_in', 'tags', 'proof_digest', 'resolved_by', 'checked_digest', 'checked_at', 'archived_at', 'restored_at'];
 
 /** Frontmatter as a digest sees it: unapproved keys dropped, legacy names mapped so a rename never invalidates an approval. */
 export function approvedData(data: Record<string, any>): Record<string, any> {

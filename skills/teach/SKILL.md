@@ -62,6 +62,7 @@ Remarks are annotations on a result, like notes in a margin: intuition, why a st
 - **Write one** when an explanation helped, or the researcher says something worth keeping: `add_remark({target: id, title, body, anchor: "step 3", origin, from: "teaching"})`. Saved at once; no loop needs to run. Without the tool: `remark add --target <id> --title "..." --body "..." --origin researcher|agent --from teaching [--anchor "..."]`.
 - **Whose it is**, as for ideas: `origin: researcher` when the researcher said it or asked for it in their words, even if you worded it; `origin: agent` when it is your explanation, even if they agreed to keep it. The hooks refuse a remark without origin or with a from other than teaching.
 - **Never a claim.** A remark explains; it never says something a result relies on or that nobody proved (a bound is sharp, a hypothesis can be dropped, a step generalizes). That is an idea (`record_idea`, kind `conjecture`, `observation`, or `risk`) so the loop can take it up.
+- **Checking.** A remark of origin `agent` (yours or the loop's) shows as unchecked until the researcher reads it and marks it checked in the dashboard (Remarks, "Mark as checked"; approving it for the paper also counts). Only they can; never say a remark is checked. An edit makes it unchecked again.
 - **Light edits.** `remark edit <remarkId> --body "..." --from teaching` when the researcher refines a remark; `remark archive <remarkId> --from teaching` when they drop it. Only at their request. `remark list --target <id>` shows the remarks on a result.
 
 ## Reword a proof
