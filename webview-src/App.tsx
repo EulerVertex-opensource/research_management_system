@@ -26,6 +26,10 @@ import { TechnicalDetails } from './technical';
 import { SettingsView } from './components/SettingsView';
 import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
 import type { SyncBadge, SyncNotice } from '../src/models/sync';
+import type { ExportPreviewView, ImportPreviewView, PackageModal, PackagesPayload } from '../src/models/packages';
+import { PackageBar } from './components/PackageBar';
+import { ImportPackageModal } from './components/ImportPackageModal';
+import { ExportPackageModal } from './components/ExportPackageModal';
 
 interface NodeDetailData {
   frontmatter: NodeFrontmatter;
@@ -209,6 +213,12 @@ export function App() {
   const [manuscriptTab, setManuscriptTab] = useState<'paper' | 'coverage'>('paper');
   const [coverageSection, setCoverageSection] = useState<string | undefined>();
   const [showProblems, setShowProblems] = useState(false);
+  // Research packages: the Library's package bar and its import, update, and export dialogs.
+  const [packages, setPackages] = useState<PackagesPayload | undefined>();
+  const [packageModal, setPackageModal] = useState<PackageModal | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreviewView | undefined>();
+  const [exportPreview, setExportPreview] = useState<ExportPreviewView | undefined>();
+  const [packageBusy, setPackageBusy] = useState(false);
   // `at` restarts the timer when the same kind of prompt is copied again.
   const [copied, setCopied] = useState<{ prompt: 'instruction' | 'teaching'; at: number } | null>(null);
   useEffect(() => {
@@ -267,7 +277,28 @@ export function App() {
       case 'copied':
         setCopied({ prompt: msg.prompt, at: Date.now() });
         break;
+      case 'packagesData':
+        setPackages(msg.data);
+        break;
+      case 'packageExportPreview':
+        setExportPreview(msg.preview);
+        setPackageBusy(false);
+        break;
+      case 'packageImportPreview':
+        setImportPreview(msg.preview);
+        setPackageBusy(false);
+        break;
+      case 'packageDone':
+        setPackageModal(null);
+        setPackageBusy(false);
+        dispatch({ type: 'SET_NOTICE', notice: { level: 'info', title: 'Packages', message: msg.message } });
+        break;
+      case 'showPackageModal':
+        dispatch({ type: 'SET_VIEW', view: 'library' });
+        setPackageModal(msg.modal);
+        break;
       case 'error':
+        setPackageBusy(false);
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
     }
@@ -280,6 +311,20 @@ export function App() {
     // The sidebar's Needs you count comes from the overview payload.
     send({ type: 'getGraph' });
   }, [send]);
+
+  // The Library shows the packages; node changes (an approval, say) can change their state.
+  useEffect(() => {
+    if (state.activeView === 'library') send({ type: 'getPackages' });
+  }, [state.activeView, state.nodes, send]);
+
+  // A package dialog asks for its first preview when it opens.
+  useEffect(() => {
+    setImportPreview(undefined);
+    setExportPreview(undefined);
+    if (!packageModal) { setPackageBusy(false); return; }
+    if (packageModal.kind === 'export') { setPackageBusy(true); send({ type: 'packagePreviewExport', request: {} }); }
+    if (packageModal.kind === 'update') { setPackageBusy(true); send({ type: 'packagePreviewImport', update: packageModal.alias }); }
+  }, [packageModal, send]);
 
   const handleSetView = (view: SidebarView) => {
     dispatch({ type: 'SET_VIEW', view });
@@ -525,6 +570,16 @@ export function App() {
               </div>
 
               {/* List body */}
+              {state.activeView === 'library' && (
+                <PackageBar
+                  data={packages}
+                  onImport={() => setPackageModal({ kind: 'import' })}
+                  onExport={() => setPackageModal({ kind: 'export' })}
+                  onAccept={(alias) => send({ type: 'packageApprove', alias })}
+                  onUpdate={(alias) => setPackageModal({ kind: 'update', alias })}
+                  onRemove={(alias) => send({ type: 'packageRemove', alias })}
+                />
+              )}
               {showNodeList && (
                 <NodeList
                   nodes={state.nodes}
@@ -579,7 +634,7 @@ export function App() {
           {state.notice && (
             <div style={{ padding: '7px 14px', background: state.notice.level === 'warning' ? 'var(--vscode-inputValidation-warningBackground)' : 'var(--vscode-inputValidation-infoBackground)', borderBottom: '1px solid var(--vscode-panel-border)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexShrink: 0, maxHeight: 200, overflowY: 'auto' }}>
               <div>
-                <div><strong>Sync:</strong> {state.notice.message}</div>
+                <div><strong>{state.notice.title ?? 'Sync'}:</strong> {state.notice.message}</div>
                 {state.notice.details?.length ? (
                   <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
                     {state.notice.details.map((line, index) => <li key={index}>{line}</li>)}
@@ -767,6 +822,27 @@ export function App() {
           }
           onConfirm={handleCreateNode}
           onCancel={() => dispatch({ type: 'TOGGLE_CREATE_MODAL' })}
+        />
+      )}
+      {(packageModal?.kind === 'import' || packageModal?.kind === 'update') && (
+        <ImportPackageModal
+          update={packageModal.kind === 'update' ? packageModal.alias : undefined}
+          preview={importPreview}
+          busy={packageBusy}
+          // No busy flag: the researcher may close the file dialog, and then no answer comes.
+          onPick={(kind) => send({ type: 'packagePickSource', kind, update: packageModal.kind === 'update' ? packageModal.alias : undefined })}
+          onAlias={(alias) => { if (importPreview) { setPackageBusy(true); send({ type: 'packagePreviewImport', source: importPreview.source, alias }); } }}
+          onConfirm={(preview) => { setPackageBusy(true); send({ type: 'packageImport', source: preview.source, alias: preview.alias, update: preview.update }); }}
+          onCancel={() => setPackageModal(null)}
+        />
+      )}
+      {packageModal?.kind === 'export' && (
+        <ExportPackageModal
+          preview={exportPreview}
+          busy={packageBusy}
+          onChange={(request) => { setPackageBusy(true); send({ type: 'packagePreviewExport', request }); }}
+          onConfirm={(request) => send({ type: 'packageExport', request })}
+          onCancel={() => setPackageModal(null)}
         />
       )}
     </div>

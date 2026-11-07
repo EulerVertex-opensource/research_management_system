@@ -37,6 +37,22 @@
         "title": "Research Assistant: Show Output"
       },
       {
+        "command": "research-assistant.importPackage",
+        "title": "Research Assistant: Import Research Package…"
+      },
+      {
+        "command": "research-assistant.exportPackage",
+        "title": "Research Assistant: Export This Project as a Research Package…"
+      },
+      {
+        "command": "research-assistant.updatePackage",
+        "title": "Research Assistant: Update Imported Research Package…"
+      },
+      {
+        "command": "research-assistant.approvePackage",
+        "title": "Research Assistant: Accept Imported Research Package…"
+      },
+      {
         "command": "research-assistant.loop.start",
         "title": "Research Assistant: Start Research Loop"
       },

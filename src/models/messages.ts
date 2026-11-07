@@ -1,6 +1,7 @@
 import type { GraphAction, GraphPayload } from './graph';
 import type { SettingsErrors, SettingsPatch, SettingsPayload } from './settings';
 import type { SyncBadge, SyncNotice } from './sync';
+import type { ExportPreviewView, ExportRequest, ImportPreviewView, PackageModal, PackagesPayload } from './packages';
 import { DefinitionKind, RemarkView, ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
@@ -29,6 +30,13 @@ export type ExtensionMessage =
   | { type: 'problems'; problems: string[] }
   /** A prompt for the agent chat is on the clipboard: the dashboard says so where the researcher clicked. */
   | { type: 'copied'; prompt: 'instruction' | 'teaching' }
+  | { type: 'packagesData'; data: PackagesPayload }
+  | { type: 'packageExportPreview'; preview: ExportPreviewView }
+  | { type: 'packageImportPreview'; preview: ImportPreviewView }
+  /** A package action finished; the dialog closes. */
+  | { type: 'packageDone'; message: string }
+  /** Open the Library with a package dialog (from a command). */
+  | { type: 'showPackageModal'; modal: PackageModal }
   | { type: 'error'; message: string };
 
 // Messages sent from the webview to the extension
@@ -70,4 +78,14 @@ export type WebviewMessage =
   | { type: 'graphAction'; request: GraphAction }
   | { type: 'getSettings' }
   | { type: 'updateSettings'; requestId: string; patch: SettingsPatch }
-  | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string; sourceUrl: string };
+  | { type: 'addPaper'; slug: string; fileName: string; fileData: string; bibEntry: string; description: string; sourceUrl: string }
+  | { type: 'getPackages' }
+  | { type: 'packagePreviewExport'; request: ExportRequest }
+  | { type: 'packageExport'; request: ExportRequest }
+  /** Choose a package file or project folder in a VS Code dialog, then preview it (as an update of `update` when set). */
+  | { type: 'packagePickSource'; kind: 'file' | 'folder'; update?: string }
+  /** Preview an import from a source already chosen; `update` previews the recorded source of that package when `source` is empty. */
+  | { type: 'packagePreviewImport'; source?: string; alias?: string; update?: string }
+  | { type: 'packageImport'; source: string; alias?: string; update?: string }
+  | { type: 'packageApprove'; alias: string }
+  | { type: 'packageRemove'; alias: string };

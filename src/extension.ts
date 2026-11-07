@@ -93,7 +93,14 @@ export function activate(context: vscode.ExtensionContext): void {
     await provider!.showNode(file.path.slice(file.path.lastIndexOf('/') + 1, -'.md'.length));
   });
 
-  context.subscriptions.push(output, openDashboard, openOverview, refreshAgentSetup, showOutput, uriHandler, showNodeInDashboard, ...loopCommands);
+  const packageCommands = [
+    vscode.commands.registerCommand('research-assistant.importPackage', async () => { await provider!.openPackageModal({ kind: 'import' }); }),
+    vscode.commands.registerCommand('research-assistant.exportPackage', async () => { await provider!.openPackageModal({ kind: 'export' }); }),
+    vscode.commands.registerCommand('research-assistant.updatePackage', async () => { await provider!.packageCommand('update'); }),
+    vscode.commands.registerCommand('research-assistant.approvePackage', async () => { await provider!.packageCommand('approve'); }),
+  ];
+
+  context.subscriptions.push(output, openDashboard, openOverview, refreshAgentSetup, showOutput, uriHandler, showNodeInDashboard, ...loopCommands, ...packageCommands);
 }
 
 export function deactivate(): void {

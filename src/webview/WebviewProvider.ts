@@ -20,6 +20,7 @@ import { SettingsService } from '../services/SettingsService';
 import { parseWritingOutline } from '../services/ManuscriptWriting';
 import { summarizeProject } from '../domain/project';
 import { PACKAGE_LOCK_FILE } from '../domain/registry';
+import type { PackageModal } from '../models/packages';
 import { THEME_CSS } from './themeCss';
 import { OverlayFiles, migrateProject, migrationReasons } from '../services/SchemaMigration';
 
@@ -45,6 +46,7 @@ export class WebviewProvider {
   private pendingOverview = false;
   /** A node to show once the dashboard has loaded. */
   private pendingNode: string | undefined;
+  private pendingPackageModal: PackageModal | undefined;
   private integrationEnsured = false;
   private readonly context: vscode.ExtensionContext;
   private readonly manuscriptBuildService: ManuscriptBuildService;
@@ -253,6 +255,7 @@ export class WebviewProvider {
     this.send({ type: 'papersData', papers });
     if (this.pendingOverview && initialized) { this.pendingOverview = false; this.send({ type: 'showView', view: 'graph' }); this.scheduleGraph(); }
     if (this.pendingNode && initialized) { this.send({ type: 'showNode', id: this.pendingNode }); this.pendingNode = undefined; }
+    if (this.pendingPackageModal && initialized) { this.send({ type: 'showPackageModal', modal: this.pendingPackageModal }); this.pendingPackageModal = undefined; }
     await this.sendManuscriptStatus();
     this.scheduleSyncState(0);
     if (initialized) {
@@ -623,6 +626,18 @@ export class WebviewProvider {
           break;
         }
 
+        case 'getPackages':
+        case 'packagePreviewExport':
+        case 'packageExport':
+        case 'packagePickSource':
+        case 'packagePreviewImport':
+        case 'packageImport':
+        case 'packageApprove':
+        case 'packageRemove': {
+          await this.handlePackage(msg);
+          break;
+        }
+
         case 'getSettings': {
           this.settingsWanted = true;
           await this.sendSettings();
@@ -878,6 +893,121 @@ export class WebviewProvider {
       if (err instanceof Error && err.stack) this.output.appendLine(err.stack);
       this.send({ type: 'error', message });
     }
+  }
+
+  // ---------- research packages ----------
+
+  /** Open the dashboard's Library with a package dialog (the package commands land here). */
+  async openPackageModal(modal: PackageModal): Promise<void> {
+    const existing = Boolean(this.panel);
+    if (!existing) this.pendingPackageModal = modal;
+    await this.open();
+    if (existing) this.send({ type: 'showPackageModal', modal });
+  }
+
+  /** Commands that pick an imported package first: update opens its dialog, accept asks to confirm. */
+  async packageCommand(action: 'update' | 'approve'): Promise<void> {
+    await this.start();
+    const installed = (await this.loopHost.packageActions().overview()).installed.filter((item) => action === 'update' || !item.accepted);
+    if (!installed.length) { void vscode.window.showInformationMessage(action === 'update' ? 'No research packages are imported.' : 'Every imported research package is accepted.'); return; }
+    const pick = installed.length === 1 ? installed[0] : (await vscode.window.showQuickPick(installed.map((item) => ({
+      label: item.alias, description: `${item.package} ${item.version}`, detail: item.accepted ? 'accepted' : `${item.pending} to review`, item,
+    })), { title: action === 'update' ? 'Update which research package?' : 'Accept which research package?' }))?.item;
+    if (!pick) return;
+    if (action === 'update') await this.openPackageModal({ kind: 'update', alias: pick.alias });
+    else {
+      try { await this.handlePackage({ type: 'packageApprove', alias: pick.alias }); } catch (error) { void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error)); }
+    }
+  }
+
+  private async handlePackage(msg: Extract<WebviewMessage, { type: 'getPackages' | 'packagePreviewExport' | 'packageExport' | 'packagePickSource' | 'packagePreviewImport' | 'packageImport' | 'packageApprove' | 'packageRemove' }>): Promise<void> {
+    const actions = this.loopHost.packageActions();
+    switch (msg.type) {
+      case 'getPackages':
+        this.send({ type: 'packagesData', data: await actions.overview() });
+        return;
+      case 'packagePreviewExport':
+        this.send({ type: 'packageExportPreview', preview: await actions.previewExport(msg.request) });
+        return;
+      case 'packageExport': {
+        const name = await actions.exportFileName(msg.request);
+        if (!name) { this.send({ type: 'packageExportPreview', preview: await actions.previewExport(msg.request) }); return; }
+        const target = await vscode.window.showSaveDialog({
+          title: 'Export research package', saveLabel: 'Export',
+          defaultUri: vscode.Uri.joinPath(this.fileService.rootUri, 'research-local', 'packages', name),
+          filters: { 'Research package': ['json'] },
+        });
+        if (!target) return;
+        const result = await actions.export(msg.request);
+        await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(target, '..'));
+        await vscode.workspace.fs.writeFile(target, Buffer.from(result.text, 'utf8'));
+        this.output.appendLine(`[package] Exported ${result.fileName} to ${target.fsPath}`);
+        await this.afterPackageChange(`Exported version ${result.version} to ${target.fsPath}.${result.recorded ? ' The release is recorded in research/package/; share it with your next sync.' : ''}`);
+        return;
+      }
+      case 'packagePickSource': {
+        const folder = msg.kind === 'folder';
+        const picked = await vscode.window.showOpenDialog({
+          title: folder ? 'Choose a Research Assistant project folder' : 'Choose a research package (.rpkg.json)',
+          openLabel: msg.update ? 'Update from here' : 'Preview import',
+          canSelectFiles: !folder, canSelectFolders: folder, canSelectMany: false,
+          ...(folder ? {} : { filters: { 'Research package': ['json'] } }),
+        });
+        if (!picked?.[0]) return;
+        this.send({ type: 'packageImportPreview', preview: await actions.previewImport(picked[0].fsPath, undefined, msg.update) });
+        return;
+      }
+      case 'packagePreviewImport': {
+        const source = msg.source || (msg.update ? await actions.updateSource(msg.update) : undefined);
+        if (!source) throw new Error(msg.update ? `${msg.update} was imported from git; choose a package file or project folder to update from.` : 'Choose a package file or a project folder first.');
+        this.send({ type: 'packageImportPreview', preview: await actions.previewImport(source, msg.alias, msg.update) });
+        return;
+      }
+      case 'packageImport': {
+        const result = await actions.import(msg.source, msg.alias, msg.update);
+        this.output.appendLine(`[package] ${result.message}`);
+        await this.afterPackageChange(result.message);
+        return;
+      }
+      case 'packageApprove': {
+        const item = (await actions.overview()).installed.find((entry) => entry.alias === msg.alias);
+        if (!item) throw new Error(`No imported package named ${msg.alias}.`);
+        const accept = 'Accept package';
+        const pick = await vscode.window.showWarningMessage(
+          `Accept ${item.package} ${item.version} as known results?`,
+          { modal: true, detail: `${item.pending} of ${item.results} results and definitions in ${this.paths?.library ?? 'the library'}/${item.alias} wait for review. They were approved in the project they come from; accepting the package lets the research loop use them without re-proving them. A new version that changes a result asks again.` },
+          accept);
+        if (pick !== accept) return;
+        const ids = await this.loopHost.approvePackage(msg.alias, 'dashboard');
+        await this.afterPackageChange(`Accepted ${item.package} ${item.version}: ${ids.length} results count as known.`);
+        return;
+      }
+      case 'packageRemove': {
+        const plan = await actions.previewRemove(msg.alias);
+        if (!plan.ok) {
+          void vscode.window.showWarningMessage(`${msg.alias} is still in use, so it was not removed.`, { modal: true, detail: `${plan.conflicts.join('\n')}\n\nRepoint those results first.` });
+          return;
+        }
+        const remove = 'Remove package';
+        const detail = [
+          `Deletes ${plan.deletes.length} file(s) under ${this.paths?.library ?? 'the library'}/${msg.alias} and its approval records.`,
+          plan.removedBibKeys.length ? `Removes the BibTeX entries only it used: ${plan.removedBibKeys.join(', ')}.` : '',
+          ...plan.warnings,
+          'Git keeps the history.',
+        ].filter(Boolean).join('\n');
+        if (await vscode.window.showWarningMessage(`Remove the imported package ${msg.alias}?`, { modal: true, detail }, remove) !== remove) return;
+        await actions.remove(msg.alias);
+        await this.afterPackageChange(`Removed ${msg.alias}.`);
+        return;
+      }
+    }
+  }
+
+  private async afterPackageChange(message: string): Promise<void> {
+    await this.refreshNodes();
+    this.scheduleGraph();
+    this.send({ type: 'packageDone', message });
+    this.send({ type: 'packagesData', data: await this.loopHost.packageActions().overview() });
   }
 
   private getHtml(): string {

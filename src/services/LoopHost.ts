@@ -19,6 +19,7 @@ import { AutoPullMode, PrepareResult, PublishResult, PullResult, ResearchSync, a
 import { SyncBadge, SyncNotice } from '../models/sync';
 import { NodeGitRunner, runShell } from '../cli/nodeGit';
 import { loadSyncConfig } from '../cli/nodeFiles';
+import { PackageActions } from './PackageActions';
 import { toIdeaKind } from '../domain/nodeKinds';
 import { findNodeFile, locateNodeFile } from '../domain/registry';
 import { ResearchNode } from '../models/types';
@@ -283,6 +284,12 @@ export class LoopHost implements vscode.Disposable {
     const kind = (await findNodeFile(this.files, this.paths, 'definition', id)) ? 'definition' : 'asset';
     const recorded = await this.withCore((core) => core.recordExisting(kind, id, source)).catch(() => false);
     if (recorded) this.output.appendLine(`[loop] Recorded ${source} approval of ${id}`);
+  }
+
+  /** Package actions for the dashboard, on this project's files and loop core. */
+  packageActions(): PackageActions {
+    if (!this.paths) throw new Error('Initialize the Research Assistant project first.');
+    return new PackageActions(this.files, this.paths, this.files.rootUri.fsPath, (action) => this.withCore(action), extensionVersion());
   }
 
   /** The researcher accepted an imported package in the dashboard (a human click). Returns the results it approved. */

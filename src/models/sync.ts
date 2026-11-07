@@ -18,6 +18,8 @@ export interface SyncBadge {
 
 export interface SyncNotice {
   level: 'info' | 'warning';
+  /** The banner's label; Sync when absent. */
+  title?: string;
   message: string;
   details?: string[];
 }
