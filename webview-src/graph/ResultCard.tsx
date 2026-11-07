@@ -131,6 +131,7 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
             <span>{holds.length ? `Holds up ${holds.length === 1 ? 'the main result' : `${holds.length} main results`}: ${holds.slice(0, 3).join(', ')}${holds.length > 3 ? ` and ${holds.length - 3} more` : ''}` : required ? 'A main result' : 'No main result rests on it'}</span>
             <span>{prerequisites.length ? `Prerequisites: ${prerequisites.filter((entry) => entry.progress === 'done').length} of ${prerequisites.length} done` : 'No prerequisites'}</span>
             {node.counts.plans > 0 && <span>Proof attempts: {node.counts.plans} ({node.counts.failedPlans} failed)</span>}
+            {node.counts.remarks > 0 && <span title="Explanations from the teaching chat or the loop; Open shows them">Remarks: {node.counts.remarks}</span>}
             {node.sections.length > 0 && <span>In the paper: {node.sections.join(', ')}</span>}
             {technical && <span style={{ fontFamily: 'var(--vscode-editor-font-family, monospace)' }}>{node.filePath}</span>}
           </div>

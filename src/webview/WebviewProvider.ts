@@ -378,6 +378,7 @@ export class WebviewProvider {
     // A remark shows under its result: refresh that result's detail. Remarks are not nodes, so the index stays as it is.
     const remarkWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, `${paths.remarks}/*.md`));
     const onRemarkChange = async (uri: vscode.Uri) => {
+      this.scheduleGraph();
       try {
         const raw = await this.fileService.readFile(`${paths.remarks}/${uri.path.split('/').pop()}`);
         const target = /^target:\s*['"]?([a-z][a-z0-9_]*)/m.exec(raw)?.[1];
@@ -386,6 +387,7 @@ export class WebviewProvider {
     };
     remarkWatcher.onDidChange((uri) => { void onRemarkChange(uri); });
     remarkWatcher.onDidCreate((uri) => { void onRemarkChange(uri); });
+    remarkWatcher.onDidDelete(() => this.scheduleGraph());
 
     // Watch the configured project description.
     const projectWatcher = vscode.workspace.createFileSystemWatcher(

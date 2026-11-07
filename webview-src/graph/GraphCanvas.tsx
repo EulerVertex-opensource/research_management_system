@@ -203,7 +203,7 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
             return (
               <g key={node.id} data-node={node.id} transform={`translate(${at.x},${at.y})`} opacity={dim ? 0.3 : 1} style={{ cursor: 'pointer' }}
                 onClick={() => onSelect(node.id)}>
-                <title>{`${node.title}\n${node.progressLabel}${node.progressDetail ? ` · ${node.progressDetail}` : ''}\n${kindLabel(node.type)} · ${node.id}\nClick to see it on the right.`}</title>
+                <title>{`${node.title}\n${node.progressLabel}${node.progressDetail ? ` · ${node.progressDetail}` : ''}\n${kindLabel(node.definitionKind ?? node.type)} · ${node.id}${node.counts.remarks ? `\n${node.counts.remarks} remark${node.counts.remarks === 1 ? '' : 's'}` : ''}\nClick to see it on the right.`}</title>
                 <foreignObject width={NODE_W} height={NODE_H}>
                   <div style={{
                     height: NODE_H, boxSizing: 'border-box', borderRadius: 6, padding: '7px 10px', display: 'flex', flexDirection: 'column', gap: 3, overflow: 'hidden',
@@ -214,10 +214,11 @@ export function GraphCanvas({ nodes, edges, required, folds = [], blocking, sele
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                       <span style={{ fontSize: 11, fontWeight: 600, padding: '0 7px', borderRadius: 9, background: tint(style.color, 30), color: 'var(--vscode-foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{node.progressLabel}</span>
                       {isRequired && <span style={{ fontSize: 11, fontWeight: 700, color: COLOR.waiting, whiteSpace: 'nowrap' }}>★ Main</span>}
-                      {node.kind === 'definition' && <span style={{ fontSize: 10.5, fontWeight: 700, color: DEFINITION_COLOR, whiteSpace: 'nowrap', letterSpacing: 0.3 }}>DEFINITION</span>}
+                      {node.kind === 'definition' && <span style={{ fontSize: 10.5, fontWeight: 700, color: DEFINITION_COLOR, whiteSpace: 'nowrap', letterSpacing: 0.3 }}>{(node.definitionKind ?? 'definition').toUpperCase()}</span>}
+                      {node.counts.remarks > 0 && <span title={`${node.counts.remarks} remark${node.counts.remarks === 1 ? '' : 's'} on it (explanations, not part of the result)`} style={{ fontSize: 10.5, color: COLOR.muted, whiteSpace: 'nowrap', marginLeft: 'auto' }}>✎ {node.counts.remarks}</span>}
                     </span>
                     <span style={{ fontSize: detailed ? 12.5 : 14, fontWeight: 600, lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{node.title}</span>
-                    {detailed && <span style={{ fontSize: 10.5, color: COLOR.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{kindLabel(node.type)}{node.origin === 'library' ? ' · known result' : node.cited ? ' · cited' : ''}{technical ? ` · ${node.id}` : ''}</span>}
+                    {detailed && <span style={{ fontSize: 10.5, color: COLOR.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{kindLabel(node.definitionKind ?? node.type)}{node.origin === 'library' ? ' · known result' : node.cited ? ' · cited' : ''}{technical ? ` · ${node.id}` : ''}</span>}
                     {detailed && (node.progressDetail || closure) && (
                       <span style={{ fontSize: 11, color: node.progress === 'done' || node.progress === 'waiting' ? COLOR.muted : style.color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {node.progressDetail || (closure ? `${closure.done} of ${closure.total} parts done` : '')}

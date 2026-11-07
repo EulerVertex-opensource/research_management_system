@@ -13,7 +13,7 @@ function load(file, external = []) {
   return module.exports;
 }
 
-const { buildGraphPayload } = load('../src/services/GraphViewModel.ts');
+const { buildGraphPayload, collectGraphPayload } = load('../src/services/GraphViewModel.ts');
 const { loadManuscriptModel, loadImpactNodes, readSectionBriefFile } = load('../src/services/ManuscriptImpactLoader.ts');
 const { lockBinding } = load('../src/domain/manuscriptImpact.ts');
 const { researchDigest } = load('../src/domain/digests.ts');
@@ -87,7 +87,7 @@ async function fixture() {
     ],
   };
   const manuscript = await loadManuscriptModel(files, paths);
-  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state, manuscript, sectionsDir: 'sections', now: 'now' });
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state, manuscript, sectionsDir: 'sections', now: 'now', remarks: { helper: 2 } });
   return { payload, byId: new Map(payload.nodes.map((item) => [item.id, item])) };
 }
 
@@ -105,8 +105,9 @@ test('the payload groups nodes by the required result they serve and marks what 
   assert.deepEqual(byId.get('second').flags, ['awaiting_approval', 'question', 'counterexample', 'active']);
   assert.deepEqual(byId.get('side').flags, ['awaiting_approval', 'parked']);
   assert.deepEqual(byId.get('main').flags, ['manuscript_stale']);
-  assert.deepEqual(byId.get('second').counts, { plans: 2, failedPlans: 1, pendingPlans: 1, ideas: 0 });
+  assert.deepEqual(byId.get('second').counts, { plans: 2, failedPlans: 1, pendingPlans: 1, ideas: 0, remarks: 0 });
   assert.equal(byId.get('helper').counts.ideas, 1);
+  assert.equal(byId.get('helper').counts.remarks, 2, 'remarks are a count on the result they annotate, not nodes');
   assert.deepEqual(byId.get('main').definitions, ['widget']);
   assert.deepEqual(byId.get('main').sections, ['sec_intro', 'sec_main']);
   assert.equal(byId.get('cex').refutes, 'second');
@@ -515,4 +516,22 @@ test('a conjecture links to what it serves without becoming its prerequisite', (
   assert.ok(visible.edges.some((edge) => edge.from === 'guess' && edge.to === 'helper' && edge.type === 'depends_on'));
   assert.ok(visible.edges.some((edge) => edge.type === 'serves'));
   assert.deepEqual(impactOf(payload, 'main').upstream.map((item) => item.id), ['helper']);
+});
+
+test('a result shows how many active remarks it has; an assumption is labelled as one', async () => {
+  const remark = (id, target, status = 'active') => [`research/remarks/${id}.md`, matter.stringify('\nAn explanation.\n', { type: 'remark', title: id, target, origin: 'researcher', from: 'teaching', status, target_digest: 'x', at: 'now' })];
+  const files = memoryFiles({
+    'research/project.md': project,
+    'research/definitions/bounded.md': node('definition', { title: 'Assumption (bounded)', extra: { definition_kind: 'assumption' } }),
+    'research/assets/main.md': node('theorem', { title: 'Main', defs: ['bounded'] }),
+    'research/assets/second.md': node('lemma', { title: 'Second' }),
+    ...Object.fromEntries([remark('remark_a', 'main'), remark('remark_b', 'main'), remark('remark_c', 'main', 'archived'), remark('remark_d', 'bounded')]),
+  });
+  const payload = await collectGraphPayload(files, { ...paths, remarks: 'research/remarks', bibliography: 'references.bib' }, researchNodes(files), undefined);
+  const byId = new Map(payload.nodes.map((item) => [item.id, item]));
+  assert.equal(byId.get('main').counts.remarks, 2, 'archived remarks are not counted');
+  assert.equal(byId.get('bounded').counts.remarks, 1);
+  assert.equal(byId.get('second').counts.remarks, 0);
+  assert.equal(byId.get('bounded').definitionKind, 'assumption');
+  assert.equal(byId.get('main').definitionKind, undefined);
 });

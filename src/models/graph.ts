@@ -36,7 +36,10 @@ export interface GraphNodeView {
   flags: GraphFlag[];
   /** Definitions an asset uses, shown as chips instead of nodes by default. */
   definitions: string[];
-  counts: { plans: number; failedPlans: number; pendingPlans: number; ideas: number };
+  /** `remarks`: active remarks on it (annotations; see domain/remarks.ts). */
+  counts: { plans: number; failedPlans: number; pendingPlans: number; ideas: number; remarks: number };
+  /** For a definition: assumption or convention when it is one (definition_kind). */
+  definitionKind?: 'assumption' | 'convention';
   /** Manuscript sections whose brief presents this node. */
   sections: string[];
   /** Required results that (transitively) depend on this node. */

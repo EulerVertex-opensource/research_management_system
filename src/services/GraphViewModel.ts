@@ -15,6 +15,7 @@ import { LoopFiles, LoopState, isApproved } from './ResearchLoopModel';
 import { AgentActivity, readAgentActivity } from './AgentActivity';
 import { readApprovals } from './ApprovalStore';
 import { ManuscriptModel, loadManuscriptModel } from './ManuscriptImpactLoader';
+import { Remarks } from './Remarks';
 
 /**
  * Builds the Graph tab payload: compact node views (no bodies), mathematical
@@ -36,6 +37,8 @@ export interface GraphInputs {
   events?: Array<Record<string, unknown>>;
   /** Results marked for re-check: node ID → the changed node it rests on. */
   recheck?: Record<string, string>;
+  /** Active remarks per target ID. */
+  remarks?: Record<string, number>;
 }
 
 const RESEARCH_KINDS = new Set(['asset', 'definition']);
@@ -112,7 +115,9 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
         failedPlans,
         pendingPlans: targeting.filter((plan) => plan.status === 'pending').length,
         ideas: ideas.filter((idea) => (idea.related_assets ?? []).includes(node.id)).length,
+        remarks: input.remarks?.[node.id] ?? 0,
       },
+      ...(kind === 'definition' && (node.definition_kind === 'assumption' || node.definition_kind === 'convention') ? { definitionKind: node.definition_kind } : {}),
       sections: presentedIn.get(node.id) ?? [],
       blocks: served,
       ...(typeof node.refutes === 'string' && node.refutes ? { refutes: node.refutes } : {}),
@@ -294,9 +299,11 @@ export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths,
   const approvals = (await readApprovals(files, paths.researchRoot).catch(() => ({ records: [] }))).records;
   const manuscript = await loadManuscriptModel(files, paths).catch(() => undefined);
   const agent = await readAgentActivity(files);
+  const remarks: Record<string, number> = {};
+  for (const remark of await new Remarks(files, paths).all().catch(() => [])) if (remark.status === 'active') remarks[remark.target] = (remarks[remark.target] ?? 0) + 1;
   return buildGraphPayload({
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
-    state, agent, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck,
+    state, agent, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck, remarks,
   });
 }
 
