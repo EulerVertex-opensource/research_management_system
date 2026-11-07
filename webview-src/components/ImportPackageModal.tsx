@@ -15,6 +15,8 @@ interface Props {
   preview?: ImportPreviewView;
   busy: boolean;
   onPick: (kind: 'file' | 'folder') => void;
+  /** Preview from a typed source: a git URL, with an optional #ref. */
+  onSource: (spec: string) => void;
   onAlias: (alias: string) => void;
   onConfirm: (preview: ImportPreviewView) => void;
   onCancel: () => void;
@@ -23,8 +25,15 @@ interface Props {
 const ALIAS = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const BUMP_LABEL: Record<string, string> = { major: 'statements changed', minor: 'results added', patch: 'proofs or details changed', none: 'no change', initial: 'first version' };
 
-export function ImportPackageModal({ update, preview, busy, onPick, onAlias, onConfirm, onCancel }: Props) {
+const GIT_URL = /^(https?:\/\/|ssh:\/\/|git:\/\/|file:\/\/|git@[^:]+:)\S+$/;
+
+export function ImportPackageModal({ update, preview, busy, onPick, onSource, onAlias, onConfirm, onCancel }: Props) {
   const [alias, setAlias] = useState(preview?.alias ?? '');
+  const [showGit, setShowGit] = useState(false);
+  const [gitUrl, setGitUrl] = useState('');
+  const [gitRef, setGitRef] = useState('');
+  const gitValid = GIT_URL.test(gitUrl.trim());
+  const previewGit = () => { if (gitValid && !busy) onSource(gitRef.trim() ? `${gitUrl.trim()}#${gitRef.trim()}` : gitUrl.trim()); };
   useEffect(() => { if (preview) setAlias(preview.alias); }, [preview?.source, preview?.alias]);
   const aliasValid = ALIAS.test(alias) && alias.length <= 24;
   const aliasChanged = Boolean(preview && alias !== preview.alias);
@@ -63,8 +72,21 @@ export function ImportPackageModal({ update, preview, busy, onPick, onAlias, onC
         <span style={{ fontSize: 12, opacity: 0.8 }}>{preview ? 'Another source:' : 'From:'}</span>
         <button onClick={() => onPick('file')} disabled={busy} style={smallButtonStyle}>A package file (.rpkg.json)…</button>
         <button onClick={() => onPick('folder')} disabled={busy} style={smallButtonStyle}>A project folder…</button>
+        <button onClick={() => setShowGit((value) => !value)} disabled={busy} style={smallButtonStyle} aria-expanded={showGit}>A git URL…</button>
         {busy && <span style={{ fontSize: 12, opacity: 0.6 }}>Reading…</span>}
       </div>
+      {showGit && (
+        <div style={{ marginBottom: 14 }}>
+          <label style={labelStyle}>Git repository <span style={{ opacity: 0.6 }}>(fetched with your own git credentials; a branch, tag, or commit is optional)</span></label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input value={gitUrl} onChange={(event) => setGitUrl(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') previewGit(); }}
+              placeholder="https://github.com/alice/heat-kernel.git" style={{ ...inputStyle, flex: 3 }} />
+            <input value={gitRef} onChange={(event) => setGitRef(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') previewGit(); }}
+              placeholder="main, or a tag" style={{ ...inputStyle, flex: 1 }} />
+            <button onClick={previewGit} disabled={!gitValid || busy} style={buttonStyle('secondary', gitValid && !busy)}>Preview</button>
+          </div>
+        </div>
+      )}
 
       {preview && !update && (
         <div style={{ marginBottom: 14 }}>

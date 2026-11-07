@@ -42,6 +42,9 @@ overleaf-project/
     plans/                         ← proof plans, one per attempt (pending/failed/succeeded)
     library/<collection>/          ← known results (earlier theorems, useful papers), lib_ IDs
       assets/ definitions/        ← approved once, used as known, never re-proved; edits return them to draft
+    library/<alias>/               ← an imported research package: same layout, read-only
+      package.lock.json           ← version, source, and digest of every imported file
+    package/                       ← this project as a package: manifest.json, releases.json
     writing/
       outline.md                  ← ordered manuscript section links
       sections/<id>.md            ← section briefs and asset IDs
@@ -50,10 +53,12 @@ overleaf-project/
     candidates/                    ← object-search candidates: each object tried, with a pass/fail verdict per property
     decisions/                     ← researcher directions, change requests, parked results (loop-written)
     handoffs/                      ← where each collaborator stopped and what comes next
-    approvals/                     ← one approval record per approved result (extension-written)
+    approvals/                     ← one approval record per approved result, one per accepted package (extension-written)
 
   research-local/                  ← local only; ignored by Git
     raw_papers/                    ← authoritative source PDFs
+    packages/                      ← exported .rpkg.json files (default location)
+    package-cache/                 ← local clones of packages imported from git
     understanding.json             ← what you marked as understood (teach skill); yours alone
 
   .latex-out/                     ← local PDF and LaTeX build artifacts; ignored
@@ -134,6 +139,32 @@ Prefer one node per file so independent results merge cleanly. Approvals are one
 ### Automatic pull
 
 The extension fetches `sync.remote` on startup, when the VS Code window regains focus (at most once a minute), and every `researchAssistant.sync.autoPullIntervalMinutes` minutes (default 5; `0` disables the timer). If the remote is ahead, it runs the same `sync pull` as the command, but only when the working tree has no uncommitted changes and the research loop is not running. Otherwise it adds a **Pull now** card to the Overview's *Needs you* list, once per new remote commit. Set `researchAssistant.sync.autoPull` to `notify` to only be told, or `off` to disable it. Fetch failures, such as missing Overleaf credentials, are logged to the Research Assistant output channel without a popup.
+
+## Research packages
+
+A finished project can be reused by later ones, the way a library is imported in a programming language. Exporting packages the project's approved results; importing one copies them into another project's library, with the citations they need, as known results that are never re-proved there.
+
+- **What goes in.** The results under `exports` (by default the `required_results` of `project.md`) and everything they depend on, through `depends_on` and `uses_definitions`, including library results. Every one must be approved, and none may be a conjecture: a result that rests on a conjecture is conditional and cannot be exported. Ideas, plans, checks, decisions, remarks, and all manuscript files stay behind. A result proved in the project is cited, in the importing project, as this work (`cite`, a BibTeX key in its bibliography) at the location given when exporting (for example *Theorem 1.2*); a cited result keeps its citation.
+- **Versions.** A statement is a result's interface and its proof the implementation, so versions follow semver from the content: a changed statement or a removed result is a major change, an added result a minor one, a changed proof a patch. Each export proposes the version and records the release in `research/package/releases.json`; share that file like any research file.
+- **Importing.** A package comes from an exported `.rpkg.json` file, from another project's folder, or from a git URL with an optional branch, tag, or commit (`https://github.com/alice/heat-kernel.git#research-v1.2.0`). Its files land in `research/library/<alias>/` with IDs `lib_<alias>_<id>`, and `package.lock.json` pins the version, the source, and every file's digest. The package's BibTeX entries are merged into the bibliography by the work they name: an entry already present (same DOI, arXiv ID, or title and year) is reused, a key taken by a different work is renamed `<key>_<alias>`, and the paper index gains an entry for each. An imported collection is read-only: validation reports any edited or added file, and the agent hook refuses edits. To change a result, `library promote` copies it into the project.
+- **Accepting.** The researcher accepts a package once, from the Library, from *Needs you*, or with `package approve <alias> --interactive` in a terminal; its results then count as approved under one record in `research/approvals/packages/<alias>.json`. Agents cannot accept packages.
+- **Updating.** An update shows what changed between the versions. Results that did not change stay accepted; changed ones wait for the package to be accepted again; and approved results of this project that rest on a changed statement are reverted or flagged for a re-check, following the setting *When something a result rests on changes*. An update that drops a result still in use is refused.
+- **Removing.** Removal deletes the package, its approval record, and the BibTeX entries and paper-index sections only it used; entries cited elsewhere, by a node or in the TeX, stay. It is refused while results of this project still use the package.
+
+In the dashboard, the Library has a **Packages** bar: **Import…** (from a file, a project folder, or a git URL; it previews everything before writing), **Export…** (name, cite key, results to export, locations, and the proposed version), and for each imported package its version, whether it is accepted, and **Accept**, **Update…**, and **Remove**. The same actions are commands: *Import Research Package…*, *Export This Project as a Research Package…*, *Update Imported Research Package…*, and *Accept Imported Research Package…*. Changing packages waits while a loop stage is in progress.
+
+From a terminal, each command previews and writes only with `--apply`:
+
+```bash
+research-loop package export [--name N --cite KEY] [--exports a,b] [--location id="Theorem 1.2"] [--version X.Y.Z] [--out FILE] [--apply]
+research-loop package import <file.rpkg.json | project folder | git URL[#ref]> [--as alias] [--apply]
+research-loop package update <alias> [<source>] [--ref REF] [--apply]
+research-loop package remove <alias> [--force] [--apply]
+research-loop package approve <alias> --interactive
+research-loop package list | package verify
+```
+
+To publish a package through git, export (which records the release), share the project with **Sync**, and optionally tag that commit. A git import at that commit then gets the recorded version; a commit with unreleased changes builds as a prerelease such as `1.1.0-dev`. Git sources are fetched with your own git credentials into `research-local/package-cache/`; only the research files are read.
 
 ## Configuration
 

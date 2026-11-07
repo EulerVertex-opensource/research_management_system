@@ -3,7 +3,7 @@ import type { ExportPreviewView, ExportRequest, ImportPreviewView, PackagesPaylo
 import type { ResearchLoopCore } from './ResearchLoopCore';
 import { LoopFiles } from './ResearchLoopModel';
 import { PackageService } from './PackageService';
-import { gitProvenance, loadPackage } from './PackageSources';
+import { gitProvenance, loadPackage, sourceSpec } from './PackageSources';
 import { parseMarkdown } from './Frontmatter';
 import { bibKeys } from '../domain/bibtex';
 import { ImportPlan, PackageManifest, RemovePlan, latestRelease, packageFileName, serializePackage } from '../domain/packages';
@@ -38,7 +38,7 @@ export class PackageActions {
         alias: lock.alias, package: lock.package, version: lock.version, results: Object.keys(lock.nodes).length,
         pending: status?.pending.length ?? Object.keys(lock.nodes).length, accepted: Boolean(status?.approved),
         ...(status?.approvedVersion && status.approvedVersion !== lock.version ? { approvedVersion: status.approvedVersion } : {}),
-        source: lock.source.type === 'git' ? lock.source.url : lock.source.path,
+        source: sourceSpec(lock.source),
         problems: problems.filter((problem) => problem.startsWith(`${this.paths.library}/${lock.alias}/`)),
       });
     }
@@ -87,9 +87,9 @@ export class PackageActions {
   }
 
   private async plan(source: string, alias: string | undefined, update: string | undefined): Promise<{ plan: ImportPlan; name: string; version: string }> {
-    const { pkg, source: origin } = await loadPackage(source, this.root, this.extensionVersion);
-    const now = new Date().toISOString();
-    const plan = update ? await this.service.previewUpdate(update, pkg, { source: origin, now }) : await this.service.previewImport(pkg, { alias: alias?.trim() || undefined, source: origin, now });
+    const { pkg, source: origin, resolved } = await loadPackage(source, this.root, this.extensionVersion);
+    const options = { source: origin, ...(resolved ? { resolved } : {}), now: new Date().toISOString() };
+    const plan = update ? await this.service.previewUpdate(update, pkg, options) : await this.service.previewImport(pkg, { ...options, alias: alias?.trim() || undefined });
     return { plan, name: pkg.name, version: pkg.version };
   }
 
@@ -101,10 +101,9 @@ export class PackageActions {
     };
   }
 
-  /** Where an update should come from by default: the installed package's recorded source. */
-  async updateSource(alias: string): Promise<string | undefined> {
-    const lock = await this.service.lockFor(alias);
-    return lock.source.type === 'git' ? undefined : lock.source.path;
+  /** Where an update comes from by default: the installed package's recorded source (a git source fetches its ref again). */
+  async updateSource(alias: string): Promise<string> {
+    return sourceSpec((await this.service.lockFor(alias)).source);
   }
 
   private async guardLoop(): Promise<void> {

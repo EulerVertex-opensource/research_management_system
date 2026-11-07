@@ -958,8 +958,8 @@ export class WebviewProvider {
         return;
       }
       case 'packagePreviewImport': {
-        const source = msg.source || (msg.update ? await actions.updateSource(msg.update) : undefined);
-        if (!source) throw new Error(msg.update ? `${msg.update} was imported from git; choose a package file or project folder to update from.` : 'Choose a package file or a project folder first.');
+        const source = msg.source?.trim() || (msg.update ? await actions.updateSource(msg.update) : undefined);
+        if (!source) throw new Error('Choose a package file, a project folder, or a git URL first.');
         this.send({ type: 'packageImportPreview', preview: await actions.previewImport(source, msg.alias, msg.update) });
         return;
       }

@@ -831,6 +831,7 @@ export function App() {
           busy={packageBusy}
           // No busy flag: the researcher may close the file dialog, and then no answer comes.
           onPick={(kind) => send({ type: 'packagePickSource', kind, update: packageModal.kind === 'update' ? packageModal.alias : undefined })}
+          onSource={(spec) => { setPackageBusy(true); send({ type: 'packagePreviewImport', source: spec, update: packageModal.kind === 'update' ? packageModal.alias : undefined }); }}
           onAlias={(alias) => { if (importPreview) { setPackageBusy(true); send({ type: 'packagePreviewImport', source: importPreview.source, alias }); } }}
           onConfirm={(preview) => { setPackageBusy(true); send({ type: 'packageImport', source: preview.source, alias: preview.alias, update: preview.update }); }}
           onCancel={() => setPackageModal(null)}

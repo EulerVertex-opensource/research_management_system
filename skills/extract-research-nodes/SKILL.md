@@ -19,6 +19,7 @@ When the researcher hands over a batch of materials to organize, sort each part 
 - A paper PDF: `import-math-paper` (transcription in `papers/<slug>/`, PDF in the local source folder), then extract its useful results and definitions below.
 - Notes, drafts, or TeX with mathematical content: results and definitions below; anything that is not yet a statement (an approach, a question, an observation) becomes an idea (`type: idea`, `status: draft`, `idea_kind`).
 - Earlier work or known results the project will use, not prove: the library (below).
+- Results of another Research Assistant project (its folder, an exported `.rpkg.json`, or its git URL): import it as a package (Packages, below); do not extract it by hand.
 - The main problem, scope, or goals: propose the text for `project.md` to the researcher; do not overwrite it.
 
 Each node is one file directly in its configured folder. Never create subfolders, new folders, or index, README, overview, or other folder notes: the dashboard and the loop read only the configured folders, so such files are lost, and the PreToolUse hook denies them. Group with `tags` and relate with `depends_on`, `uses_definitions`, and `related_assets`. Keep raw source files out of the research folders. Finish with a list of what went where.
@@ -60,6 +61,31 @@ Use the library when the researcher asks to import known results, or names a col
 - Optionally create `collection.md` in a new collection with a title and one paragraph on the source (who, what, where to find it).
 
 The researcher approves library results once in VS Code; the research loop then uses them as known and never re-proves them. After a batch, list the new IDs per collection so the researcher can review them together.
+
+## Packages
+
+Another Research Assistant project's approved results come in as a package, not by extraction: they keep their dependencies, citations, and the upstream approval record, and a later version can be brought in with a precise list of what changed. The commands preview by default and write only with `--apply`:
+
+```bash
+node .agents/skills/research-loop/scripts/research-loop.cjs package import <folder | file.rpkg.json | git URL[#branch-or-tag]> [--as <alias>]
+node .agents/skills/research-loop/scripts/research-loop.cjs package update <alias> [<source>] [--ref <tag>]
+node .agents/skills/research-loop/scripts/research-loop.cjs package list
+```
+
+- Run the preview first and tell the researcher what it would write: the results (`lib_<alias>_<id>`), the bibliography changes (added, reused, or renamed keys), conflicts, and warnings. Apply only after they agree. A short alias keeps the IDs readable; choose it with `--as`.
+- Never import, update, or remove a package while a loop stage is in progress; ask the researcher to pause the loop.
+- An imported collection is read-only: never edit its files (the hook refuses). To change a result, `library promote <lib_id>` copies it into the project as a draft.
+- Accepting a package is the researcher's decision, in the dashboard (Library or Needs you) or `package approve <alias> --interactive` in their own terminal. Never run `package approve`; tell the researcher it waits.
+- After an update, report the version change and the approvals it affected (the update output lists them).
+- Exporting this project (`package export`) is the researcher's action, usually from the dashboard; it needs a package name and the BibTeX key importers cite.
+
+A package definition may name the same concept as one of this project's definitions (`lib_hk_sobolev_space` and `sobolev_space`). Never merge them, edit either to match, or repoint results on your own: whether two definitions mean the same is the researcher's call. Compare the defining statements, then record the proposal as an idea for the researcher:
+
+```bash
+node .agents/skills/research-loop/scripts/research-loop.cjs idea add --kind observation --title "Same as: lib_hk_sobolev_space and sobolev_space" --body "<the two defining statements side by side, and why they agree or where they differ>"
+```
+
+If the researcher agrees, repoint the project's results to the definition they choose (`uses_definitions`), which sends those results back for review; resolve the idea with `idea resolve <idea> --by <definition id>`. If they disagree, leave both, and qualify the title of the project's definition if the names could be confused.
 
 ## Finish
 

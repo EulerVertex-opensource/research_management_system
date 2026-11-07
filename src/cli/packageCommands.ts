@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { PackageService } from '../services/PackageService';
-import { gitProvenance, loadPackage } from '../services/PackageSources';
+import { gitProvenance, loadPackage, sourceSpec } from '../services/PackageSources';
 import { ExportPlan, ImportPlan, RemovePlan, ResearchPackage, packageFileName, serializePackage } from '../domain/packages';
 import { NodeLoopFiles, loadProjectPaths } from './nodeFiles';
 import type { ResearchLoopCore } from '../services/ResearchLoopCore';
@@ -13,8 +13,8 @@ import type { ResearchLoopCore } from '../services/ResearchLoopCore';
  */
 
 export const PACKAGE_USAGE = `  package export [--name N --cite KEY] [--exports a,b] [--version X.Y.Z] [--location id="Theorem 1.2"]... [--out FILE] [--apply]   (this project's approved results as a .rpkg.json package)
-  package import <file.rpkg.json|project folder> [--as alias] [--apply]   (vendor a package into the library as lib_<alias>_* results)
-  package update <alias> [<file|folder>] [--apply]   (bring a new version; shows what changed)
+  package import <file.rpkg.json|project folder|git URL[#ref]> [--as alias] [--apply]   (vendor a package into the library as lib_<alias>_* results)
+  package update <alias> [<file|folder|git URL[#ref]>] [--ref REF] [--apply]   (bring a new version from where it came, or elsewhere; shows what changed)
   package remove <alias> [--force] [--apply]
   package approve <alias> --interactive   (the researcher, in their own terminal: accept every result of the package at once)
   package list | package verify`;
@@ -65,7 +65,7 @@ function describeImport(pkg: ResearchPackage, plan: ImportPlan, update: boolean,
     bullets('Conflicts:', plan.conflicts),
     bullets('Warnings:', plan.warnings),
     applied
-      ? `${update ? 'Updated' : 'Imported'}. The researcher reviews and approves the package's results in the dashboard (Library, collection ${plan.alias}); the loop then uses them as known.`
+      ? `${update ? 'Updated' : 'Imported'}. ${update && plan.diff?.bump === 'none' ? 'Nothing changed.' : `The researcher accepts the package in the dashboard (Library or Needs you), or with package approve ${plan.alias} --interactive in their own terminal; the loop then uses its results as known.`}`
       : plan.ok ? 'Run again with --apply to write these files.' : '',
   ].filter(Boolean).join('\n');
 }
@@ -96,7 +96,7 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       for (const { lock } of installed) {
         const status = await context.core.packageStatus(lock.alias).catch(() => undefined);
         const approval = !status ? '?' : status.approved ? `accepted${status.approvedVersion && status.approvedVersion !== lock.version ? ` (${status.approvedVersion} reviewed earlier)` : ''}` : `${status.pending.length} to review`;
-        out(`${lock.alias} | ${lock.package} ${lock.version} | ${Object.keys(lock.nodes).length} results | ${approval} | from ${lock.source.type === 'git' ? lock.source.url : lock.source.path}`);
+        out(`${lock.alias} | ${lock.package} ${lock.version} | ${Object.keys(lock.nodes).length} results | ${approval} | from ${sourceSpec(lock.source)}${lock.resolved && lock.source.type === 'git' ? ` (${lock.resolved.slice(0, 8)})` : ''}`);
       }
       return;
     }
@@ -136,21 +136,20 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       return;
     }
     case 'import': {
-      if (!third) throw new Error('package import <file.rpkg.json|project folder> [--as alias] [--apply]');
-      const { pkg, source } = await loadPackage(third, root, context.extensionVersion);
-      const plan = await service.previewImport(pkg, { alias: flag(args, 'as'), source, now: new Date().toISOString() });
+      if (!third) throw new Error('package import <file.rpkg.json|project folder|git URL[#ref]> [--as alias] [--apply]');
+      const { pkg, source, resolved } = await loadPackage(third, root, context.extensionVersion);
+      const plan = await service.previewImport(pkg, { alias: flag(args, 'as'), source, ...(resolved ? { resolved } : {}), now: new Date().toISOString() });
       if (apply && plan.ok) { guardLoop(); await service.applyImport(plan); }
       out(json ? { ...plan, writes: plan.writes.map((write) => write.file), bib: undefined, papersIndex: undefined, applied: apply && plan.ok } : describeImport(pkg, plan, false, apply && plan.ok));
       if (!plan.ok) process.exitCode = 1;
       return;
     }
     case 'update': {
-      if (!third) throw new Error('package update <alias> [<file|folder>] [--apply]');
+      if (!third) throw new Error('package update <alias> [<file|folder|git URL[#ref]>] [--ref REF] [--apply]');
       const lock = await service.lockFor(third);
-      const spec = args.positional[3] ?? (lock.source.type === 'git' ? undefined : lock.source.path);
-      if (!spec) throw new Error(`${third} came from git; pass the file or folder to update from.`);
-      const { pkg, source } = await loadPackage(spec, root, context.extensionVersion);
-      const plan = await service.previewUpdate(third, pkg, { source, now: new Date().toISOString() });
+      const spec = args.positional[3] ?? sourceSpec(lock.source, flag(args, 'ref'));
+      const { pkg, source, resolved } = await loadPackage(spec, root, context.extensionVersion);
+      const plan = await service.previewUpdate(third, pkg, { source, ...(resolved ? { resolved } : {}), now: new Date().toISOString() });
       const details: Array<{ id: string; reason: string }> = [];
       if (apply && plan.ok) {
         guardLoop();

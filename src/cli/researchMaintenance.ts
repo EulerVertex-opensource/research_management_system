@@ -14,6 +14,7 @@ import { duplicateIds, nodeProblems } from '../domain/schema';
 import { ProjectPaths } from '../models/types';
 import { RegistryNode, libraryProblems, nodeFolders } from '../domain/registry';
 import { layoutReport } from '../domain/layout';
+import { packageProblemsIn } from '../services/PackageService';
 
 const USAGE = `Usage: research-maintenance <command> [--preview | --apply] [--project ROOT]
 
@@ -86,6 +87,8 @@ async function validate(files: NodeLoopFiles, paths: ProjectPaths, only?: 'asset
   }
   problems.push(...duplicateIds(all));
   problems.push(...libraryProblems(registry, paths));
+  // Imported packages: vendored files unedited and complete (see domain/packages.ts).
+  problems.push(...await packageProblemsIn(files, paths));
   problems.push(...ideaPlanProblems(await readFolder(files, paths.assets), [...await readFolder(files, paths.ideas), ...await readFolder(files, paths.plans)]));
   for (const [kind, label] of [['asset', 'Assets'], ['definition', 'Definitions']] as const) {
     if (only && only !== kind) continue;

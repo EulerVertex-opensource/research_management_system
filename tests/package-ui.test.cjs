@@ -166,12 +166,12 @@ test('the import dialog shows what an import or update would write, and blocks o
     bibChanges: [{ key: 'wang', as: 'wang_heat_kernel', action: 'renamed' }, { key: 'li', as: 'li_yau', action: 'reused' }],
     conflicts: [], warnings: ['main: the package records no upstream approval.'],
   };
-  const empty = renderToStaticMarkup(React.createElement(ImportPackageModal, { busy: false, onPick: noop, onAlias: noop, onConfirm: noop, onCancel: noop }));
+  const empty = renderToStaticMarkup(React.createElement(ImportPackageModal, { busy: false, onPick: noop, onSource: noop, onAlias: noop, onConfirm: noop, onCancel: noop }));
   assert.match(empty, /Import a research package/);
   assert.match(empty, /A package file \(\.rpkg\.json\)…/);
   assert.match(empty, /disabled=""[^>]*>Import</);
 
-  const html = renderToStaticMarkup(React.createElement(ImportPackageModal, { preview, busy: false, onPick: noop, onAlias: noop, onConfirm: noop, onCancel: noop }));
+  const html = renderToStaticMarkup(React.createElement(ImportPackageModal, { preview, busy: false, onPick: noop, onSource: noop, onAlias: noop, onConfirm: noop, onCancel: noop }));
   assert.match(html, /heat_kernel 1\.0\.0 · from \/x\/heat\.rpkg\.json/);
   assert.match(html, /lib_heat_kernel_…/);
   assert.match(html, /Results and definitions \(1\)/);
@@ -180,13 +180,13 @@ test('the import dialog shows what an import or update would write, and blocks o
   assert.match(html, /records no upstream approval/);
   assert.doesNotMatch(html, /disabled=""[^>]*>Import</);
 
-  const blocked = renderToStaticMarkup(React.createElement(ImportPackageModal, { preview: { ...preview, ok: false, conflicts: ['Package heat_kernel is already imported as hk; use package update hk.'] }, busy: false, onPick: noop, onAlias: noop, onConfirm: noop, onCancel: noop }));
+  const blocked = renderToStaticMarkup(React.createElement(ImportPackageModal, { preview: { ...preview, ok: false, conflicts: ['Package heat_kernel is already imported as hk; use package update hk.'] }, busy: false, onPick: noop, onSource: noop, onAlias: noop, onConfirm: noop, onCancel: noop }));
   assert.match(blocked, /Conflicts \(fix these first\)/);
   assert.match(blocked, /disabled=""[^>]*>Import</);
 
   const update = renderToStaticMarkup(React.createElement(ImportPackageModal, {
     update: 'hk', preview: { ...preview, update: 'hk', diff: { from: '1.0.0', to: '2.0.0', added: [], removed: [], statement: ['lib_hk_main'], proof: [], bump: 'major' } },
-    busy: false, onPick: noop, onAlias: noop, onConfirm: noop, onCancel: noop,
+    busy: false, onPick: noop, onSource: noop, onAlias: noop, onConfirm: noop, onCancel: noop,
   }));
   assert.match(update, /Update hk/);
   assert.match(update, /1\.0\.0 → 2\.0\.0: <strong>major<\/strong>/);
@@ -213,4 +213,80 @@ test('the export dialog fills from the saved manifest and shows blockers, versio
   assert.match(html, /Included \(2\)/);
   assert.match(html, /disabled=""[^>]*>Export 1\.1\.0…</);
   assert.match(renderToStaticMarkup(React.createElement(ExportPackageModal, { busy: true, onChange: noop, onConfirm: noop, onCancel: noop })), /Reading the project…/);
+});
+
+// ---------- git sources ----------
+
+const { execFileSync } = require('node:child_process');
+const { parseGitSpec, sourceSpec, loadPackage } = load('../src/services/PackageSources.ts');
+
+const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@b', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@b', GIT_TERMINAL_PROMPT: '0' };
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+
+test('git specs name a URL and an optional ref, and recorded sources fetch again', () => {
+  assert.deepEqual(parseGitSpec('https://github.com/a/b.git#v1.2.0'), { url: 'https://github.com/a/b.git', ref: 'v1.2.0' });
+  assert.deepEqual(parseGitSpec('git@github.com:a/b.git'), { url: 'git@github.com:a/b.git' });
+  assert.deepEqual(parseGitSpec('file:///tmp/x.git#main'), { url: 'file:///tmp/x.git', ref: 'main' });
+  assert.equal(parseGitSpec('../paperA'), undefined);
+  assert.equal(parseGitSpec('heat.rpkg.json'), undefined);
+  assert.equal(sourceSpec({ type: 'git', url: 'https://x/y.git', ref: 'main' }), 'https://x/y.git#main');
+  assert.equal(sourceSpec({ type: 'git', url: 'https://x/y.git', ref: 'main' }, 'v2.0.0'), 'https://x/y.git#v2.0.0');
+  assert.equal(sourceSpec({ type: 'project', path: '../a' }), '../a');
+  assert.throws(() => sourceSpec({ type: 'file', path: 'a.rpkg.json' }, 'main'), /only to packages imported from git/);
+});
+
+test('a package imports from git at a tag or branch, with the version its commit records', async () => {
+  const { up, down, base } = projects();
+  try {
+    // Upstream exports 1.0.0, commits the release record, and tags it.
+    git(up, 'init', '-q', '-b', 'main');
+    const A = await actionsFor(up);
+    await A.actions.export({ name: 'heat_kernel', cite: 'wang2026heat' });
+    git(up, 'add', '-A');
+    git(up, 'commit', '-qm', 'release 1.0.0');
+    git(up, 'tag', 'research-v1.0.0');
+    const remote = path.join(base, 'upstream.git');
+    git(base, 'clone', '-q', '--bare', up, remote);
+    const url = `file://${remote}`;
+
+    const B = await actionsFor(down);
+    let preview = await B.actions.previewImport(`${url}#research-v1.0.0`, 'hk');
+    assert.equal(preview.ok, true, preview.conflicts.join('\n'));
+    assert.equal(preview.version, '1.0.0');
+    await B.actions.import(`${url}#research-v1.0.0`, 'hk');
+    const lock = JSON.parse(fs.readFileSync(path.join(down, 'research/library/hk/package.lock.json'), 'utf8'));
+    assert.deepEqual(lock.source, { type: 'git', url, ref: 'research-v1.0.0' });
+    assert.equal(lock.resolved, git(up, 'rev-parse', 'HEAD'));
+    assert.ok(fs.existsSync(path.join(down, 'research-local/package-cache')));
+    // The scratch checkout is gone; only the bare cache stays.
+    assert.deepEqual(fs.readdirSync(path.join(down, 'research-local/package-cache')).filter((name) => name.startsWith('tree-')), []);
+
+    // Upstream changes a proof on main without a new release: main builds as a prerelease.
+    const theorem = path.join(up, 'research/assets/main_theorem.md');
+    fs.writeFileSync(theorem, fs.readFileSync(theorem, 'utf8').replace('Done.', 'Done, directly.'));
+    const parsed = matter(fs.readFileSync(theorem, 'utf8'));
+    approvedNode(up, 'asset', 'research/assets/main_theorem.md', parsed.data, `${parsed.content.trim()}\n`);
+    git(up, 'commit', '-qam', 'sharpen proof');
+    git(up, 'push', '-q', remote, 'main');
+    // The recorded source still names the tag: nothing new there.
+    assert.equal(await B.actions.updateSource('hk'), `${url}#research-v1.0.0`);
+    assert.equal((await B.actions.previewImport(await B.actions.updateSource('hk'), undefined, 'hk')).diff.bump, 'none');
+    preview = await B.actions.previewImport(`${url}#main`, undefined, 'hk');
+    assert.deepEqual([preview.version, preview.diff.bump, preview.diff.proof], ['1.0.1-dev', 'patch', ['lib_hk_main_theorem']]);
+    // The default branch, with no ref.
+    assert.equal((await loadPackage(url, down)).pkg.version, '1.0.1-dev');
+
+    await assert.rejects(loadPackage(`${url}#no-such-branch`, down), /has no branch, tag, or commit no-such-branch/);
+    const empty = path.join(base, 'empty.git');
+    git(base, 'init', '-q', '--bare', empty);
+    const scratch = path.join(base, 'scratch');
+    git(base, 'init', '-q', '-b', 'main', scratch);
+    fs.writeFileSync(path.join(scratch, 'README.md'), 'x');
+    git(scratch, 'add', '-A');
+    git(scratch, 'commit', '-qm', 'x');
+    git(scratch, 'push', '-q', empty, 'main');
+    await assert.rejects(loadPackage(`file://${empty}#main`, down), /is not a Research Assistant project/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
