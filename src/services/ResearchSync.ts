@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { packageFolder } from './PackageService';
 import * as path from 'path';
 import { SyncConfig } from '../models/types';
 import { LOOP_COMMAND } from './AgentProviders';
@@ -103,7 +104,7 @@ export class ResearchSync {
     const shared = this.core.shared;
     const research = paths.researchRoot !== '.' ? [paths.researchRoot] : [
       paths.projectMd, paths.paperIndex, paths.assets, paths.definitions, paths.ideas, paths.plans, paths.remarks, paths.library, paths.papers, paths.writingRoot,
-      shared.checks, shared.candidates, shared.decisions, shared.handoffs, shared.approvals, legacyApprovalsPath(paths.researchRoot),
+      shared.checks, shared.candidates, shared.decisions, shared.handoffs, shared.approvals, legacyApprovalsPath(paths.researchRoot), packageFolder(paths),
     ];
     const manuscript = [paths.mainTex, paths.bibliography, ...paths.macroFiles, ...(paths.notations ? [paths.notations] : []), paths.sections];
     const candidates = [...new Set([...research, ...manuscript, paths.config, '.gitattributes', ...this.config.include])];

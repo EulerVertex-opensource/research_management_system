@@ -12,6 +12,11 @@ export const LIBRARY_PREFIX = 'lib_';
 export const LIBRARY_KIND_FOLDERS = { asset: 'assets', definition: 'definitions' } as const;
 /** Optional per-collection description file. */
 export const COLLECTION_FILE = 'collection.md';
+/** Marks a collection as an imported package: vendored, read-only, and pinned to one version (see domain/packages.ts). */
+export const PACKAGE_LOCK_FILE = 'package.lock.json';
+/** Folder under the research root holding this project's own package identity and release history. */
+export const PACKAGE_DIR = 'package';
+export const PACKAGE_DIR_FILES = ['manifest.json', 'releases.json'] as const;
 
 export type ResultKind = 'asset' | 'definition';
 export type NodeOrigin = 'project' | 'library';

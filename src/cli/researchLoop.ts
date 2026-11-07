@@ -23,6 +23,7 @@ import { vocabularyReminder } from '../domain/researcherText';
 import { LEVEL_LABEL, toLevel } from '../domain/understanding';
 import { Teaching } from '../services/Teaching';
 import { REMARK_FROM_LIST, RemarkFrom, remarkLabel } from '../domain/remarks';
+import { PACKAGE_USAGE, runPackage } from './packageCommands';
 
 declare const __EXTENSION_VERSION__: string | undefined;
 const EXTENSION_VERSION = typeof __EXTENSION_VERSION__ === 'string' ? __EXTENSION_VERSION__ : undefined;
@@ -80,6 +81,7 @@ const USAGE = `Usage: research-loop <command> [options]
   library search <words...> [--type T] [--collection C] [--limit N]   (find known results to reuse)
   library list [--collection C] [--unapproved]
   library promote <lib_id> [--as <id>]   (copy a library result into the project as a draft to change it)
+${PACKAGE_USAGE}
   sync status [--no-fetch] | sync pull [--remote NAME] [--continue] | sync prepare [--latex] [--no-fetch] [--note "..."]
   sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
   migrate-approvals   (split research/approvals.json into one file per approved target)
@@ -811,6 +813,10 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('library search|list|promote');
+    }
+    case 'package': {
+      await runPackage(sub, args, { root, out, json, loopRunning: core.current?.status === 'running', extensionVersion: EXTENSION_VERSION });
+      return;
     }
     case 'search': {
       if (sub === 'status') {

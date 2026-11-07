@@ -1,6 +1,6 @@
 import * as path from 'path';
 import type { ProjectPaths } from '../models/types';
-import { LIBRARY_KIND_FOLDERS, COLLECTION_FILE } from './registry';
+import { LIBRARY_KIND_FOLDERS, COLLECTION_FILE, PACKAGE_DIR, PACKAGE_DIR_FILES, PACKAGE_LOCK_FILE } from './registry';
 
 /**
  * What may exist under the research folders. Discovery reads only the
@@ -48,13 +48,16 @@ function folders(paths: LayoutPaths) {
     sections: paths.writingSections ?? `${writing}/sections`,
     outline: paths.writingOutline ?? `${writing}/outline.md`,
     legacy: [shared('workflows')],
+    // This project's own package identity and release history (domain/packages.ts).
+    package: shared(PACKAGE_DIR),
   };
 }
 
 /** Folders the rules govern. With the legacy root `.` only the configured folders are governed, never the manuscript. */
 function governed(paths: LayoutPaths): string[] {
   const f = folders(paths);
-  const list = [...f.nodes, ...f.records, f.approvals, f.writing, ...(paths.papers ? [paths.papers] : []), ...(paths.library ? [paths.library] : [])];
+  // With the legacy root `.` the package folder is a plain root folder the rules leave alone.
+  const list = [...f.nodes, ...f.records, f.approvals, f.writing, ...(paths.researchRoot === '.' ? [] : [f.package]), ...(paths.papers ? [paths.papers] : []), ...(paths.library ? [paths.library] : [])];
   return paths.researchRoot === '.' ? list : [paths.researchRoot, ...list];
 }
 
@@ -80,10 +83,11 @@ function allowedFile(paths: LayoutPaths, file: string): boolean {
   if (isUnder(file, f.approvals)) return /\.jsonl?$/.test(base);
   if (parent === f.sections) return SECTION_FILE.test(base);
   if (parent === f.bindings) return /^[a-z0-9][a-z0-9_-]*\.json$/.test(base);
+  if (parent === f.package) return (PACKAGE_DIR_FILES as readonly string[]).includes(base);
   if (paths.library && file.startsWith(`${paths.library}/`)) {
     const parts = childParts(file, paths.library);
     if (!COLLECTION.test(parts[0])) return false;
-    if (parts.length === 2) return parts[1] === COLLECTION_FILE;
+    if (parts.length === 2) return parts[1] === COLLECTION_FILE || parts[1] === PACKAGE_LOCK_FILE;
     return parts.length === 3 && Object.values(LIBRARY_KIND_FOLDERS).includes(parts[1] as never) && LIBRARY_FILE.test(parts[2]);
   }
   if (paths.papers && file.startsWith(`${paths.papers}/`)) {

@@ -6,6 +6,8 @@ import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/lay
 import { UNDERSTANDING_PATH } from '../domain/understandingLevels';
 import { projectShellWrite, shellScriptOf } from './ShellWrites';
 import { WRITE_PROMPT_PATTERN } from '../domain/chatRoles';
+import { importedCollectionOf } from '../domain/packages';
+import { PACKAGE_DIR } from '../domain/registry';
 
 /** Hook stdin shape shared by Claude Code and Codex. */
 export interface HookInput {
@@ -281,6 +283,19 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
     }
     if ((under(target, paths.assets, root) || under(target, paths.definitions, root)) && APPROVED.test(text)) {
       return { deny: true, reason: `Research loop: ${target} may not be set to status: approved by the agent. Leave it draft and call request_approval so the researcher can approve it.` };
+    }
+  }
+  // Imported packages are vendored and pinned by their lockfile; this project's package folder holds its release history. Both change only through the package commands.
+  const packageFolder = paths.researchRoot === '.' ? undefined : path.posix.join(paths.researchRoot, PACKAGE_DIR);
+  for (const target of shellWrites ? targets : []) {
+    const relative = projectRelative(target, root);
+    if (relative === undefined) continue;
+    const collection = importedCollectionOf(relative, paths.library, exists);
+    if (collection) {
+      return { deny: true, reason: `Research loop: ${target} belongs to the imported package ${collection}, which is read-only (it must match its lockfile). To change a result, copy it into the project with ${LOOP_COMMAND} library promote <lib_id>; to bring a new version, ${LOOP_COMMAND} package update ${collection}.` };
+    }
+    if (packageFolder && under(relative, packageFolder)) {
+      return { deny: true, reason: `Research loop: ${target} is this project's package manifest and release history; it changes only through ${LOOP_COMMAND} package export (or the dashboard).` };
     }
   }
   if (paths.library) {

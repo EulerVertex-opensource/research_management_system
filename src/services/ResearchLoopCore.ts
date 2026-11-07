@@ -39,6 +39,7 @@ import {
   ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, projectPart, renderContext, renderShow,
 } from './ResearchContext';
 import { ideaPlanProblems } from './ProofIdeas';
+import { packageProblemsIn } from './PackageService';
 import { Teaching } from './Teaching';
 import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLibraryPath, libraryFolders, libraryProblems, listNodeFiles, locateNodeFile, nodeFolders, searchLibrary } from '../domain/registry';
 
@@ -1404,6 +1405,8 @@ export class ResearchLoopCore {
     const parsed = parseMarkdown(await this.files.readFile(file));
     parsed.data.status = 'draft';
     parsed.data.derived_from = libraryId;
+    // A promoted copy is this project's own draft: it no longer stands for a node of an imported package.
+    delete parsed.data.imported_from;
     // Relative links in the body were written for the library folder; re-point them from the new one.
     const body = parsed.content.replace(/\]\((?!https?:|#|\/)([^)\s]+\.md)\)/g, (_match, link: string) => {
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(file), link));
@@ -3014,6 +3017,7 @@ export class ResearchLoopCore {
       }
     }
     problems.push(...(await layoutReport(this.files, this.paths)).problems);
+    problems.push(...await packageProblemsIn(this.files, this.paths));
     problems.push(...await this.remarkProblems(new Set([...assets.keys(), ...definitions.keys()])));
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);
