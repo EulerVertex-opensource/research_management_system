@@ -16,7 +16,7 @@ export const COLLECTION_FILE = 'collection.md';
 export const PACKAGE_LOCK_FILE = 'package.lock.json';
 /** Folder under the research root holding this project's own package identity and release history. */
 export const PACKAGE_DIR = 'package';
-export const PACKAGE_DIR_FILES = ['manifest.json', 'releases.json'] as const;
+export const PACKAGE_DIR_FILES = ['manifest.json', 'releases.json', 'citation.bib'] as const;
 
 export type ResultKind = 'asset' | 'definition';
 export type NodeOrigin = 'project' | 'library';

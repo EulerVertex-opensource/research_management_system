@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { PackageService } from '../services/PackageService';
 import { gitProvenance, loadPackage, sourceSpec } from '../services/PackageSources';
-import { ExportPlan, ImportPlan, RemovePlan, ResearchPackage, packageFileName, serializePackage } from '../domain/packages';
+import { ExportPlan, ImportPlan, RemovePlan, ResearchPackage, citationCheck, citationTemplate, packageFileName, serializePackage } from '../domain/packages';
 import { NodeLoopFiles, loadProjectPaths } from './nodeFiles';
 import type { ResearchLoopCore } from '../services/ResearchLoopCore';
 
@@ -12,7 +12,8 @@ import type { ResearchLoopCore } from '../services/ResearchLoopCore';
  * by default and writes only with --apply.
  */
 
-export const PACKAGE_USAGE = `  package export [--name N --cite KEY] [--exports a,b] [--version X.Y.Z] [--location id="Theorem 1.2"]... [--out FILE] [--apply]   (this project's approved results as a .rpkg.json package)
+export const PACKAGE_USAGE = `  package citation [--set FILE|-]   (this work's own BibTeX entry, research/package/citation.bib: how importers cite it)
+  package export [--name N] [--citation FILE] [--exports a,b] [--version X.Y.Z] [--location id="Theorem 1.2"]... [--out FILE] [--apply]   (this project's approved results as a .rpkg.json package)
   package import <file.rpkg.json|project folder|git URL[#ref]> [--as alias] [--apply]   (vendor a package into the library as lib_<alias>_* results)
   package update <alias> [<file|folder|git URL[#ref]>] [--ref REF] [--apply]   (bring a new version from where it came, or elsewhere; shows what changed)
   package remove <alias> [--force] [--apply]
@@ -108,9 +109,9 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       return;
     }
     case 'export': {
+      if (flag(args, 'cite')) throw new Error('--cite is gone: this work\'s citation is its own BibTeX entry in research/package/citation.bib. Set it with package citation --set FILE, or pass --citation FILE.');
       const manifest = {
         ...(flag(args, 'name') ? { name: flag(args, 'name') } : {}),
-        ...(flag(args, 'cite') ? { cite: flag(args, 'cite') } : {}),
         ...(flag(args, 'exports') ? { exports: flag(args, 'exports')!.split(',').map((item) => item.trim()).filter(Boolean) } : {}),
       };
       const locations: Record<string, string> = {};
@@ -120,7 +121,9 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
         locations[item.slice(0, at).trim()] = item.slice(at + 1).trim();
       }
       // Locations are saved in the manifest so every later build (and a folder import) cites the same place.
-      const options = { manifest: { ...manifest, ...(Object.keys(locations).length ? { locations } : {}) }, version: flag(args, 'version') };
+      const citationFile = flag(args, 'citation');
+      const citation = citationFile ? (citationFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(root, citationFile), 'utf8')) : undefined;
+      const options = { manifest: { ...manifest, ...(Object.keys(locations).length ? { locations } : {}) }, version: flag(args, 'version'), ...(citation !== undefined ? { citation } : {}) };
       const origin = await gitProvenance(root, paths, context.extensionVersion);
       if (!apply) {
         const plan = await service.previewExport(origin, options);
@@ -170,6 +173,19 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       if (!plan.ok) process.exitCode = 1;
       return;
     }
+    case 'citation': {
+      const file = flag(args, 'set');
+      if (file) {
+        const saved = await service.saveCitation(file === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(root, file), 'utf8'));
+        out(json ? saved : [`Saved this work's citation (${saved.key}) to ${service.citationPath}. Share it with your next sync.`, bullets('Warnings:', saved.warnings)].filter(Boolean).join('\n'));
+        return;
+      }
+      const text = await service.citation();
+      if (!text) { out(`No citation yet. Write this work's BibTeX entry to a file and run: package citation --set FILE\n\n${citationTemplate((await service.manifest().catch(() => undefined))?.name)}`); process.exitCode = 1; return; }
+      const check = citationCheck(text);
+      out(json ? { path: service.citationPath, text, ...check } : [text.trim(), bullets('Problems:', check.problems), bullets('Warnings:', check.warnings)].filter(Boolean).join('\n\n'));
+      return;
+    }
     case 'approve': {
       if (!third) throw new Error('package approve <alias> --interactive');
       const lock = await service.lockFor(third);
@@ -184,6 +200,6 @@ export async function runPackage(sub: string | undefined, args: PackageArgs, con
       return;
     }
     default:
-      throw new Error(`package export|import|update|remove|approve|list|verify\n${PACKAGE_USAGE}`);
+      throw new Error(`package citation|export|import|update|remove|approve|list|verify\n${PACKAGE_USAGE}`);
   }
 }

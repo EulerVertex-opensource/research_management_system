@@ -89,6 +89,15 @@ export class FileService {
     }
   }
 
+  async deleteEmptyDir(relativeDir: string): Promise<void> {
+    try {
+      const uri = this.resolve(relativeDir);
+      if (!(await vscode.workspace.fs.readDirectory(uri)).length) await vscode.workspace.fs.delete(uri);
+    } catch {
+      // missing, or not empty
+    }
+  }
+
   async renameFile(oldRelativePath: string, newRelativePath: string): Promise<void> {
     const oldUri = this.resolve(oldRelativePath);
     const newUri = this.resolve(newRelativePath);

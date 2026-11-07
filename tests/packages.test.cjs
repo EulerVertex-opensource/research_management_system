@@ -54,7 +54,9 @@ function upstream() {
   const files = memoryFiles({
     'research/project.md': project(['main_theorem']),
     'research/papers.md': '# Papers\n\n## li1986\n\nLi and Yau, Acta Math.\n- URL: https://doi.org/10.1007/BF02399203\n\n## wang2026heat\n\nThis project.\n- URL: https://arxiv.org/abs/2611.00001\n',
-    'references.bib': `${LI_YAU}\n\n${WANG}\n`,
+    'references.bib': `${LI_YAU}\n`,
+    // This work's own entry lives apart from the bibliography: the paper does not cite itself.
+    'research/package/citation.bib': `${WANG}\n`,
     'research/definitions/heat_kernel_def.md': node({ type: 'definition', title: 'Definition (heat kernel)', source: { kind: 'original' }, depends_on: [] }, '## Statement\n\nThe heat kernel $p_t(x,y)$ is the fundamental solution.\n'),
     'research/library/known/assets/lib_li_yau.md': node({ type: 'lemma', title: 'Li-Yau inequality', source: { kind: 'paper', paper_id: 'li1986', location: 'Theorem 1.1' }, depends_on: [], uses_definitions: [] }, '## Statement\n\nPositive solutions satisfy the Li-Yau gradient bound.\n'),
     'research/assets/gaussian_bound.md': node({ type: 'lemma', title: 'Gaussian upper bound', source: { kind: 'original' }, depends_on: ['lib_li_yau'], uses_definitions: ['heat_kernel_def'], derived_from: 'lib_li_yau' },
@@ -68,7 +70,7 @@ function upstream() {
 }
 
 const provenance = { commit: 'deadbeef', remote: 'https://github.com/x/heat', exportedAt: '2026-11-07T00:00:00Z' };
-const MANIFEST = { name: 'heat_kernel', cite: 'wang2026heat' };
+const MANIFEST = { name: 'heat_kernel' };
 
 function downstream(extra = {}) {
   const files = memoryFiles({
@@ -129,20 +131,20 @@ test('export takes the approved closure of the required results and leaves every
   assert.throws(() => packages.parsePackage(JSON.stringify({ ...pkg, formatVersion: 99 })), /update the extension/);
 });
 
-test('export is blocked by drafts, conjectures, and a missing cite entry', async () => {
+test('export is blocked by drafts, conjectures, and a missing citation', async () => {
   const up = upstream();
   up.files.map.set('research/assets/main_theorem.md', matter.stringify(matter(up.files.map.get('research/assets/main_theorem.md')).content.replace('decays', 'decays fast'), { ...matter(up.files.map.get('research/assets/main_theorem.md')).data }));
   up.files.map.set('research/assets/cj.md', node({ type: 'conjecture', title: 'Hope', depends_on: [], uses_definitions: [] }, '## Statement\n\nX.\n\n## Motivation\n\nY.\n'));
-  up.files.map.set('references.bib', LI_YAU);
+  up.files.map.delete('research/package/citation.bib');
   const plan = await up.service.previewExport(provenance, { manifest: { ...MANIFEST, exports: ['main_theorem', 'cj', 'nope'] } });
   assert.equal(plan.ok, false);
   const text = plan.blockers.join('\n');
   assert.match(text, /main_theorem: not approved/); // edited after approval
   assert.match(text, /cj: is a conjecture/);
   assert.match(text, /Export nope is not a result/);
-  assert.match(text, /BibTeX entry with key wang2026heat/);
+  assert.match(text, /No citation for this project yet/);
   assert.equal(plan.package, undefined);
-  assert.match((await up.service.previewExport(provenance, {})).blockers.join('\n'), /No package manifest yet/);
+  assert.match((await up.service.previewExport(provenance, {})).blockers.join('\n'), /No package name yet/);
 });
 
 test('versions follow semver from statement and proof digests', async () => {
@@ -239,7 +241,7 @@ test('import plans are deterministic and refuse collisions', async () => {
   const other = { ...pkg, name: 'other_pkg' };
   assert.match((await down.service.previewImport(other, { ...options, alias: 'thesis' })).conflicts.join('\n'), /already has a collection named thesis/);
   assert.match((await down.service.previewImport(other, { ...options, alias: 'Bad-Alias' })).conflicts.join('\n'), /Alias Bad-Alias/);
-  down.files.map.set('research/package/manifest.json', JSON.stringify({ name: 'other_pkg', cite: 'x' }));
+  down.files.map.set('research/package/manifest.json', JSON.stringify({ name: 'other_pkg' }));
   assert.match((await down.service.previewImport(other, { ...options, alias: 'op' })).conflicts.join('\n'), /cannot import itself/);
 });
 
@@ -470,4 +472,30 @@ test('agents cannot accept a package', () => {
   const deny = (command) => preToolUseDecision(paths, { tool_name: 'Bash', tool_input: { command } }, '/repo').deny;
   assert.equal(deny('node .agents/skills/research-loop/scripts/research-loop.cjs package approve hk --interactive'), true);
   assert.equal(deny('node .agents/skills/research-loop/scripts/research-loop.cjs package list'), false);
+});
+
+test('this work\'s citation is one BibTeX entry with a slug key and a title, apart from the papers it cites', async () => {
+  assert.deepEqual(packages.citationCheck(WANG).problems, []);
+  assert.match(packages.citationCheck(WANG).warnings.join('\n'), /no url, doi, or eprint/);
+  assert.match(packages.citationCheck('').problems[0], /No citation for this project yet/);
+  assert.match(packages.citationCheck('just text').problems[0], /not a BibTeX entry/);
+  assert.match(packages.citationCheck(`${WANG}\n${LI_YAU}`).problems[0], /holds 2 entries \(wang2026heat, li1986\)/);
+  assert.match(packages.citationCheck(WANG.replace('wang2026heat', 'Wang2026')).problems[0], /Wang2026 must be lowercase snake_case/);
+  assert.match(packages.citationCheck(WANG.replace(/title = \{[^}]*\}/, 'title = {}')).problems[0], /needs a title/);
+  // The template has to be filled in before it exports.
+  const template = packages.citationTemplate('heat_kernel', undefined, 2026);
+  assert.match(template, /@unpublished\{heat_kernel,/);
+  assert.match(packages.citationCheck(template).problems.join('\n'), /needs a title/);
+
+  const up = upstream();
+  assert.match((await up.service.previewExport(provenance, { manifest: MANIFEST, citation: LI_YAU })).blockers.join('\n'), /li1986 is also a paper this project cites/);
+  // An edited citation is saved with the export.
+  const edited = WANG.replace('year = {2026}', 'year = {2026},\n  eprint = {2611.00001}');
+  const plan = await up.service.export(provenance, { manifest: MANIFEST, citation: edited });
+  assert.match(up.files.map.get('research/package/citation.bib'), /eprint = \{2611\.00001\}/);
+  assert.match(plan.package.cite.bibtex, /eprint/);
+  await assert.rejects(up.service.saveCitation('@misc{Bad,\n title = {x}\n}'), /lowercase snake_case/);
+  // A manifest from before the citation moved still exports; its cite key is ignored.
+  up.files.map.set('research/package/manifest.json', JSON.stringify({ name: 'heat_kernel', cite: 'old_key' }));
+  assert.equal((await up.service.previewExport(provenance)).ok, true);
 });

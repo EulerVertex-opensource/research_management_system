@@ -43,6 +43,11 @@ export class NodeLoopFiles implements LoopFiles {
     await fs.rm(this.resolve(relativePath), { force: true });
   }
 
+  async deleteEmptyDir(relativeDir: string): Promise<void> {
+    // rmdir refuses a folder that still holds anything, which is the point.
+    await fs.rmdir(this.resolve(relativeDir)).catch(() => undefined);
+  }
+
   async exists(relativePath: string): Promise<boolean> {
     try { await fs.access(this.resolve(relativePath)); return true; } catch { return false; }
   }

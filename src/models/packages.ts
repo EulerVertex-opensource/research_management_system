@@ -27,7 +27,8 @@ export interface PackagesPayload {
 /** What the researcher sets in the export dialog; absent fields keep the saved manifest. */
 export interface ExportRequest {
   name?: string;
-  cite?: string;
+  /** This work's BibTeX entry; saved to research/package/citation.bib on export. */
+  citation?: string;
   exports?: string[];
   version?: string;
   locations?: Record<string, string>;
@@ -49,8 +50,21 @@ export interface ExportPreviewView {
   unchanged: boolean;
   /** Project results the researcher can choose to export. */
   candidates: ExportCandidate[];
-  /** BibTeX keys in the bibliography, for the cite key field. */
-  bibKeys: string[];
+  /** The citation the preview used: the one being edited, else the saved one, else a template to fill in. */
+  citation: string;
+  /** Whether research/package/citation.bib exists. */
+  citationSaved: boolean;
+}
+
+/** This project's own citation, for the Settings page. */
+export interface CitationView {
+  path: string;
+  /** The saved text, or a template when nothing is saved yet. */
+  text: string;
+  saved: boolean;
+  key?: string;
+  problems: string[];
+  warnings: string[];
 }
 
 export interface ImportPreviewView {

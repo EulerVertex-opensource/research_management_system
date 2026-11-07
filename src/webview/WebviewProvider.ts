@@ -633,7 +633,9 @@ export class WebviewProvider {
         case 'packagePreviewImport':
         case 'packageImport':
         case 'packageApprove':
-        case 'packageRemove': {
+        case 'packageRemove':
+        case 'getCitation':
+        case 'saveCitation': {
           await this.handlePackage(msg);
           break;
         }
@@ -920,9 +922,19 @@ export class WebviewProvider {
     }
   }
 
-  private async handlePackage(msg: Extract<WebviewMessage, { type: 'getPackages' | 'packagePreviewExport' | 'packageExport' | 'packagePickSource' | 'packagePreviewImport' | 'packageImport' | 'packageApprove' | 'packageRemove' }>): Promise<void> {
+  private async handlePackage(msg: Extract<WebviewMessage, { type: 'getPackages' | 'packagePreviewExport' | 'packageExport' | 'packagePickSource' | 'packagePreviewImport' | 'packageImport' | 'packageApprove' | 'packageRemove' | 'getCitation' | 'saveCitation' }>): Promise<void> {
     const actions = this.loopHost.packageActions();
     switch (msg.type) {
+      case 'getCitation':
+        this.send({ type: 'citationData', data: await actions.citationView() });
+        return;
+      case 'saveCitation': {
+        const data = await actions.saveCitation(msg.text);
+        const saved = !data.problems.length;
+        if (saved) this.output.appendLine(`[package] Saved this project's citation (${data.key}) to ${data.path}`);
+        this.send({ type: 'citationData', data, saved });
+        return;
+      }
       case 'getPackages':
         this.send({ type: 'packagesData', data: await actions.overview() });
         return;

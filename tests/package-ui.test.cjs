@@ -47,7 +47,8 @@ function projects() {
     write(root, 'main.tex', '\\documentclass{article}\\begin{document}x\\end{document}\n');
   }
   write(up, 'research/project.md', project('main_theorem'));
-  write(up, 'references.bib', '@unpublished{wang2026heat,\n  title = {Heat kernel bounds},\n  year = {2026},\n  url = {https://arxiv.org/abs/2611.00001}\n}\n');
+  write(up, 'references.bib', '% refs\n');
+  write(up, 'research/package/citation.bib', '@unpublished{wang2026heat,\n  title = {Heat kernel bounds},\n  author = {Wang, Xiaokang},\n  year = {2026},\n  url = {https://arxiv.org/abs/2611.00001}\n}\n');
   write(up, 'research/papers.md', '# Papers\n\n## wang2026heat\n\nThis work.\n- URL: https://arxiv.org/abs/2611.00001\n');
   approvedNode(up, 'definition', 'research/definitions/heat_kernel_def.md', { type: 'definition', title: 'Definition (heat kernel)', source: { kind: 'original' }, depends_on: [] }, '## Statement\n\nThe heat kernel.\n');
   approvedNode(up, 'asset', 'research/assets/main_theorem.md', { type: 'theorem', title: 'Main theorem', source: { kind: 'original' }, depends_on: [], uses_definitions: ['heat_kernel_def'] }, '## Statement\n\nDecay.\n\n## Proof\n\nDone.\n');
@@ -73,16 +74,17 @@ test('the dashboard actions export, import, accept, update, and remove a package
     // The first preview has no manifest; the candidates list the project's results, goals first.
     let preview = await A.actions.previewExport({});
     assert.equal(preview.ok, false);
-    assert.match(preview.blockers.join('\n'), /No package manifest yet/);
+    assert.match(preview.blockers.join('\n'), /No package name yet/);
     assert.deepEqual(preview.candidates.map((item) => [item.id, item.required, item.approved]), [['main_theorem', true, true], ['draft_lemma', false, false]]);
-    assert.deepEqual(preview.bibKeys, ['wang2026heat']);
-    preview = await A.actions.previewExport({ name: 'heat_kernel', cite: 'wang2026heat', locations: { main_theorem: 'Theorem 1.2' } });
+    assert.match(preview.citation, /@unpublished\{wang2026heat,/);
+    assert.equal(preview.citationSaved, true);
+    preview = await A.actions.previewExport({ name: 'heat_kernel', locations: { main_theorem: 'Theorem 1.2' } });
     assert.equal(preview.ok, true);
     assert.deepEqual([preview.version, preview.bump, preview.closure.length], ['1.0.0', 'initial', 2]);
-    assert.match((await A.actions.previewExport({ name: 'heat_kernel', cite: 'wang2026heat', exports: ['main_theorem', 'draft_lemma'] })).blockers.join('\n'), /draft_lemma: not approved/);
-    assert.equal(await A.actions.exportFileName({ name: 'heat_kernel', cite: 'wang2026heat' }), 'heat_kernel-1.0.0.rpkg.json');
+    assert.match((await A.actions.previewExport({ name: 'heat_kernel', exports: ['main_theorem', 'draft_lemma'] })).blockers.join('\n'), /draft_lemma: not approved/);
+    assert.equal(await A.actions.exportFileName({ name: 'heat_kernel' }), 'heat_kernel-1.0.0.rpkg.json');
 
-    const exported = await A.actions.export({ name: 'heat_kernel', cite: 'wang2026heat', locations: { main_theorem: 'Theorem 1.2' } });
+    const exported = await A.actions.export({ name: 'heat_kernel', locations: { main_theorem: 'Theorem 1.2' } });
     assert.equal(exported.recorded, true);
     const file = path.join(base, exported.fileName);
     fs.writeFileSync(file, exported.text);
@@ -149,14 +151,25 @@ test('the package bar shows each package with its state and actions', () => {
     ] },
     onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop,
   }));
-  assert.match(html, /Import…/);
-  assert.match(html, /Export \(v1\.2\.0\)…/);
-  assert.match(html, /heat_kernel 1\.0\.1/);
+  assert.match(html, />Import a package…</);
+  assert.match(html, />Export this project…</);
+  assert.match(html, /latest release: v1\.2\.0/);
+  assert.match(html, /heat_kernel<\/span><span[^>]*>v1\.0\.1/);
+  assert.match(html, /v1\.0\.0 accepted earlier/);
+  assert.match(html, />Update…</);
+  assert.match(html, />Remove…</);
   assert.match(html, /1 TO REVIEW/);
   assert.match(html, /✓ ACCEPTED/);
   assert.match(html, /edited after import/);
   // Accept shows only for a package that waits and matches its lockfile.
-  assert.equal((html.match(/>Accept</g) ?? []).length, 1);
+  assert.equal((html.match(/>Accept package</g) ?? []).length, 1);
+  // The package name shows only when the alias differs from it.
+  const same = renderToStaticMarkup(React.createElement(PackageBar, {
+    data: { library: 'research/library', installed: [{ alias: 'collapsing_lcf', package: 'collapsing_lcf', version: '1.0.0', results: 3, pending: 0, accepted: true, source: '../c.rpkg.json', problems: [] }] },
+    onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop,
+  }));
+  assert.equal((same.match(/collapsing_lcf</g) ?? []).length, 1);
+  assert.match(renderToStaticMarkup(React.createElement(PackageBar, { data: { library: 'research/library', installed: [] }, onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop })), /No packages imported/);
 });
 
 test('the import dialog shows what an import or update would write, and blocks on conflicts', () => {
@@ -196,15 +209,16 @@ test('the import dialog shows what an import or update would write, and blocks o
 
 test('the export dialog fills from the saved manifest and shows blockers, version, and contents', () => {
   const preview = {
-    ok: false, blockers: ['draft_lemma: not approved.'], warnings: [], manifest: { name: 'heat_kernel', cite: 'wang2026heat', locations: { main_theorem: 'Theorem 1.2' } },
+    ok: false, blockers: ['draft_lemma: not approved.'], warnings: [], manifest: { name: 'heat_kernel', locations: { main_theorem: 'Theorem 1.2' } },
     exports: ['main_theorem'], closure: [{ id: 'main_theorem', kind: 'asset', title: 'Main theorem', origin: 'project' }, { id: 'lib_li_yau', kind: 'asset', title: 'Li-Yau', origin: 'library' }],
     version: '1.1.0', previous: '1.0.0', bump: 'minor', changes: { added: ['lib_li_yau'], removed: [], statement: [], proof: [], exportsAdded: [], exportsRemoved: [] }, unchanged: false,
     candidates: [{ id: 'main_theorem', title: 'Main theorem', approved: true, required: true }, { id: 'draft_lemma', title: 'Draft lemma', approved: false, required: false }],
-    bibKeys: ['wang2026heat'],
+    citation: '@unpublished{wang2026heat,\n  title = {Heat kernel bounds}\n}\n', citationSaved: false,
   };
   const html = renderToStaticMarkup(React.createElement(ExportPackageModal, { preview, busy: false, onChange: noop, onConfirm: noop, onCancel: noop }));
   assert.match(html, /value="heat_kernel"/);
-  assert.match(html, /value="wang2026heat"/);
+  assert.match(html, /<textarea[^>]*>@unpublished\{wang2026heat,/);
+  assert.match(html, /saved when you export/);
   assert.match(html, /value="Theorem 1\.2"/);
   assert.match(html, /GOAL/);
   assert.match(html, /NOT APPROVED/);
@@ -241,7 +255,7 @@ test('a package imports from git at a tag or branch, with the version its commit
     // Upstream exports 1.0.0, commits the release record, and tags it.
     git(up, 'init', '-q', '-b', 'main');
     const A = await actionsFor(up);
-    await A.actions.export({ name: 'heat_kernel', cite: 'wang2026heat' });
+    await A.actions.export({ name: 'heat_kernel' });
     git(up, 'add', '-A');
     git(up, 'commit', '-qm', 'release 1.0.0');
     git(up, 'tag', 'research-v1.0.0');
@@ -286,6 +300,123 @@ test('a package imports from git at a tag or branch, with the version its commit
     git(scratch, 'commit', '-qm', 'x');
     git(scratch, 'push', '-q', empty, 'main');
     await assert.rejects(loadPackage(`file://${empty}#main`, down), /is not a Research Assistant project/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------- this project's citation ----------
+
+const { CitationSection } = load('../webview-src/components/SettingsView.tsx', ['react']);
+
+test('the citation is read, checked, and saved apart from the bibliography', async () => {
+  const { up, base } = projects();
+  try {
+    fs.rmSync(path.join(up, 'research/package/citation.bib'));
+    const A = await actionsFor(up);
+    let view = await A.actions.citationView('heat_kernel');
+    assert.equal(view.saved, false);
+    assert.equal(view.path, 'research/package/citation.bib');
+    assert.match(view.text, /@unpublished\{heat_kernel,/);
+    // With nothing saved, the export dialog starts from the template and is blocked until it is filled in.
+    const preview = await A.actions.previewExport({ name: 'heat_kernel' });
+    assert.equal(preview.citationSaved, false);
+    assert.match(preview.citation, /@unpublished\{heat_kernel,/);
+    assert.match(preview.blockers.join('\n'), /No citation for this project yet/);
+
+    view = await A.actions.saveCitation('@misc{Heat,\n title = {x}\n}');
+    assert.match(view.problems.join('\n'), /Heat must be lowercase snake_case/);
+    assert.equal(fs.existsSync(path.join(up, 'research/package/citation.bib')), false);
+
+    view = await A.actions.saveCitation('@article{wang2026heat,\n  title = {Heat kernel bounds},\n  author = {Wang},\n  year = {2026},\n  doi = {10.1/x}\n}');
+    assert.deepEqual([view.saved, view.key, view.problems, view.warnings], [true, 'wang2026heat', [], []]);
+    assert.match(fs.readFileSync(path.join(up, 'research/package/citation.bib'), 'utf8'), /doi = \{10\.1\/x\}/);
+    // The manuscript's bibliography is untouched.
+    assert.equal(fs.readFileSync(path.join(up, 'references.bib'), 'utf8'), '% refs\n');
+    assert.equal((await A.actions.previewExport({ name: 'heat_kernel' })).ok, true);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('the Settings citation section shows the entry, its problems, and a save for an unsaved template', () => {
+  const template = { path: 'research/package/citation.bib', text: '@unpublished{heat_kernel,\n  title  = {},\n}\n', saved: false, problems: [], warnings: [] };
+  const html = renderToStaticMarkup(React.createElement(CitationSection, { view: template, saving: false, onSave: noop }));
+  assert.match(html, /This project(&#x27;|')s citation/);
+  assert.match(html, /research\/package\/citation\.bib/);
+  assert.match(html, /shared with collaborators/);
+  assert.match(html, /Nothing is saved yet/);
+  assert.match(html, /<textarea[^>]*>@unpublished\{heat_kernel,/);
+  assert.doesNotMatch(html, /disabled=""[^>]*>Save</);
+
+  const saved = renderToStaticMarkup(React.createElement(CitationSection, { view: { ...template, saved: true, key: 'heat_kernel', warnings: ['The citation has no url, doi, or eprint: importing projects need a stable link before they share.'] }, saving: false, onSave: noop }));
+  assert.match(saved, /no url, doi, or eprint/);
+  assert.match(saved, /disabled=""[^>]*>Save</);
+
+  const rejected = renderToStaticMarkup(React.createElement(CitationSection, { view: { ...template, saved: true, problems: ['The citation needs a title.'] }, saving: false, onSave: noop }));
+  assert.match(rejected, /The citation needs a title\./);
+});
+
+test('removing a package frees its alias, even where empty folders were left behind', async () => {
+  const { up, down, base } = projects();
+  try {
+    const A = await actionsFor(up);
+    const exported = await A.actions.export({ name: 'collapsing_lcf' });
+    const file = path.join(base, exported.fileName);
+    fs.writeFileSync(file, exported.text);
+    const B = await actionsFor(down);
+    await B.actions.import(file);
+    await B.actions.remove('collapsing_lcf');
+    // The emptied folders are gone, so the same alias imports again.
+    assert.equal(fs.existsSync(path.join(down, 'research/library/collapsing_lcf')), false);
+    assert.equal((await B.actions.previewImport(file)).ok, true);
+
+    // Empty folders left by an older removal (or another tool) do not hold the alias either.
+    fs.mkdirSync(path.join(down, 'research/library/collapsing_lcf/assets'), { recursive: true });
+    fs.mkdirSync(path.join(down, 'research/library/collapsing_lcf/definitions'), { recursive: true });
+    const preview = await B.actions.previewImport(file);
+    assert.deepEqual(preview.conflicts, []);
+    await B.actions.import(file);
+    assert.equal((await B.actions.overview()).installed[0].alias, 'collapsing_lcf');
+
+    // A folder that still holds a file is a collection: the alias stays taken, and removal keeps that file.
+    await B.actions.remove('collapsing_lcf');
+    fs.mkdirSync(path.join(down, 'research/library/collapsing_lcf/assets'), { recursive: true });
+    fs.writeFileSync(path.join(down, 'research/library/collapsing_lcf/assets/lib_collapsing_lcf_mine.md'), '---\ntype: lemma\ntitle: Mine\nstatus: draft\n---\n\n## Statement\n\nX.\n');
+    assert.match((await B.actions.previewImport(file)).conflicts.join('\n'), /already has a collection named collapsing_lcf/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a git import of a project that was never exported, or exported but not shared, says what to do there', async () => {
+  const { up, down, base } = projects();
+  try {
+    fs.rmSync(path.join(up, 'research/package'), { recursive: true, force: true });
+    git(up, 'init', '-q', '-b', 'master');
+    git(up, 'add', '-A');
+    git(up, 'commit', '-qm', 'paper');
+    const remote = path.join(base, 'overleaf.git');
+    git(base, 'clone', '-q', '--bare', up, remote);
+    const url = `file://${remote}`;
+    const notYet = /is a Research Assistant project, but not a package yet: research\/package\/manifest\.json is not in that commit\.\nIn that project, export it once/;
+    await assert.rejects(loadPackage(url, down), notYet);
+
+    // Exported in that project but not shared: the remote commit still has no package.
+    write(up, 'research/package/citation.bib', '@unpublished{wang2026heat,\n  title = {Heat kernel bounds},\n  author = {Wang},\n  year = {2026}\n}\n');
+    const A = await actionsFor(up);
+    await A.actions.export({ name: 'heat_kernel' });
+    await assert.rejects(loadPackage(url, down), notYet);
+
+    // Shared: it imports, at the version the export recorded.
+    git(up, 'add', '-A');
+    git(up, 'commit', '-qm', 'export');
+    git(up, 'push', '-q', remote, 'master');
+    assert.equal((await loadPackage(`${url}#master`, down)).pkg.version, '1.0.0');
+
+    // A project folder that cannot export names the fix in that project.
+    fs.rmSync(path.join(up, 'research/package/manifest.json'));
+    await assert.rejects(loadPackage(up, down), /The project at .* is not ready to be imported:\n- No package name yet.*\nFix this in that project \(open it, then Library → Export this project…\), and import again\./s);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }

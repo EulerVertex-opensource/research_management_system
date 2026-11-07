@@ -9,7 +9,7 @@ import { LIBRARY_KIND_FOLDERS, PACKAGE_DIR, PACKAGE_LOCK_FILE, ResultKind, idOf,
 import { texCitations } from '../domain/bibtex';
 import {
   CollectionSnapshot, ExportInput, ExportNodeInput, ExportOptions, ExportPlan, ImportOptions, ImportPlan, ImportProject, PackageLock, PackageManifest, PackageProvenance,
-  PackageRelease, RemovePlan, ResearchPackage, lockPath, packageProblems, parseLock, planExport, planImport, planRemove,
+  PackageRelease, RemovePlan, ResearchPackage, citationCheck, lockPath, packageProblems, parseLock, planExport, planImport, planRemove,
 } from '../domain/packages';
 
 /**
@@ -29,6 +29,21 @@ export class PackageService {
 
   get manifestPath(): string { return `${packageFolder(this.paths)}/manifest.json`; }
   get releasesPath(): string { return `${packageFolder(this.paths)}/releases.json`; }
+  /** This work's own BibTeX entry, kept apart from the manuscript's bibliography (a paper does not cite itself). */
+  get citationPath(): string { return `${packageFolder(this.paths)}/citation.bib`; }
+
+  async citation(): Promise<string> {
+    return this.files.readFile(this.citationPath).catch(() => '');
+  }
+
+  /** Save this work's citation after checking it; refuses an invalid one. */
+  async saveCitation(text: string): Promise<{ key: string; warnings: string[] }> {
+    const check = citationCheck(text);
+    if (check.problems.length) throw new Error(check.problems.join('\n'));
+    const content = `${text.trim()}\n`;
+    if ((await this.citation()) !== content) await this.files.writeFile(this.citationPath, content);
+    return { key: check.key!, warnings: check.warnings };
+  }
 
   async manifest(): Promise<PackageManifest | undefined> {
     const raw = await this.files.readFile(this.manifestPath).catch(() => '');
@@ -47,7 +62,7 @@ export class PackageService {
 
   // ---------- export ----------
 
-  async exportInput(manifest: PackageManifest, provenance: PackageProvenance): Promise<ExportInput> {
+  async exportInput(manifest: PackageManifest, provenance: PackageProvenance, citation?: string): Promise<ExportInput> {
     const records = (await readApprovals(this.files, this.paths.researchRoot)).records;
     const nodes: ExportNodeInput[] = [];
     for (const kind of ['asset', 'definition'] as const) {
@@ -66,6 +81,7 @@ export class PackageService {
     }
     return {
       manifest,
+      citation: citation ?? await this.citation(),
       requiredResults: requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => '')),
       nodes,
       bib: await this.files.readFile(this.paths.bibliography).catch(() => ''),
@@ -75,21 +91,24 @@ export class PackageService {
     };
   }
 
-  /** What exporting would produce. `manifest` fills in or overrides the saved one (first export). */
-  async previewExport(provenance: PackageProvenance, options: ExportOptions & { manifest?: Partial<PackageManifest> } = {}): Promise<ExportPlan & { manifest: PackageManifest }> {
+  /** What exporting would produce. `manifest` fills in or overrides the saved one (first export); `citation` replaces the saved citation. */
+  async previewExport(provenance: PackageProvenance, options: ExportOptions & { manifest?: Partial<PackageManifest>; citation?: string } = {}): Promise<ExportPlan & { manifest: PackageManifest }> {
     const saved = await this.manifest();
     const manifest = { ...(saved ?? {}), ...(options.manifest ?? {}) } as PackageManifest;
     if (options.manifest?.exports === undefined && saved?.exports === undefined) delete manifest.exports;
     // Locations accumulate: a new one is added to those saved, never replacing them all.
     const locations = { ...(saved?.locations ?? {}), ...(options.manifest?.locations ?? {}) };
     if (Object.keys(locations).length) manifest.locations = locations; else delete manifest.locations;
-    return { ...planExport(await this.exportInput(manifest, provenance), options), manifest };
+    // A manifest written before the citation moved to its own file may still carry a cite key; it is not used.
+    delete (manifest as Partial<PackageManifest> & { cite?: unknown }).cite;
+    return { ...planExport(await this.exportInput(manifest, provenance, options.citation), options), manifest };
   }
 
   /** Export: save the manifest and record the release (unless nothing changed). Returns the plan with the package to write. */
-  async export(provenance: PackageProvenance, options: ExportOptions & { manifest?: Partial<PackageManifest> } = {}): Promise<ExportPlan & { manifest: PackageManifest }> {
+  async export(provenance: PackageProvenance, options: ExportOptions & { manifest?: Partial<PackageManifest>; citation?: string } = {}): Promise<ExportPlan & { manifest: PackageManifest }> {
     const plan = await this.previewExport(provenance, options);
     if (!plan.ok || !plan.package) throw new Error(`Cannot export:\n${plan.blockers.map((item) => `- ${item}`).join('\n')}`);
+    if (options.citation !== undefined) await this.saveCitation(options.citation);
     const saved = await this.manifest();
     if (JSON.stringify(saved) !== JSON.stringify(plan.manifest)) await this.files.writeFile(this.manifestPath, `${JSON.stringify(plan.manifest, null, 2)}\n`);
     if (plan.release) await this.files.writeFile(this.releasesPath, `${JSON.stringify([...await this.releases(), plan.release], null, 2)}\n`);
@@ -147,7 +166,7 @@ export class PackageService {
       library: this.paths.library,
       ownPackage: (await this.manifest().catch(() => undefined))?.name,
       nodeIds,
-      collections: await libraryCollections(this.files, this.paths),
+      collections: await this.occupiedCollections(),
       locks: (await this.installed()).map((item) => item.lock),
       bib: await this.files.readFile(this.paths.bibliography).catch(() => ''),
       papersIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''),
@@ -155,6 +174,22 @@ export class PackageService {
       citedElsewhere,
       approved,
     };
+  }
+
+  /**
+   * Library collections that hold at least one file. An empty folder (left by
+   * a removal on a file system that keeps folders) is no collection: git does
+   * not record it, so collaborators do not have it either.
+   */
+  private async occupiedCollections(): Promise<string[]> {
+    const occupied: string[] = [];
+    for (const collection of await libraryCollections(this.files, this.paths)) {
+      const root = `${this.paths.library}/${collection}`;
+      for (const folder of [root, ...Object.values(LIBRARY_KIND_FOLDERS).map((kind) => `${root}/${kind}`)]) {
+        if ((await this.files.listFiles(folder, '')).length) { occupied.push(collection); break; }
+      }
+    }
+    return occupied;
   }
 
   // ---------- import, update, remove ----------
@@ -191,6 +226,11 @@ export class PackageService {
   async applyRemove(plan: RemovePlan): Promise<void> {
     if (!plan.ok) throw new Error(`Cannot remove:\n${plan.conflicts.map((item) => `- ${item}`).join('\n')}`);
     for (const file of plan.deletes) await this.remove(file);
+    // The emptied folders go too, so the alias is free again; a folder that still holds something stays.
+    if (this.files.deleteEmptyDir) {
+      const collection = `${this.paths.library}/${plan.alias}`;
+      for (const folder of [...Object.values(LIBRARY_KIND_FOLDERS).map((kind) => `${collection}/${kind}`), collection]) await this.files.deleteEmptyDir(folder);
+    }
     if (plan.bib !== undefined) await this.files.writeFile(this.paths.bibliography, plan.bib);
     if (plan.papersIndex !== undefined) await this.files.writeFile(this.paths.paperIndex, plan.papersIndex);
   }

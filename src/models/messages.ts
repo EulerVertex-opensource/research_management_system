@@ -1,7 +1,7 @@
 import type { GraphAction, GraphPayload } from './graph';
 import type { SettingsErrors, SettingsPatch, SettingsPayload } from './settings';
 import type { SyncBadge, SyncNotice } from './sync';
-import type { ExportPreviewView, ExportRequest, ImportPreviewView, PackageModal, PackagesPayload } from './packages';
+import type { CitationView, ExportPreviewView, ExportRequest, ImportPreviewView, PackageModal, PackagesPayload } from './packages';
 import { DefinitionKind, RemarkView, ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, UIState, PaperEntry, ProjectPathSummary, ProjectSummary, ManuscriptStatus } from './types';
 
 // Messages sent from the extension to the webview
@@ -35,6 +35,8 @@ export type ExtensionMessage =
   | { type: 'packageImportPreview'; preview: ImportPreviewView }
   /** A package action finished; the dialog closes. */
   | { type: 'packageDone'; message: string }
+  /** This project's citation (Settings); `saved` is set when a save just succeeded. */
+  | { type: 'citationData'; data: CitationView; saved?: boolean }
   /** Open the Library with a package dialog (from a command). */
   | { type: 'showPackageModal'; modal: PackageModal }
   | { type: 'error'; message: string };
@@ -88,4 +90,6 @@ export type WebviewMessage =
   | { type: 'packagePreviewImport'; source?: string; alias?: string; update?: string }
   | { type: 'packageImport'; source: string; alias?: string; update?: string }
   | { type: 'packageApprove'; alias: string }
-  | { type: 'packageRemove'; alias: string };
+  | { type: 'packageRemove'; alias: string }
+  | { type: 'getCitation' }
+  | { type: 'saveCitation'; text: string };

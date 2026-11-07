@@ -1,12 +1,11 @@
 import type { ProjectPaths } from '../models/types';
-import type { ExportPreviewView, ExportRequest, ImportPreviewView, PackagesPayload } from '../models/packages';
+import type { CitationView, ExportPreviewView, ExportRequest, ImportPreviewView, PackagesPayload } from '../models/packages';
 import type { ResearchLoopCore } from './ResearchLoopCore';
 import { LoopFiles } from './ResearchLoopModel';
 import { PackageService } from './PackageService';
 import { gitProvenance, loadPackage, sourceSpec } from './PackageSources';
 import { parseMarkdown } from './Frontmatter';
-import { bibKeys } from '../domain/bibtex';
-import { ImportPlan, PackageManifest, RemovePlan, latestRelease, packageFileName, serializePackage } from '../domain/packages';
+import { ImportPlan, PackageManifest, RemovePlan, citationCheck, citationTemplate, latestRelease, packageFileName, serializePackage } from '../domain/packages';
 
 /**
  * The dashboard's package actions: each returns plain data for the webview,
@@ -50,17 +49,17 @@ export class PackageActions {
   private exportOptions(request: ExportRequest) {
     const manifest: Partial<PackageManifest> = {
       ...(request.name !== undefined ? { name: request.name.trim() } : {}),
-      ...(request.cite !== undefined ? { cite: request.cite.trim() } : {}),
       ...(request.exports !== undefined ? { exports: request.exports } : {}),
       ...(request.locations ? { locations: Object.fromEntries(Object.entries(request.locations).map(([id, text]) => [id, text.trim()]).filter(([, text]) => text)) } : {}),
     };
-    return { manifest, ...(request.version?.trim() ? { version: request.version.trim() } : {}) };
+    return { manifest, ...(request.citation !== undefined ? { citation: request.citation } : {}), ...(request.version?.trim() ? { version: request.version.trim() } : {}) };
   }
 
   async previewExport(request: ExportRequest = {}): Promise<ExportPreviewView> {
     const provenance = await gitProvenance(this.root, this.paths, this.extensionVersion);
     const plan = await this.service.previewExport(provenance, this.exportOptions(request));
-    const input = await this.service.exportInput(plan.manifest, provenance);
+    const saved = await this.service.citation();
+    const input = await this.service.exportInput(plan.manifest, provenance, request.citation);
     const candidates = input.nodes.filter((node) => node.origin === 'project' && node.kind === 'asset').map((node) => {
       let title = node.id;
       try { title = String(parseMarkdown(node.raw).data.title ?? node.id); } catch { /* keep the ID */ }
@@ -69,8 +68,25 @@ export class PackageActions {
     return {
       ok: plan.ok, blockers: plan.blockers, warnings: plan.warnings, manifest: plan.manifest, exports: plan.exports, closure: plan.closure,
       version: plan.version, ...(plan.previous ? { previous: plan.previous } : {}), bump: plan.bump, changes: plan.changes, unchanged: plan.unchanged,
-      candidates, bibKeys: [...bibKeys(input.bib)].sort(),
+      candidates, citation: request.citation ?? (saved || citationTemplate(plan.manifest.name)), citationSaved: Boolean(saved),
     };
+  }
+
+  /** This project's citation for the Settings page: the saved entry checked, or a template. */
+  async citationView(name?: string): Promise<CitationView> {
+    const saved = await this.service.citation();
+    const manifestName = name ?? (await this.service.manifest().catch(() => undefined))?.name;
+    const text = saved || citationTemplate(manifestName);
+    const check = saved ? citationCheck(saved) : { problems: [], warnings: [] };
+    return { path: this.service.citationPath, text, saved: Boolean(saved), ...(check.key ? { key: check.key } : {}), problems: check.problems, warnings: check.warnings };
+  }
+
+  /** Save this project's citation; an invalid entry is not written and its problems come back. */
+  async saveCitation(text: string): Promise<CitationView> {
+    const check = citationCheck(text);
+    if (check.problems.length) return { path: this.service.citationPath, text, saved: Boolean(await this.service.citation()), problems: check.problems, warnings: check.warnings };
+    await this.service.saveCitation(text);
+    return this.citationView();
   }
 
   /** Export: saves the manifest and the release, and returns the package text to write where the researcher chose. */

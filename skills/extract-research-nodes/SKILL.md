@@ -77,7 +77,7 @@ node .agents/skills/research-loop/scripts/research-loop.cjs package list
 - An imported collection is read-only: never edit its files (the hook refuses). To change a result, `library promote <lib_id>` copies it into the project as a draft.
 - Accepting a package is the researcher's decision, in the dashboard (Library or Needs you) or `package approve <alias> --interactive` in their own terminal. Never run `package approve`; tell the researcher it waits.
 - After an update, report the version change and the approvals it affected (the update output lists them).
-- Exporting this project (`package export`) is the researcher's action, usually from the dashboard; it needs a package name and the BibTeX key importers cite.
+- Exporting this project (`package export`) is the researcher's action, usually from the dashboard; it needs a package name and this work's own BibTeX entry in `research/package/citation.bib` (kept apart from the manuscript's bibliography; the researcher edits it in Settings or the Export dialog). Never add this work's entry to the manuscript's bibliography for exporting.
 
 A package definition may name the same concept as one of this project's definitions (`lib_hk_sobolev_space` and `sobolev_space`). Never merge them, edit either to match, or repoint results on your own: whether two definitions mean the same is the researcher's call. Compare the defining statements, then record the proposal as an idea for the researcher:
 

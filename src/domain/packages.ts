@@ -5,7 +5,7 @@ import { LIBRARY_KIND_FOLDERS, LIBRARY_PREFIX, PACKAGE_LOCK_FILE, ResultKind } f
 import { CONJECTURE_TYPE } from './nodeKinds';
 import { sourceKind } from './schema';
 import {
-  appendBibEntries, appendPaperSections, bibUrl, parseBibEntries, paperSections, removeBibEntries, removePaperSections, renameBibKey, sameIdentifier, sameWork,
+  appendBibEntries, appendPaperSections, bibField, bibUrl, parseBibEntries, paperSections, removeBibEntries, removePaperSections, renameBibKey, sameIdentifier, sameWork,
 } from './bibtex';
 
 /**
@@ -44,8 +44,6 @@ const MAX_ALIAS = 24;
 export interface PackageManifest {
   /** Global package name, lowercase snake_case. */
   name: string;
-  /** BibTeX key (in this project's bibliography) an importer cites for results proved here. */
-  cite: string;
   /** Result IDs to export; absent means the project's required results. */
   exports?: string[];
   /**
@@ -210,6 +208,8 @@ export interface ExportNodeInput {
 
 export interface ExportInput {
   manifest: PackageManifest;
+  /** This work's own BibTeX entry (research/package/citation.bib): how importers cite the results proved here. */
+  citation: string;
   requiredResults: string[];
   nodes: ExportNodeInput[];
   bib: string;
@@ -245,13 +245,40 @@ export interface ExportPlan {
 }
 
 export function manifestProblems(manifest: Partial<PackageManifest> | undefined): string[] {
-  if (!manifest || (manifest.name === undefined && manifest.cite === undefined)) return ['No package manifest yet: give the package a name and the BibTeX key importers cite (package export --name N --cite KEY).'];
+  if (!manifest || manifest.name === undefined) return ['No package name yet: give the package a name (package export --name N, or the Export dialog).'];
   const problems: string[] = [];
-  if (typeof manifest.name !== 'string' || !SLUG.test(manifest.name)) problems.push(`Package name ${String(manifest.name ?? '(none)')} must be lowercase snake_case (letters, digits, underscores).`);
-  if (typeof manifest.cite !== 'string' || !SLUG.test(manifest.cite)) problems.push(`Cite key ${String(manifest.cite ?? '(none)')} must be a paper-index slug (lowercase snake_case), the BibTeX key of this work.`);
+  if (typeof manifest.name !== 'string' || !SLUG.test(manifest.name)) problems.push(`Package name ${String(manifest.name || '(none)')} must be lowercase snake_case (letters, digits, underscores).`);
   if (manifest.exports !== undefined && !(Array.isArray(manifest.exports) && manifest.exports.every((item) => typeof item === 'string'))) problems.push('Manifest exports must be a list of result IDs.');
   if (manifest.locations !== undefined && !(manifest.locations && typeof manifest.locations === 'object' && !Array.isArray(manifest.locations) && Object.values(manifest.locations).every((item) => typeof item === 'string'))) problems.push('Manifest locations must map result IDs to text.');
   return problems;
+}
+
+export const CITATION_MISSING = "No citation for this project yet: write its BibTeX entry (Settings → This project's citation, or the Export dialog). Importers cite this work for the results proved here.";
+
+/**
+ * Check this work's own BibTeX entry: exactly one entry, with a key that can
+ * serve as a paper-index slug in importing projects. A missing stable link is
+ * a warning: importers need one before they share.
+ */
+export function citationCheck(text: string): { key?: string; entry?: string; problems: string[]; warnings: string[] } {
+  if (!text.trim()) return { problems: [CITATION_MISSING], warnings: [] };
+  const entries = parseBibEntries(text);
+  if (!entries.length) return { problems: ['The citation is not a BibTeX entry (@article{key, ...}).'], warnings: [] };
+  const problems: string[] = [];
+  const warnings: string[] = [];
+  if (entries.length > 1) problems.push(`The citation holds ${entries.length} entries (${entries.map((entry) => entry.key).join(', ')}); keep only this work's.`);
+  const [entry] = entries;
+  if (!SLUG.test(entry.key)) problems.push(`The citation key ${entry.key} must be lowercase snake_case (letters, digits, underscores): importing projects use it as a paper-index slug.`);
+  if (!bibField(entry.raw, 'title')) problems.push('The citation needs a title.');
+  if (!bibField(entry.raw, 'author')) warnings.push('The citation has no author.');
+  if (!bibUrl(entry.raw)) warnings.push('The citation has no url, doi, or eprint: importing projects need a stable link before they share.');
+  return { key: entry.key, entry: entry.raw.trim(), problems, warnings };
+}
+
+/** A starting point for this work's citation. */
+export function citationTemplate(name?: string, title?: string, year = new Date().getFullYear()): string {
+  const key = name && SLUG.test(name) ? name : 'this_work';
+  return `@unpublished{${key},\n  author = {},\n  title  = {${title ?? ''}},\n  year   = {${year}},\n  note   = {In preparation},\n  url    = {}\n}\n`;
 }
 
 /** The exported nodes with everything they depend on, dependencies first. */
@@ -311,12 +338,15 @@ export function planExport(input: ExportInput, options: ExportOptions = {}): Exp
   }
   for (const id of Object.keys(locations)) if (!order.includes(id)) warnings.push(`Location given for ${id}, which is not exported.`);
 
-  const citeEntry = bibEntries.get(input.manifest.cite);
-  if (input.manifest.cite && !citeEntry) blockers.push(`Add a BibTeX entry with key ${input.manifest.cite} to the bibliography: importers cite this work for the results proved here.`);
+  const citation = citationCheck(input.citation);
+  blockers.push(...citation.problems);
+  warnings.push(...citation.warnings);
+  const citeKey = citation.key ?? '';
   if (input.provenance.dirty) warnings.push('Research files have uncommitted changes; the package records the last commit, which does not include them.');
 
   nodes.sort((a, b) => a.id.localeCompare(b.id));
-  const cite = { key: input.manifest.cite, bibtex: (citeEntry ?? '').trim(), ...(papers.has(input.manifest.cite) ? { paper: papers.get(input.manifest.cite)! } : {}) };
+  if (citeKey && bib[citeKey]) blockers.push(`The citation key ${citeKey} is also a paper this project cites; give this work its own key.`);
+  const cite = { key: citeKey, bibtex: citation.entry ?? '', ...(papers.has(citeKey) ? { paper: papers.get(citeKey)! } : {}) };
   const body = { name: input.manifest.name, cite, exports, nodes, bib: sortKeys(bib) as Record<string, string>, papers: sortKeys(paperBodies) as Record<string, string> };
   const digest = contentDigest(body);
 
@@ -673,6 +703,8 @@ export function planImport(pkg: ResearchPackage, project: ImportProject, options
 
 export interface RemovePlan {
   ok: boolean;
+  /** The collection the package occupies; its emptied folders are removed too. */
+  alias: string;
   conflicts: string[];
   warnings: string[];
   deletes: string[];
@@ -698,7 +730,7 @@ export function planRemove(lock: PackageLock, project: ImportProject, options: {
   const papersIndex = removePaperSections(project.papersIndex, new Set(lock.papers.filter((slug) => !cited.has(slug))));
   const deletes = [...Object.entries(lock.nodes).map(([id, node]) => vendoredPath(project.library, lock.alias, node.kind, id)), lockPath(project.library, lock.alias)];
   return {
-    ok: !conflicts.length, conflicts, warnings, deletes, removedBibKeys,
+    ok: !conflicts.length, alias: lock.alias, conflicts, warnings, deletes, removedBibKeys,
     ...(bib !== project.bib ? { bib } : {}), ...(papersIndex !== project.papersIndex ? { papersIndex } : {}),
   };
 }

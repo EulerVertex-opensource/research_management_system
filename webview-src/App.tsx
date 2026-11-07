@@ -26,7 +26,7 @@ import { TechnicalDetails } from './technical';
 import { SettingsView } from './components/SettingsView';
 import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
 import type { SyncBadge, SyncNotice } from '../src/models/sync';
-import type { ExportPreviewView, ImportPreviewView, PackageModal, PackagesPayload } from '../src/models/packages';
+import type { CitationView, ExportPreviewView, ImportPreviewView, PackageModal, PackagesPayload } from '../src/models/packages';
 import { PackageBar } from './components/PackageBar';
 import { ImportPackageModal } from './components/ImportPackageModal';
 import { ExportPackageModal } from './components/ExportPackageModal';
@@ -219,6 +219,8 @@ export function App() {
   const [importPreview, setImportPreview] = useState<ImportPreviewView | undefined>();
   const [exportPreview, setExportPreview] = useState<ExportPreviewView | undefined>();
   const [packageBusy, setPackageBusy] = useState(false);
+  const [citation, setCitation] = useState<CitationView | null>(null);
+  const [citationSaving, setCitationSaving] = useState(false);
   // `at` restarts the timer when the same kind of prompt is copied again.
   const [copied, setCopied] = useState<{ prompt: 'instruction' | 'teaching'; at: number } | null>(null);
   useEffect(() => {
@@ -288,6 +290,11 @@ export function App() {
         setImportPreview(msg.preview);
         setPackageBusy(false);
         break;
+      case 'citationData':
+        setCitation(msg.data);
+        setCitationSaving(false);
+        if (msg.saved) dispatch({ type: 'SET_NOTICE', notice: { level: 'info', title: 'Citation', message: `Saved this project's citation (${msg.data.key}). It is shared with your next sync.` } });
+        break;
       case 'packageDone':
         setPackageModal(null);
         setPackageBusy(false);
@@ -299,6 +306,7 @@ export function App() {
         break;
       case 'error':
         setPackageBusy(false);
+        setCitationSaving(false);
         dispatch({ type: 'SET_ERROR', message: msg.message });
         break;
     }
@@ -311,6 +319,11 @@ export function App() {
     // The sidebar's Needs you count comes from the overview payload.
     send({ type: 'getGraph' });
   }, [send]);
+
+  // Settings shows this project's citation, read from its own file.
+  useEffect(() => {
+    if (state.activeView === 'settings') send({ type: 'getCitation' });
+  }, [state.activeView, send]);
 
   // The Library shows the packages; node changes (an approval, say) can change their state.
   useEffect(() => {
@@ -777,6 +790,7 @@ export function App() {
               onNavigate={(id) => { const node = state.nodes.find((item) => item.id === id); if (node) handleNavigateNode(node); }}
               showTechnical={state.uiState.showTechnical}
               onShowTechnical={handleShowTechnical}
+              citation={{ view: citation, saving: citationSaving, onSave: (text) => { setCitationSaving(true); send({ type: 'saveCitation', text }); } }}
             />
           ) : state.activeView === 'manuscript' ? (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>

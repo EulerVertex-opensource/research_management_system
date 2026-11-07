@@ -90,6 +90,8 @@ export interface LoopFiles {
   /** Immediate subfolders (paths relative to the project); used to discover library collections. */
   listDirs?(relativeDir: string): Promise<string[]>;
   deleteFile?(relativePath: string): Promise<void>;
+  /** Remove a folder only when it is empty; a no-op otherwise. Git does not track empty folders, so removals clean them up. */
+  deleteEmptyDir?(relativeDir: string): Promise<void>;
 }
 
 /** Git-tracked folders that carry research meaning which used to live only in local loop state. */

@@ -100,11 +100,21 @@ export async function fetchGitSource(root: string, url: string, ref?: string): P
   return { cache, commit: resolved.stdout.trim() };
 }
 
-/** Build a package from a project folder; `provenance` says where it came from. */
-async function buildFromProject(folder: string, label: string, provenance: PackageProvenance): Promise<ResearchPackage> {
+/**
+ * Build a package from a project folder; `provenance` says where it came
+ * from. The problems are the other project's, so the message says to fix
+ * them there (and, for git, to share the fix).
+ */
+async function buildFromProject(folder: string, label: string, provenance: PackageProvenance, fromGit = false): Promise<ResearchPackage> {
   const paths = await loadProjectPaths(folder);
   const plan = await new PackageService(new NodeLoopFiles(folder), paths).previewExport(provenance, { dev: true });
-  if (!plan.ok || !plan.package) throw new Error(`The project at ${label} cannot be exported yet:\n${plan.blockers.map((item) => `- ${item}`).join('\n')}`);
+  if (!plan.ok || !plan.package) {
+    throw new Error([
+      `The project at ${label} is not ready to be imported:`,
+      ...plan.blockers.map((item) => `- ${item}`),
+      `Fix this in that project (open it, then Library → Export this project…)${fromGit ? ', then share it (Sync) so the commit you import has it' : ''}, and import again.`,
+    ].join('\n'));
+  }
   return plan.package;
 }
 
@@ -120,15 +130,24 @@ async function packageFromGit(root: string, url: string, ref: string | undefined
   const config = await git.run(['show', `${commit}:${PROJECT_CONFIG_PATH}`]);
   if (config.code !== 0) throw new Error(`${recordableUrl(url)}${ref ? `#${ref}` : ''} is not a Research Assistant project (no ${PROJECT_CONFIG_PATH} at ${commit.slice(0, 8)}).`);
   const paths = pathsFromConfigText(config.stdout);
+  const label = `${recordableUrl(url)}${ref ? `#${ref}` : ''}`;
+  // The package identity is written by exporting in that project; a commit from before that (or before it was shared) has none.
+  const manifest = `${paths.researchRoot === '.' ? '' : `${paths.researchRoot}/`}package/manifest.json`;
+  if ((await git.run(['cat-file', '-e', `${commit}:${manifest}`])).code !== 0) {
+    throw new Error([
+      `${label} (commit ${commit.slice(0, 8)}) is a Research Assistant project, but not a package yet: ${manifest} is not in that commit.`,
+      'In that project, export it once (Library → Export this project…, which saves its package name and citation under research/package/), then share it (Sync, or commit and push research/package/), and import again.',
+    ].join('\n'));
+  }
   const wanted = [PROJECT_CONFIG_PATH, paths.researchRoot === '.' ? '.' : paths.researchRoot, paths.bibliography, paths.paperIndex];
   const present = (await gitMust(git, ['ls-tree', '--name-only', commit, '--', ...new Set(wanted)], 'Could not read the project')).split('\n').filter(Boolean);
   const tree = fs.mkdtempSync(path.join(cache, '..', `tree-${commit.slice(0, 8)}-`));
   try {
     // One checkout fetches the blobs it needs in a batch, unlike reading files one by one from a partial clone.
     await gitMust(new NodeGitRunner(tree), [`--git-dir=${cache}`, `--work-tree=${tree}`, 'checkout', commit, '--', ...present], 'Could not check out the research files');
-    const pkg = await buildFromProject(tree, `${recordableUrl(url)}${ref ? `#${ref}` : ''}`, {
+    const pkg = await buildFromProject(tree, label, {
       commit, remote: recordableUrl(url), exportedAt: new Date().toISOString(), ...(extensionVersion ? { extensionVersion } : {}),
-    });
+    }, true);
     return { pkg, commit };
   } finally {
     fs.rmSync(tree, { recursive: true, force: true });

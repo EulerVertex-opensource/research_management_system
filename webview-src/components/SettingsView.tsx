@@ -3,6 +3,7 @@ import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS } from '../../src/models/settings'
 import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
 import { AWAY_KEYS, CHECK_KEYS, Involvement, LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, involvement, rigorPreset, validateSettingsPatch, withInvolvement } from '../../src/domain/loopSettings';
 import { COLOR } from '../graph/colors';
+import type { CitationView } from '../../src/models/packages';
 
 type SectionId = 'agent' | 'loop' | 'sync' | 'budgets';
 
@@ -15,6 +16,8 @@ interface Props {
   /** Display preference, saved at once with the UI state rather than through a section's Save. */
   showTechnical: boolean;
   onShowTechnical: (value: boolean) => void;
+  /** This project's own citation (research/package/citation.bib); its own file, saved apart from the settings. */
+  citation?: { view: CitationView | null; saving: boolean; onSave: (text: string) => void };
 }
 
 /** One entry per auto-approve rule; a Record so a new rule without a checkbox does not compile. */
@@ -82,7 +85,7 @@ function patchFor(section: SectionId, draft: Drafts, saved: Drafts): SettingsPat
 // ---------- the view ----------
 
 /** Settings: how the dashboard shows the research, which agent drives the loop, how involved the researcher is and how thorough the loop is, sync, and context budgets. */
-export function SettingsView({ settings, result, onSave, onNavigate, showTechnical, onShowTechnical }: Props) {
+export function SettingsView({ settings, result, onSave, onNavigate, showTechnical, onShowTechnical, citation }: Props) {
   const [drafts, setDrafts] = useState<Drafts | null>(settings ? draftsOf(settings) : null);
   const [errors, setErrors] = useState<Partial<Record<SectionId, SettingsErrors>>>({});
   const [pending, setPending] = useState<{ requestId: string; section: SectionId } | null>(null);
@@ -297,8 +300,44 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
           </div>
           {footer('budgets')}
         </Section>
+
+        {citation && <CitationSection {...citation} />}
       </div>
     </div>
+  );
+}
+
+/**
+ * How other projects cite this one when they import its results as a
+ * package: the work's own BibTeX entry, kept apart from the manuscript's
+ * bibliography (a paper does not cite itself).
+ */
+export function CitationSection({ view, saving, onSave }: { view: CitationView | null; saving: boolean; onSave: (text: string) => void }) {
+  const [draft, setDraft] = useState(view?.text ?? '');
+  const [base, setBase] = useState(view?.text ?? '');
+  // The saved file ends with one newline; compare entries without surrounding whitespace.
+  const same = (a: string, b: string) => a.trim() === b.trim();
+  // A fresh view replaces the draft unless the researcher is editing it; a rejected save keeps the draft.
+  useEffect(() => {
+    if (!view) return;
+    if (same(draft, base) || same(view.text, draft)) setDraft(view.text);
+    if (!view.problems.length) setBase(view.text);
+  }, [view]);
+  const dirty = Boolean(view) && (!same(draft, base) || !view!.saved);
+  const current = Boolean(view) && same(view!.text, draft);
+  const problems = current ? view!.problems : [];
+  return (
+    <Section title="This project's citation" scope="shared" note={view?.path}>
+      <div style={{ fontSize: 12, color: COLOR.muted }}>
+        How other projects cite this one when they import its results as a research package. It is its own BibTeX entry, kept apart from the paper&apos;s bibliography; update it when the paper appears (arXiv, then the journal), then export again.
+        {view && !view.saved && ' Nothing is saved yet: fill in the template and save.'}
+      </div>
+      <textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={8} spellCheck={false} disabled={!view}
+        style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--vscode-editor-font-family, monospace)', fontSize: 12 }} />
+      {problems.map((problem) => <FieldError key={problem} text={problem} />)}
+      {current && view!.warnings.map((warning) => <div key={warning} style={{ fontSize: 11, color: 'var(--vscode-editorWarning-foreground)' }}>{warning}</div>)}
+      <SectionFooter dirty={dirty} saving={saving} onSave={() => onSave(draft)} onRevert={() => setDraft(base)} />
+    </Section>
   );
 }
 

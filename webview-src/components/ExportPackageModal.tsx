@@ -23,7 +23,7 @@ const BUMP_LABEL: Record<string, string> = { initial: 'first release', major: 's
 export function ExportPackageModal({ preview, busy, onChange, onConfirm, onCancel }: Props) {
   const [ready, setReady] = useState(Boolean(preview));
   const [name, setName] = useState(preview?.manifest.name ?? '');
-  const [cite, setCite] = useState(preview?.manifest.cite ?? '');
+  const [citation, setCitation] = useState(preview?.citation ?? '');
   const [exports, setExports] = useState<string[]>(preview?.exports ?? []);
   const [version, setVersion] = useState('');
   const [locations, setLocations] = useState<Record<string, string>>(preview?.manifest.locations ?? {});
@@ -32,13 +32,13 @@ export function ExportPackageModal({ preview, busy, onChange, onConfirm, onCance
   useEffect(() => {
     if (!preview || ready) return;
     setName(preview.manifest.name ?? '');
-    setCite(preview.manifest.cite ?? '');
+    setCitation(preview.citation);
     setExports(preview.exports);
     setLocations(preview.manifest.locations ?? {});
     setReady(true);
   }, [preview, ready]);
 
-  const request: ExportRequest = { name, cite, exports, locations, ...(version.trim() ? { version: version.trim() } : {}) };
+  const request: ExportRequest = { name, citation, exports, locations, ...(version.trim() ? { version: version.trim() } : {}) };
   const key = JSON.stringify(request);
   // The request the shown preview answers; the form filled from the first preview needs no new one.
   const [sentKey, setSentKey] = useState<string | undefined>(undefined);
@@ -78,18 +78,18 @@ export function ExportPackageModal({ preview, busy, onChange, onConfirm, onCance
     >
       {!ready ? <p style={{ fontSize: 12, opacity: 0.6, marginBottom: 12 }}>Reading the project…</p> : (
         <>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle}>Package name</label>
-              <input value={name} onChange={(event) => setName(event.target.value.trim())} placeholder="heat_kernel_bounds"
-                style={{ ...inputStyle, borderColor: name && !SLUG.test(name) ? 'var(--vscode-inputValidation-errorBorder)' : undefined }} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={labelStyle} title="Importers cite this BibTeX entry for the results proved here">Cite this work as (BibTeX key)</label>
-              <input value={cite} onChange={(event) => setCite(event.target.value.trim())} list="package-bib-keys" placeholder="wang2026heat"
-                style={{ ...inputStyle, borderColor: cite && !SLUG.test(cite) ? 'var(--vscode-inputValidation-errorBorder)' : undefined }} />
-              <datalist id="package-bib-keys">{preview?.bibKeys.map((item) => <option key={item} value={item} />)}</datalist>
-            </div>
+          <div style={{ marginBottom: 14 }}>
+            <label style={labelStyle}>Package name</label>
+            <input value={name} onChange={(event) => setName(event.target.value.trim())} placeholder="heat_kernel_bounds"
+              style={{ ...inputStyle, borderColor: name && !SLUG.test(name) ? 'var(--vscode-inputValidation-errorBorder)' : undefined }} />
+          </div>
+
+          <div style={{ marginBottom: 14 }}>
+            <label style={labelStyle}>
+              Cite this work as <span style={{ opacity: 0.6 }}>(its own BibTeX entry, kept apart from the paper&apos;s bibliography; importers cite it for the results proved here{preview?.citationSaved ? '' : '; saved when you export'})</span>
+            </label>
+            <textarea value={citation} onChange={(event) => setCitation(event.target.value)} rows={7} spellCheck={false}
+              style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--vscode-editor-font-family, monospace)', fontSize: 12 }} />
           </div>
 
           <div style={{ marginBottom: 14 }}>
