@@ -598,12 +598,6 @@ export function App() {
                     +
                   </button>
                 )}
-                {state.activeView === 'library' && (
-                  <span style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={() => setPackageModal({ kind: 'import' })} style={{ ...buttonStyle('secondary'), padding: '1px 8px' }} title="Bring the approved results of another project into this library, with their citations">Import…</button>
-                    <button onClick={() => setPackageModal({ kind: 'export' })} style={{ ...buttonStyle('secondary'), padding: '1px 8px' }} title="Package this project's approved results so another project can import them">Export…</button>
-                  </span>
-                )}
                 {showPaperList && (
                   <AddPaperButton onAdd={handleAddPaper} />
                 )}
@@ -625,6 +619,8 @@ export function App() {
                   data={packages}
                   selectedId={state.selectedNodeId}
                   onSelect={handleSelectNode}
+                  onImport={() => setPackageModal({ kind: 'import' })}
+                  onExport={() => setPackageModal({ kind: 'export' })}
                   onAccept={(alias) => send({ type: 'packageApprove', alias })}
                   onUpdate={(alias) => setPackageModal({ kind: 'update', alias })}
                   onRemove={(alias) => send({ type: 'packageRemove', alias })}

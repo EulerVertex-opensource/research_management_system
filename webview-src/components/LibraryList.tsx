@@ -22,6 +22,8 @@ interface Props {
   data?: PackagesPayload;
   selectedId: string | null;
   onSelect: (node: ResearchNode) => void;
+  onImport: () => void;
+  onExport: () => void;
   onAccept: (alias: string) => void;
   onUpdate: (alias: string) => void;
   onRemove: (alias: string) => void;
@@ -34,6 +36,8 @@ type StatusFilter = 'all' | 'draft' | 'approved';
 const KIND_LABEL: Record<CollectionView['kind'], string> = { paper: 'Paper', note: 'Notes', thesis: 'Thesis', other: 'Known results' };
 const ellipsis: React.CSSProperties = { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 };
 const groupLabel: React.CSSProperties = { fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 0.5, margin: '4px 2px 0' };
+/** Import and export share the row; written out in full, they wrap rather than shrink in a narrow column. */
+const wide: React.CSSProperties = { flex: '1 1 140px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', padding: '4px 10px' };
 const control: React.CSSProperties = { padding: '4px 8px', fontSize: 12, borderRadius: 4, background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)' };
 
 /** The outlined state badge of the Research lists: solid once done, dashed while it waits. */
@@ -101,6 +105,14 @@ export function LibraryList(props: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      <div style={{ padding: '8px 12px 0', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <button onClick={props.onImport} style={{ ...buttonStyle('secondary'), ...wide }} title="Bring the approved results of another project into this library, with their citations">
+          Import a package…
+        </button>
+        <button onClick={props.onExport} style={{ ...buttonStyle('secondary'), ...wide }} title="Package this project's approved results so another project can import them">
+          Export this project…
+        </button>
+      </div>
       <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--vscode-panel-border)', display: 'flex', gap: 8 }}>
         <input placeholder="Search…" value={search} onChange={(event) => setSearch(event.target.value)} style={{ ...control, flex: 1, minWidth: 0 }} />
         <select value={status} onChange={(event) => setStatus(event.target.value as StatusFilter)} style={{ ...control, background: 'var(--vscode-dropdown-background)', color: 'var(--vscode-dropdown-foreground)', border: '1px solid var(--vscode-dropdown-border)' }}>

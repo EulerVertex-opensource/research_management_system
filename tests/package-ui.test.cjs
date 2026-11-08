@@ -142,7 +142,7 @@ test('the dashboard actions export, import, accept, update, and remove a package
 // ---------- components ----------
 
 const noop = () => {};
-const listProps = { nodes: [], selectedId: null, onSelect: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
+const listProps = { nodes: [], selectedId: null, onSelect: noop, onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
 
 test('the library list shows each package as a fold with its state and actions, in the Research card style', () => {
   const html = renderToStaticMarkup(React.createElement(LibraryList, {
@@ -153,6 +153,8 @@ test('the library list shows each package as a fold with its state and actions, 
       { alias: 'done', package: 'done', version: '3.0.0', results: 1, pending: 0, accepted: true, source: '../c', problems: [] },
     ], collections: [] },
   }));
+  assert.match(html, />Import a package…</);
+  assert.match(html, />Export this project…</);
   assert.match(html, /latest release: v1\.2\.0/);
   assert.match(html, />hk<\/span><span[^>]*>v1\.0\.1</);
   assert.match(html, />Package<\/span>/);

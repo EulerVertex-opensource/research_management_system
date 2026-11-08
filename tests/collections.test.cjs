@@ -152,7 +152,7 @@ test('a collection is removed with its records and folders once nothing uses it,
 // ---------- components ----------
 
 const noop = () => {};
-const listProps = { nodes: [], selectedId: null, onSelect: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
+const listProps = { nodes: [], selectedId: null, onSelect: noop, onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
 const view = (extra) => ({ name: 'smith', kind: 'paper', declared: true, paperId: 'smith2021', paperTitle: 'Rigidity', paperIndexed: true, results: 5, approved: 2, drafts: ['lib_a', 'lib_b', 'lib_c'], problems: [], ...extra });
 
 const libNode = (id, collection, status, extra = {}) => ({ id, type: 'lemma', title: `Title ${id}`, status, tags: [], filePath: `${LIB}/${collection}/assets/${id}.md`, body: '', origin: 'library', collection, source: smith(`Lemma ${id.slice(-1)}`), ...extra });
