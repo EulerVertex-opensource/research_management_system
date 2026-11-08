@@ -10,8 +10,9 @@ interface Props {
   onSelect: (node: ResearchNode) => void;
   filterType?: string; // 'idea' | 'plan' | 'asset' | 'definition' | 'library' | undefined = all
   definitionPath?: string;
-  /** Library view only: approve the listed draft results together. */
-  onApprove?: (ids: string[], label: string) => void;
+  /** Library view only: show only this collection (chosen on its card above the list). */
+  collection?: string;
+  onClearCollection?: () => void;
 }
 
 /**
@@ -38,19 +39,17 @@ function citedBadge(node: ResearchNode): React.ReactNode {
 
 const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'abandoned', 'approved', 'draft', 'deprecated', 'archived'];
 
-export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions', onApprove }: Props) {
+export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions', collection, onClearCollection }: Props) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ResearchStatus | 'all'>('all');
-  const [collection, setCollection] = useState<string>('all');
-  useEffect(() => { setStatusFilter('all'); setCollection('all'); }, [filterType]);
+  useEffect(() => { setStatusFilter('all'); }, [filterType]);
   const isLibrary = filterType === 'library';
-  const collections = [...new Set(nodes.filter((n) => n.origin === 'library').map((n) => n.collection ?? ''))].sort();
 
   const filtered = nodes.filter((n) => {
     const isDefinition = n.filePath.startsWith(`${definitionPath}/`);
     // Library results have their own view so they do not crowd the project's assets and definitions.
     if (isLibrary !== (n.origin === 'library')) return false;
-    if (isLibrary && collection !== 'all' && n.collection !== collection) return false;
+    if (isLibrary && collection && n.collection !== collection) return false;
     if (filterType === 'idea' && n.type !== 'idea') return false;
     if (filterType === 'plan' && n.type !== 'plan') return false;
     if (filterType === 'definition' && !isDefinition) return false;
@@ -72,8 +71,6 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
     if (sa !== sb) return sa - sb;
     return a.title.localeCompare(b.title);
   });
-
-  const drafts = isLibrary ? sorted.filter((n) => n.status === 'draft') : [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -111,26 +108,10 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
           ))}
         </select>
       </div>
-      {isLibrary && (
-        <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--vscode-panel-border)', display: 'flex', gap: 8, alignItems: 'center' }}>
-          <select
-            value={collection}
-            onChange={(e) => setCollection(e.target.value)}
-            title="Collection"
-            style={{ flex: 1, padding: '4px 6px', background: 'var(--vscode-dropdown-background)', color: 'var(--vscode-dropdown-foreground)', border: '1px solid var(--vscode-dropdown-border)', borderRadius: 4, fontSize: 12 }}
-          >
-            <option value="all">All collections</option>
-            {collections.map((name) => <option key={name} value={name}>{name}</option>)}
-          </select>
-          {onApprove && drafts.length > 0 && (
-            <button
-              onClick={() => onApprove(drafts.map((n) => n.id), collection === 'all' ? 'the library' : `collection ${collection}`)}
-              title="Mark every listed known result as checked; each is then used as known and never re-proved"
-              style={{ padding: '3px 8px', fontSize: 12, background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: 3, cursor: 'pointer', whiteSpace: 'nowrap' }}
-            >
-              Mark {drafts.length} as checked
-            </button>
-          )}
+      {isLibrary && collection && (
+        <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--vscode-panel-border)', display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Showing <strong>{collection}</strong> only</span>
+          {onClearCollection && <button onClick={onClearCollection} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--vscode-textLink-foreground)', fontSize: 12, whiteSpace: 'nowrap' }}>Show the whole library</button>}
         </div>
       )}
 

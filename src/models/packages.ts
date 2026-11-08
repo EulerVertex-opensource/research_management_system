@@ -1,4 +1,5 @@
 import type { BibAction, Bump, PackageDiff, PackageManifest, VersionChanges } from '../domain/packages';
+import type { CollectionSummary } from '../domain/collections';
 
 /** What the dashboard shows about research packages. Plain data: sent to the webview as is. */
 
@@ -16,10 +17,20 @@ export interface InstalledPackageView {
   problems: string[];
 }
 
+/** A library collection filled by extraction (from a paper, notes, a thesis), as its card shows it. */
+export interface CollectionView extends CollectionSummary {
+  /** The paper's title, from the bibliography. */
+  paperTitle?: string;
+  /** The paper is in the paper index, so its PDF can be opened. */
+  paperIndexed?: boolean;
+}
+
 export interface PackagesPayload {
   library: string;
   manifest?: PackageManifest;
   installed: InstalledPackageView[];
+  /** The other collections: results extracted from papers and notes, checked one by one. */
+  collections: CollectionView[];
   /** The latest release of this project's own package. */
   released?: string;
 }

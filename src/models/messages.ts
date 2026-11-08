@@ -55,7 +55,6 @@ export type WebviewMessage =
   | { type: 'createNode'; nodeType: NodeType; title: string; targetAsset?: string; definitionKind?: DefinitionKind }
   | { type: 'updateStatus'; id: string; status: ResearchStatus }
   /** Approve several library results at once (the extension asks the researcher to confirm). */
-  | { type: 'approveNodes'; ids: string[]; label: string }
   | { type: 'getProjectMd' }
   | { type: 'saveProjectMd'; content: string }
   | { type: 'getPapers' }
@@ -91,5 +90,7 @@ export type WebviewMessage =
   | { type: 'packageImport'; source: string; alias?: string; update?: string }
   | { type: 'packageApprove'; alias: string }
   | { type: 'packageRemove'; alias: string }
+  /** Remove a library collection extracted from a paper or notes (not an imported package). */
+  | { type: 'collectionRemove'; name: string }
   | { type: 'getCitation' }
   | { type: 'saveCitation'; text: string };

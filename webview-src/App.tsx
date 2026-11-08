@@ -27,7 +27,8 @@ import { SettingsView } from './components/SettingsView';
 import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
 import type { SyncBadge, SyncNotice } from '../src/models/sync';
 import type { CitationView, ExportPreviewView, ImportPreviewView, PackageModal, PackagesPayload } from '../src/models/packages';
-import { PackageBar } from './components/PackageBar';
+import { LibraryBar } from './components/LibraryBar';
+import { CheckBar, needsCheck, nextToCheck, uncheckedIn } from './components/CheckBar';
 import { ImportPackageModal } from './components/ImportPackageModal';
 import { ExportPackageModal } from './components/ExportPackageModal';
 
@@ -221,6 +222,10 @@ export function App() {
   const [packageBusy, setPackageBusy] = useState(false);
   const [citation, setCitation] = useState<CitationView | null>(null);
   const [citationSaving, setCitationSaving] = useState(false);
+  // The Library's collection filter, and the collection being checked result by result.
+  const [libraryCollection, setLibraryCollection] = useState<string | undefined>();
+  const [reviewing, setReviewing] = useState<string | undefined>();
+  const [skipped, setSkipped] = useState<Set<string>>(new Set());
   // `at` restarts the timer when the same kind of prompt is copied again.
   const [copied, setCopied] = useState<{ prompt: 'instruction' | 'teaching'; at: number } | null>(null);
   useEffect(() => {
@@ -505,6 +510,35 @@ export function App() {
   const selectedDetail = state.selectedNodeId ? state.nodeDetails[state.selectedNodeId] : null;
   const selectedPaper = state.papers.find((p) => p.slug === state.selectedPaperSlug) ?? null;
 
+  // Library collections: a removed collection stops filtering the list.
+  const packageAliases = new Set(packages?.installed.map((item) => item.alias) ?? []);
+  const libraryNames = new Set([...packageAliases, ...(packages?.collections.map((item) => item.name) ?? [])]);
+  const activeCollection = libraryCollection && (!packages || libraryNames.has(libraryCollection)) ? libraryCollection : undefined;
+  const checking = needsCheck(selectedNode, packageAliases) ? selectedNode : undefined;
+  const reviewingNow = Boolean(checking && reviewing && checking.collection === reviewing);
+  const startChecking = (collection: string) => {
+    setLibraryCollection(collection);
+    setReviewing(collection);
+    setSkipped(new Set());
+    const first = uncheckedIn(state.nodes, collection)[0];
+    if (first) handleSelectNode(first);
+  };
+  const moveOn = (current: ResearchNode, skip: boolean) => {
+    const left = skip ? new Set([...skipped, current.id]) : skipped;
+    if (skip) setSkipped(left);
+    const next = nextToCheck(state.nodes, current.collection, current.id, left);
+    if (next) { handleSelectNode(next); return; }
+    if (reviewing) {
+      const open = uncheckedIn(state.nodes, current.collection).filter((node) => node.id !== current.id || skip).length;
+      dispatch({ type: 'SET_NOTICE', notice: { level: 'info', title: 'Library', message: open ? `Went through ${current.collection}; ${open} skipped result${open === 1 ? ' is' : 's are'} still unchecked.` : `Every result in ${current.collection} is checked.` } });
+    }
+    setReviewing(undefined);
+  };
+  const checkResult = (node: ResearchNode) => {
+    send({ type: 'updateStatus', id: node.id, status: 'approved' });
+    if (reviewingNow) moveOn(node, false);
+  };
+
   const filterType =
     state.activeView === 'assets' ? 'asset' :
     state.activeView === 'definitions' ? 'definition' :
@@ -584,13 +618,18 @@ export function App() {
 
               {/* List body */}
               {state.activeView === 'library' && (
-                <PackageBar
+                <LibraryBar
                   data={packages}
+                  selected={activeCollection}
+                  onSelect={(name) => { setLibraryCollection(name); if (name !== reviewing) setReviewing(undefined); }}
                   onImport={() => setPackageModal({ kind: 'import' })}
                   onExport={() => setPackageModal({ kind: 'export' })}
                   onAccept={(alias) => send({ type: 'packageApprove', alias })}
                   onUpdate={(alias) => setPackageModal({ kind: 'update', alias })}
                   onRemove={(alias) => send({ type: 'packageRemove', alias })}
+                  onCheck={startChecking}
+                  onOpenPaper={handleOpenPdf}
+                  onRemoveCollection={(name) => send({ type: 'collectionRemove', name })}
                 />
               )}
               {showNodeList && (
@@ -600,7 +639,8 @@ export function App() {
                   onSelect={handleSelectNode}
                   filterType={filterType}
                   definitionPath={state.paths?.definitions ?? 'research/definitions'}
-                  onApprove={(ids, label) => send({ type: 'approveNodes', ids, label })}
+                  collection={activeCollection}
+                  onClearCollection={() => { setLibraryCollection(undefined); setReviewing(undefined); }}
                 />
               )}
               {showRemarkList && (
@@ -731,6 +771,19 @@ export function App() {
             )
           ) : showNodeList ? (
             selectedNode && selectedDetail ? (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {checking && (
+                <CheckBar
+                  node={checking}
+                  remaining={uncheckedIn(state.nodes, checking.collection).length}
+                  reviewing={reviewingNow}
+                  onCheck={() => checkResult(checking)}
+                  onSkip={() => moveOn(checking, true)}
+                  onStop={() => setReviewing(undefined)}
+                  onOpenPaper={handleOpenPdf}
+                />
+              )}
+              <div style={{ flex: 1, minHeight: 0 }}>
               <NodeDetail
                 key={selectedNode.id}
                 id={selectedNode.id}
@@ -758,6 +811,8 @@ export function App() {
                 onOpenRemark={openRemark}
                 onAddRemark={() => dispatch({ type: 'CREATE_REMARK', create: { target: selectedNode.id } })}
               />
+              </div>
+              </div>
             ) : selectedNode ? (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.4, fontSize: 13 }}>Loading…</div>
             ) : (

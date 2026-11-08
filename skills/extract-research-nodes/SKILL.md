@@ -58,9 +58,20 @@ Use the library when the researcher asks to import known results, or names a col
 - A library node's `depends_on` and `uses_definitions` name only library IDs, in any collection; never a project node.
 - `source` says where the result is established: `paper` or `textbook` with `paper_id` and exact `location` for a published result (index the paper in the paper index and bibliography as for any citation), `original` for the researcher's own earlier work, naming the thesis, preprint, or project in the body. Keep the proof or a proof sketch under `## Proof` when the source gives one; otherwise give the statement only.
 - New files are `status: draft`. Existing library files may be edited (fix a typo, sharpen a statement, add a proof, add links); git keeps the history. Editing an approved one returns it to draft, and a changed statement also invalidates approved results that depend on it, so say which approved results you touched. Keep the ID when the result is the same; a genuinely different result gets a new `lib_` ID. For a project-specific variant that should be proved here, `research-loop library promote <lib_id> [--as <id>]` copies it into the project as a draft with `derived_from`.
-- Optionally create `collection.md` in a new collection with a title and one paragraph on the source (who, what, where to find it).
+- Create `collection.md` in a new collection: frontmatter saying where it comes from, then one paragraph on the source (who, what, where to find it). For a paper, index it first (as for any citation) and name it; every result in that collection must then cite that paper with its exact location, and validation reports one that does not:
 
-The researcher approves library results once in VS Code; the research loop then uses them as known and never re-proves them. After a batch, list the new IDs per collection so the researcher can review them together.
+  ```markdown
+  ---
+  title: Smith, Rigidity of collapsing manifolds
+  kind: paper          # paper | note | thesis | other
+  paper_id: smith2021  # only for kind: paper; an ID from the paper index
+  ---
+  The main theorem and the two lemmas of Smith 2021 used here.
+  ```
+
+  Keep one paper per collection; results from another paper go in that paper's collection.
+
+The researcher checks each extracted result against its source in VS Code (Library: a card per collection, then *Check N results…*, one result at a time beside its location); the research loop then uses it as known and never re-proves it. There is no bulk acceptance for extracted results: a dropped hypothesis or a wrong theorem number would become a known result. After a batch, list the new IDs per collection with their locations so the checking is quick. Removing a whole collection is the researcher's action in the Library; its paper stays indexed.
 
 ## Packages
 

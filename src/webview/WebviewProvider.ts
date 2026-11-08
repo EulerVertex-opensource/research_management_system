@@ -19,7 +19,6 @@ import { LoopHost } from '../services/LoopHost';
 import { SettingsService } from '../services/SettingsService';
 import { parseWritingOutline } from '../services/ManuscriptWriting';
 import { summarizeProject } from '../domain/project';
-import { PACKAGE_LOCK_FILE } from '../domain/registry';
 import type { PackageModal } from '../models/packages';
 import { THEME_CSS } from './themeCss';
 import { OverlayFiles, migrateProject, migrationReasons } from '../services/SchemaMigration';
@@ -634,6 +633,7 @@ export class WebviewProvider {
         case 'packageImport':
         case 'packageApprove':
         case 'packageRemove':
+        case 'collectionRemove':
         case 'getCitation':
         case 'saveCitation': {
           await this.handlePackage(msg);
@@ -800,43 +800,6 @@ export class WebviewProvider {
           break;
         }
 
-        case 'approveNodes': {
-          if (!this.nodeIndex) throw new Error('Initialize the Research Assistant project first.');
-          // Batch approval is for library results only; project results are approved one by one after review.
-          const targets = msg.ids.map((id) => this.nodeIndex!.getById(id)).filter((node): node is ResearchNode => Boolean(node && node.origin === 'library' && node.status === 'draft'));
-          if (!targets.length) break;
-          // Results of an imported package are accepted together, under the package's one record.
-          const packages: string[] = [];
-          for (const collection of new Set(targets.map((node) => node.collection).filter((item): item is string => Boolean(item)))) {
-            if (this.paths && await this.fileService.exists(`${this.paths.library}/${collection}/${PACKAGE_LOCK_FILE}`)) packages.push(collection);
-          }
-          if (packages.length) {
-            const accept = packages.length === 1 ? 'Accept package' : `Accept ${packages.length} packages`;
-            const pick = await vscode.window.showWarningMessage(
-              `Accept the imported package${packages.length > 1 ? 's' : ''} ${packages.join(', ')} as known results? Every result in ${packages.length > 1 ? 'them' : 'it'} counts as approved; the research loop uses them without re-proving them. A new version that changes a result asks again.`,
-              { modal: true }, accept);
-            if (pick !== accept) break;
-            for (const alias of packages) await this.loopHost.approvePackage(alias, 'dashboard');
-            await this.refreshNodes();
-            this.scheduleGraph();
-          }
-          // The rest (hand-made collections) are checked one by one as before.
-          targets.splice(0, targets.length, ...targets.filter((node) => !node.collection || !packages.includes(node.collection)));
-          if (!targets.length) break;
-          const confirm = `Mark ${targets.length} as checked`;
-          const choice = await vscode.window.showWarningMessage(
-            `Mark ${targets.length} known result${targets.length > 1 ? 's' : ''} in ${msg.label} as checked against their sources? The research loop will use them as known and never re-prove them; an edit later makes the edited one unchecked again.`,
-            { modal: true }, confirm);
-          if (choice !== confirm) break;
-          for (const node of targets) {
-            await this.nodeIndex.updateStatus(node.id, 'approved');
-            await this.loopHost.recordApprovalIfHuman(node.id, 'dashboard');
-          }
-          await this.refreshNodes();
-          this.scheduleGraph();
-          break;
-        }
-
         case 'openInEditor': {
           const uri = this.fileService.resolve(msg.filePath);
           await vscode.window.showTextDocument(uri);
@@ -922,7 +885,7 @@ export class WebviewProvider {
     }
   }
 
-  private async handlePackage(msg: Extract<WebviewMessage, { type: 'getPackages' | 'packagePreviewExport' | 'packageExport' | 'packagePickSource' | 'packagePreviewImport' | 'packageImport' | 'packageApprove' | 'packageRemove' | 'getCitation' | 'saveCitation' }>): Promise<void> {
+  private async handlePackage(msg: Extract<WebviewMessage, { type: 'getPackages' | 'packagePreviewExport' | 'packageExport' | 'packagePickSource' | 'packagePreviewImport' | 'packageImport' | 'packageApprove' | 'packageRemove' | 'collectionRemove' | 'getCitation' | 'saveCitation' }>): Promise<void> {
     const actions = this.loopHost.packageActions();
     switch (msg.type) {
       case 'getCitation':
@@ -1010,6 +973,24 @@ export class WebviewProvider {
         if (await vscode.window.showWarningMessage(`Remove the imported package ${msg.alias}?`, { modal: true, detail }, remove) !== remove) return;
         await actions.remove(msg.alias);
         await this.afterPackageChange(`Removed ${msg.alias}.`);
+        return;
+      }
+      case 'collectionRemove': {
+        const plan = await actions.previewRemoveCollection(msg.name);
+        if (!plan.ok) {
+          void vscode.window.showWarningMessage(`${msg.name} is still in use, so it was not removed.`, { modal: true, detail: `${plan.conflicts.join('\n')}\n\nRepoint those results first.` });
+          return;
+        }
+        const results = plan.deletes.filter((file) => file.endsWith('.md') && !file.endsWith('/collection.md')).length;
+        const remove = 'Remove collection';
+        const detail = [
+          `Deletes the ${results} known result(s) in ${this.paths?.library ?? 'the library'}/${msg.name}, its collection.md, and their approval records (${plan.deletes.length} file(s)).`,
+          ...plan.warnings,
+          'Git keeps the history.',
+        ].join('\n');
+        if (await vscode.window.showWarningMessage(`Remove the collection ${msg.name}?`, { modal: true, detail }, remove) !== remove) return;
+        await actions.removeCollection(msg.name);
+        await this.afterPackageChange(`Removed the collection ${msg.name}.`);
         return;
       }
     }

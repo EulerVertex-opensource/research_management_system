@@ -40,6 +40,7 @@ import {
 } from './ResearchContext';
 import { ideaPlanProblems } from './ProofIdeas';
 import { packageProblemsIn } from './PackageService';
+import { collectionProblemsIn } from './CollectionService';
 import { PackageLock, lockPath, parseLock, vendoredPath } from '../domain/packages';
 import { Teaching } from './Teaching';
 import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLibraryPath, libraryFolders, libraryProblems, listNodeFiles, locateNodeFile, nodeFolders, searchLibrary } from '../domain/registry';
@@ -3121,6 +3122,7 @@ export class ResearchLoopCore {
     }
     problems.push(...(await layoutReport(this.files, this.paths)).problems);
     problems.push(...await packageProblemsIn(this.files, this.paths));
+    problems.push(...await collectionProblemsIn(this.files, this.paths));
     problems.push(...await this.remarkProblems(new Set([...assets.keys(), ...definitions.keys()])));
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     if (/^<{7} |^>{7} /m.test(project)) problems.push(`${this.paths.projectMd}: unresolved merge conflict markers.`);

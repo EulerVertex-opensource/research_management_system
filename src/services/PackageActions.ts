@@ -3,6 +3,8 @@ import type { CitationView, ExportPreviewView, ExportRequest, ImportPreviewView,
 import type { ResearchLoopCore } from './ResearchLoopCore';
 import { LoopFiles } from './ResearchLoopModel';
 import { PackageService } from './PackageService';
+import { CollectionService } from './CollectionService';
+import type { CollectionRemovePlan } from '../domain/collections';
 import { gitProvenance, loadPackage, sourceSpec } from './PackageSources';
 import { parseMarkdown } from './Frontmatter';
 import { ImportPlan, PackageManifest, RemovePlan, citationCheck, citationTemplate, latestRelease, packageFileName, serializePackage } from '../domain/packages';
@@ -17,6 +19,7 @@ type WithCore = <T>(action: (core: ResearchLoopCore) => Promise<T>) => Promise<T
 
 export class PackageActions {
   readonly service: PackageService;
+  readonly collections: CollectionService;
 
   constructor(
     private readonly files: LoopFiles,
@@ -26,6 +29,7 @@ export class PackageActions {
     private readonly extensionVersion?: string,
   ) {
     this.service = new PackageService(files, paths);
+    this.collections = new CollectionService(files, paths);
   }
 
   async overview(): Promise<PackagesPayload> {
@@ -43,7 +47,8 @@ export class PackageActions {
     }
     const manifest = await this.service.manifest().catch(() => undefined);
     const released = latestRelease(await this.service.releases().catch(() => []))?.version;
-    return { library: this.paths.library, ...(manifest ? { manifest } : {}), installed, ...(released ? { released } : {}) };
+    const collections = await this.collections.summaries();
+    return { library: this.paths.library, ...(manifest ? { manifest } : {}), installed, collections, ...(released ? { released } : {}) };
   }
 
   private exportOptions(request: ExportRequest) {
@@ -149,6 +154,16 @@ export class PackageActions {
   async remove(alias: string): Promise<void> {
     await this.guardLoop();
     await this.service.applyRemove(await this.service.previewRemove(alias));
+  }
+
+  previewRemoveCollection(name: string): Promise<CollectionRemovePlan> {
+    return this.collections.previewRemove(name);
+  }
+
+  /** Remove a collection extracted from a paper or notes; its paper stays indexed. */
+  async removeCollection(name: string): Promise<void> {
+    await this.guardLoop();
+    await this.collections.applyRemove(await this.collections.previewRemove(name));
   }
 
   approve(alias: string, source: string): Promise<string[]> {
