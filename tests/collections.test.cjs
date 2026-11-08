@@ -19,7 +19,7 @@ const { parseCollectionMeta, summarizeCollection, planCollectionRemove } = load(
 const { PackageActions } = load('../src/services/PackageActions.ts');
 const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
 const { NodeLoopFiles, loadProjectPaths } = load('../src/cli/nodeFiles.ts');
-const { LibraryBar } = load('../webview-src/components/LibraryBar.tsx', ['react']);
+const { LibraryList } = load('../webview-src/components/LibraryList.tsx', ['react']);
 const { CheckBar, needsCheck, nextToCheck, uncheckedIn } = load('../webview-src/components/CheckBar.tsx', ['react']);
 
 const LIB = 'research/library';
@@ -152,24 +152,40 @@ test('a collection is removed with its records and folders once nothing uses it,
 // ---------- components ----------
 
 const noop = () => {};
-const barActions = { onSelect: noop, onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
+const listProps = { nodes: [], selectedId: null, onSelect: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
 const view = (extra) => ({ name: 'smith', kind: 'paper', declared: true, paperId: 'smith2021', paperTitle: 'Rigidity', paperIndexed: true, results: 5, approved: 2, drafts: ['lib_a', 'lib_b', 'lib_c'], problems: [], ...extra });
 
-test('the library bar shows packages and paper collections as cards in two groups', () => {
-  const html = renderToStaticMarkup(React.createElement(LibraryBar, {
-    data: { library: LIB, installed: [{ alias: 'hk', package: 'hk', version: '1.0.0', results: 2, pending: 0, accepted: true, source: '../a', problems: [] }], collections: [view(), view({ name: 'thesis', kind: 'thesis', declared: false, paperId: undefined, paperTitle: undefined, paperIndexed: undefined, title: 'My thesis', drafts: [], approved: 5 })] },
-    selected: 'smith', ...barActions,
-  }));
-  assert.ok(html.indexOf('Packages') < html.indexOf('hk') && html.indexOf('hk') < html.indexOf('From papers &amp; notes') && html.indexOf('From papers &amp; notes') < html.indexOf('smith'));
-  assert.match(html, /3 TO CHECK/);
-  assert.match(html, /5 results \(2 checked\) · Rigidity/);
-  assert.match(html, />Check 3 results…</);
-  assert.equal((html.match(/>Open paper</g) ?? []).length, 1, 'only a collection with an indexed paper opens one');
-  assert.match(html, /✓ CHECKED/);
-  assert.match(html, /My thesis/);
-  assert.match(html, /aria-pressed="true"[^>]*>[^]*?smith/, 'the chosen collection is marked');
-  assert.equal((html.match(/>Remove…</g) ?? []).length, 3);
-  const empty = renderToStaticMarkup(React.createElement(LibraryBar, { data: { library: LIB, installed: [], collections: [] }, ...barActions }));
+const libNode = (id, collection, status, extra = {}) => ({ id, type: 'lemma', title: `Title ${id}`, status, tags: [], filePath: `${LIB}/${collection}/assets/${id}.md`, body: '', origin: 'library', collection, source: smith(`Lemma ${id.slice(-1)}`), ...extra });
+
+test('the library list shows packages and paper collections as folds in two groups, with their results as Research cards', () => {
+  const nodes = [
+    libNode('lib_hk_main', 'hk', 'approved'),
+    libNode('lib_a', 'smith', 'draft'), libNode('lib_b', 'smith', 'approved'), libNode('lib_c', 'smith', 'draft'),
+    libNode('lib_t', 'thesis', 'approved', { source: { kind: 'original' } }),
+    { id: 'main', type: 'theorem', title: 'Project main', status: 'draft', tags: [], filePath: 'research/assets/main.md', body: '' },
+  ];
+  const data = { library: LIB, installed: [{ alias: 'hk', package: 'hk', version: '1.0.0', results: 1, pending: 0, accepted: true, source: '../a', problems: [] }],
+    collections: [view({ results: 3, approved: 1, drafts: ['lib_a', 'lib_c'] }), view({ name: 'thesis', kind: 'thesis', declared: false, paperId: undefined, paperTitle: undefined, paperIndexed: undefined, title: 'My thesis', results: 1, drafts: [], approved: 1 })] };
+  const html = renderToStaticMarkup(React.createElement(LibraryList, { ...listProps, nodes, data, selectedId: 'lib_a' }));
+  assert.ok(html.indexOf('Packages') < html.indexOf('>hk<') && html.indexOf('>hk<') < html.indexOf('From papers &amp; notes') && html.indexOf('From papers &amp; notes') < html.indexOf('>smith<'));
+  assert.match(html, />2 TO CHECK</);
+  assert.match(html, />Paper<\/span>[^]*?3 results · Rigidity/);
+  assert.match(html, />Thesis<\/span>[^]*?1 result · My thesis/);
+  assert.match(html, />✓ CHECKED</);
+  // Smith waits for checking, so it is open with its actions and results; the finished folds are folded.
+  assert.match(html, />Check 2 results…</);
+  assert.equal((html.match(/>Open paper</g) ?? []).length, 1);
+  assert.match(html, /Title lib_a/);
+  // Each result is the Research list's node card: type, the known-result badge, where in the paper, the title.
+  assert.match(html, />NOT CHECKED · KNOWN RESULT</);
+  assert.match(html, />✓ KNOWN RESULT</);
+  assert.match(html, />smith2021, Lemma a<\/div>/);
+  assert.doesNotMatch(html, /color-mix\(in srgb, var\(--ra-needs/, 'no tinted Work-page boxes');
+  assert.doesNotMatch(html, /Title lib_hk_main|Title lib_t/);
+  assert.doesNotMatch(html, /Project main/, 'project results are not in the library');
+  assert.match(html, /aria-current="true"[^>]*>[^]*?Title lib_a/, 'the chosen result is marked');
+
+  const empty = renderToStaticMarkup(React.createElement(LibraryList, { ...listProps, data: { library: LIB, installed: [], collections: [] } }));
   assert.match(empty, /Ask the agent to extract the results of a paper/);
 });
 

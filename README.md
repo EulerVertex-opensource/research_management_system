@@ -152,7 +152,7 @@ A finished project can be reused by later ones, the way a library is imported in
 - **Updating.** An update shows what changed between the versions. Results that did not change stay accepted; changed ones wait for the package to be accepted again; and approved results of this project that rest on a changed statement are reverted or flagged for a re-check, following the setting *When something a result rests on changes*. An update that drops a result still in use is refused.
 - **Removing.** Removal deletes the package, its approval record, and the BibTeX entries and paper-index sections only it used; entries cited elsewhere, by a node or in the TeX, stay. It is refused while results of this project still use the package.
 
-In the dashboard, the top of the Library has the package actions and one card per collection, packages first: **Import…** (from a file, a project folder, or a git URL; it previews everything before writing), **Export…** (name, this work's citation, results to export, locations, and the proposed version), and for each imported package its version, whether it is accepted, and **Accept**, **Update…**, and **Remove**. The same actions are commands: *Import Research Package…*, *Export This Project as a Research Package…*, *Update Imported Research Package…*, and *Accept Imported Research Package…*. Changing packages waits while a loop stage is in progress.
+In the dashboard, the Library lists its collections as folds, packages first. Its header has **Import…** (from a file, a project folder, or a git URL; it previews everything before writing) and **Export…** (name, this work's citation, results to export, locations, and the proposed version). Each imported package's fold shows its version, whether it is accepted, and **Accept**, **Update…**, and **Remove**. The same actions are commands: *Import Research Package…*, *Export This Project as a Research Package…*, *Update Imported Research Package…*, and *Accept Imported Research Package…*. Changing packages waits while a loop stage is in progress.
 
 From a terminal, each command previews and writes only with `--apply`:
 
@@ -181,7 +181,7 @@ paper_id: smith2021  # for kind: paper, an ID from the paper index
 The main theorem and the two lemmas used here.
 ```
 
-A paper collection holds every result to its paper: each must cite `smith2021` with an exact location, and validation reports one that does not. Without a declared kind, a collection whose results all cite one paper is treated as that paper's. In the Library, each collection has a card with its paper, how many results are checked, and **Check N results…**, which steps through the unchecked ones, each with its place in the source and **Open paper**; **Remove…** deletes the collection's results and their approval records (refused while a result here still uses one) and keeps the paper in Papers and the bibliography.
+A paper collection holds every result to its paper: each must cite `smith2021` with an exact location, and validation reports one that does not. Without a declared kind, a collection whose results all cite one paper is treated as that paper's. In the Library, each collection's fold shows its paper, how many results are checked, and **Check N results…**, which steps through the unchecked ones, each with its place in the source and **Open paper**; **Remove…** deletes the collection's results and their approval records (refused while a result here still uses one) and keeps the paper in Papers and the bibliography.
 
 ## Configuration
 
@@ -387,7 +387,7 @@ Claude Code and Codex use the same skills, CLI, hooks, and MCP bridge. Everythin
 | **Project goals** | Edit the project contract, with derived status (required results, open questions, manuscript sections) above it; initialize or refresh shared setup |
 | **Definitions** | Browse and edit definitions, assumptions, and conventions (`definition_kind`) and their notation, listed in dependency order |
 | **Assets** | Browse and edit theorem, lemma, proposition, example, construction, and conjecture nodes, with their remarks |
-| **Library** | Known results (`lib_` IDs) as one card per collection: imported packages (accepted once, as a whole) and collections extracted from papers and notes (each result checked against its source, one at a time). Click a card to list only its results |
+| **Library** | Known results (`lib_` IDs) as one card per collection: imported packages (accepted once, as a whole) and collections extracted from papers and notes (each result checked against its source, one at a time). Each collection is a fold, like the Results list, that opens onto its results; folds that need you start open |
 | **Plans** | Browse and edit proof plans, including failed and succeeded attempts |
 | **Ideas** | Browse and edit freeform research ideas |
 | **Remarks** | Every remark on a result (yours, the loop's, the teaching chat's): filter, read, edit, archive, approve one for the paper, or write a new one |

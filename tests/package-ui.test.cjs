@@ -19,7 +19,7 @@ const { PackageActions } = load('../src/services/PackageActions.ts');
 const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
 const { NodeLoopFiles, loadProjectPaths } = load('../src/cli/nodeFiles.ts');
 const { approvalDigest } = load('../src/services/ResearchLoopModel.ts');
-const { LibraryBar } = load('../webview-src/components/LibraryBar.tsx', ['react']);
+const { LibraryList } = load('../webview-src/components/LibraryList.tsx', ['react']);
 const { ImportPackageModal } = load('../webview-src/components/ImportPackageModal.tsx', ['react']);
 const { ExportPackageModal } = load('../webview-src/components/ExportPackageModal.tsx', ['react']);
 
@@ -142,35 +142,38 @@ test('the dashboard actions export, import, accept, update, and remove a package
 // ---------- components ----------
 
 const noop = () => {};
-const barActions = { onSelect: noop, onImport: noop, onExport: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
+const listProps = { nodes: [], selectedId: null, onSelect: noop, onAccept: noop, onUpdate: noop, onRemove: noop, onCheck: noop, onOpenPaper: noop, onRemoveCollection: noop };
 
-test('the library bar shows each package with its state and actions', () => {
-  const html = renderToStaticMarkup(React.createElement(LibraryBar, {
+test('the library list shows each package as a fold with its state and actions, in the Research card style', () => {
+  const html = renderToStaticMarkup(React.createElement(LibraryList, {
+    ...listProps,
     data: { library: 'research/library', released: '1.2.0', installed: [
       { alias: 'hk', package: 'heat_kernel', version: '1.0.1', results: 4, pending: 1, accepted: false, approvedVersion: '1.0.0', source: '../a.rpkg.json', problems: [] },
       { alias: 'old', package: 'old_work', version: '2.0.0', results: 2, pending: 0, accepted: true, source: '../b', problems: ['research/library/old/assets/lib_old_x.md: edited after import'] },
+      { alias: 'done', package: 'done', version: '3.0.0', results: 1, pending: 0, accepted: true, source: '../c', problems: [] },
     ], collections: [] },
-    ...barActions,
   }));
-  assert.match(html, />Import a package…</);
-  assert.match(html, />Export this project…</);
   assert.match(html, /latest release: v1\.2\.0/);
-  assert.match(html, /heat_kernel<\/span><span[^>]*>v1\.0\.1/);
-  assert.match(html, /v1\.0\.0 accepted earlier/);
-  assert.match(html, />Update…</);
-  assert.match(html, />Remove…</);
-  assert.match(html, /1 TO REVIEW/);
-  assert.match(html, /✓ ACCEPTED/);
+  assert.match(html, />hk<\/span><span[^>]*>v1\.0\.1</);
+  assert.match(html, />Package<\/span>/);
+  assert.match(html, /var\(--vscode-panel-border\)/, 'neutral cards, as in the other Research lists');
+  assert.match(html, /heat_kernel · 4 results · from \.\.\/a\.rpkg\.json · v1\.0\.0 accepted earlier/);
+  assert.match(html, />1 TO REVIEW</);
+  assert.match(html, />✓ ACCEPTED</);
+  assert.match(html, />⚠ 1 PROBLEM</);
+  // A fold that needs the researcher starts open with its actions; a finished one starts folded.
+  assert.equal((html.match(/aria-expanded="true"/g) ?? []).length, 2);
+  assert.equal((html.match(/>Update…</g) ?? []).length, 2);
   assert.match(html, /edited after import/);
   // Accept shows only for a package that waits and matches its lockfile.
   assert.equal((html.match(/>Accept package</g) ?? []).length, 1);
   // The package name shows only when the alias differs from it.
-  const same = renderToStaticMarkup(React.createElement(LibraryBar, {
+  const same = renderToStaticMarkup(React.createElement(LibraryList, {
+    ...listProps,
     data: { library: 'research/library', installed: [{ alias: 'collapsing_lcf', package: 'collapsing_lcf', version: '1.0.0', results: 3, pending: 0, accepted: true, source: '../c.rpkg.json', problems: [] }], collections: [] },
-    ...barActions,
   }));
-  assert.equal((same.match(/collapsing_lcf</g) ?? []).length, 1);
-  assert.match(renderToStaticMarkup(React.createElement(LibraryBar, { data: { library: 'research/library', installed: [], collections: [] }, ...barActions })), /No packages imported/);
+  assert.equal((same.match(/collapsing_lcf/g) ?? []).length, 2, 'the name and its title attribute');
+  assert.match(renderToStaticMarkup(React.createElement(LibraryList, { ...listProps, data: { library: 'research/library', installed: [], collections: [] } })), /No packages imported/);
 });
 
 test('the import dialog shows what an import or update would write, and blocks on conflicts', () => {

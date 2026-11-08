@@ -10,9 +10,6 @@ interface Props {
   onSelect: (node: ResearchNode) => void;
   filterType?: string; // 'idea' | 'plan' | 'asset' | 'definition' | 'library' | undefined = all
   definitionPath?: string;
-  /** Library view only: show only this collection (chosen on its card above the list). */
-  collection?: string;
-  onClearCollection?: () => void;
 }
 
 /**
@@ -37,9 +34,58 @@ function citedBadge(node: ResearchNode): React.ReactNode {
   );
 }
 
+/** The card style of every Research list: a thin neutral border, the widget background, the editor's selection when chosen. */
+export function researchCardStyle(selected = false): React.CSSProperties {
+  return {
+    border: `1px solid ${selected ? 'var(--vscode-focusBorder)' : 'var(--vscode-panel-border)'}`,
+    borderRadius: 6,
+    boxShadow: selected ? '0 0 0 1px var(--vscode-focusBorder)' : undefined,
+    background: selected ? 'var(--vscode-list-activeSelectionBackground)' : 'var(--vscode-editorWidget-background, transparent)',
+    color: selected ? 'var(--vscode-list-activeSelectionForeground)' : 'var(--vscode-foreground)',
+    flexShrink: 0,
+  };
+}
+
+/** The small uppercase label above a card's title. */
+export const kindLabelStyle: React.CSSProperties = { fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 };
+
+interface ItemProps {
+  node: ResearchNode;
+  selected: boolean;
+  onSelect: (node: ResearchNode) => void;
+  /** Position in dependency order, shown before the title. */
+  order?: number;
+  /** A small line above the title (the library shows the collection and ID). */
+  meta?: string;
+  innerRef?: (element: HTMLElement | null) => void;
+}
+
+/** One node as a card of a Research list: its type and state, its title, its tags. */
+export function NodeListItem({ node, selected, onSelect, order, meta, innerRef }: ItemProps) {
+  return (
+    <button
+      ref={innerRef}
+      onClick={() => onSelect(node)}
+      aria-current={selected}
+      style={{ ...researchCardStyle(selected), display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', cursor: 'pointer' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, minWidth: 0 }}>
+        <span style={kindLabelStyle}>{node.type}</span>
+        {citedBadge(node) ?? (node.status && <StatusBadge status={node.status} />)}
+      </div>
+      {meta && <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>{meta}</div>}
+      <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>
+        {order !== undefined && <span style={{ opacity: 0.5, marginRight: 6, fontVariantNumeric: 'tabular-nums' }}>{order}.</span>}
+        {node.title}
+      </div>
+      {node.tags.length > 0 && <div style={{ fontSize: 11, opacity: 0.6 }}>{node.tags.join(', ')}</div>}
+    </button>
+  );
+}
+
 const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'abandoned', 'approved', 'draft', 'deprecated', 'archived'];
 
-export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions', collection, onClearCollection }: Props) {
+export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions' }: Props) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<ResearchStatus | 'all'>('all');
   useEffect(() => { setStatusFilter('all'); }, [filterType]);
@@ -49,7 +95,6 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
     const isDefinition = n.filePath.startsWith(`${definitionPath}/`);
     // Library results have their own view so they do not crowd the project's assets and definitions.
     if (isLibrary !== (n.origin === 'library')) return false;
-    if (isLibrary && collection && n.collection !== collection) return false;
     if (filterType === 'idea' && n.type !== 'idea') return false;
     if (filterType === 'plan' && n.type !== 'plan') return false;
     if (filterType === 'definition' && !isDefinition) return false;
@@ -108,13 +153,6 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
           ))}
         </select>
       </div>
-      {isLibrary && collection && (
-        <div style={{ padding: '5px 12px', borderBottom: '1px solid var(--vscode-panel-border)', display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
-          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Showing <strong>{collection}</strong> only</span>
-          {onClearCollection && <button onClick={onClearCollection} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--vscode-textLink-foreground)', fontSize: 12, whiteSpace: 'nowrap' }}>Show the whole library</button>}
-        </div>
-      )}
-
       {/* List */}
       <div style={{ flex: 1, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
         {sorted.length === 0 && (
@@ -123,39 +161,14 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
           </div>
         )}
         {sorted.map((node) => (
-          <button
+          <NodeListItem
             key={node.id}
-            onClick={() => onSelect(node)}
-            aria-current={selectedId === node.id}
-            style={{
-              display: 'block',
-              width: '100%',
-              textAlign: 'left',
-              padding: '8px 12px',
-              border: `1px solid ${selectedId === node.id ? 'var(--vscode-focusBorder)' : 'var(--vscode-panel-border)'}`,
-              borderRadius: 6,
-              boxShadow: selectedId === node.id ? '0 0 0 1px var(--vscode-focusBorder)' : undefined,
-              background: selectedId === node.id ? 'var(--vscode-list-activeSelectionBackground)' : 'var(--vscode-editorWidget-background, transparent)',
-              color: selectedId === node.id ? 'var(--vscode-list-activeSelectionForeground)' : 'var(--vscode-foreground)',
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, minWidth: 0 }}>
-              <span style={{ fontSize: 11, opacity: 0.6, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>
-                {node.type === 'idea' ? 'idea' : node.type === 'plan' ? 'plan' : node.type}
-              </span>
-              {citedBadge(node) ?? (node.status && <StatusBadge status={node.status} />)}
-            </div>
-            {isLibrary && <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>{node.collection} · {node.id}</div>}
-            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>
-              {node.order !== undefined && (filterType === 'asset' || filterType === 'definition') && <span style={{ opacity: 0.5, marginRight: 6, fontVariantNumeric: 'tabular-nums' }}>{node.order}.</span>}
-              {node.title}
-            </div>
-            {node.tags.length > 0 && (
-              <div style={{ fontSize: 11, opacity: 0.6 }}>{node.tags.join(', ')}</div>
-            )}
-          </button>
+            node={node}
+            selected={selectedId === node.id}
+            onSelect={onSelect}
+            order={filterType === 'asset' || filterType === 'definition' ? node.order : undefined}
+            meta={isLibrary ? `${node.collection} · ${node.id}` : undefined}
+          />
         ))}
       </div>
     </div>

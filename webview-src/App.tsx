@@ -27,7 +27,7 @@ import { SettingsView } from './components/SettingsView';
 import type { SettingsErrors, SettingsPayload } from '../src/models/settings';
 import type { SyncBadge, SyncNotice } from '../src/models/sync';
 import type { CitationView, ExportPreviewView, ImportPreviewView, PackageModal, PackagesPayload } from '../src/models/packages';
-import { LibraryBar } from './components/LibraryBar';
+import { LibraryList } from './components/LibraryList';
 import { CheckBar, needsCheck, nextToCheck, uncheckedIn } from './components/CheckBar';
 import { ImportPackageModal } from './components/ImportPackageModal';
 import { ExportPackageModal } from './components/ExportPackageModal';
@@ -222,8 +222,7 @@ export function App() {
   const [packageBusy, setPackageBusy] = useState(false);
   const [citation, setCitation] = useState<CitationView | null>(null);
   const [citationSaving, setCitationSaving] = useState(false);
-  // The Library's collection filter, and the collection being checked result by result.
-  const [libraryCollection, setLibraryCollection] = useState<string | undefined>();
+  // The collection being checked result by result, and the results skipped on the way.
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   // `at` restarts the timer when the same kind of prompt is copied again.
@@ -510,14 +509,11 @@ export function App() {
   const selectedDetail = state.selectedNodeId ? state.nodeDetails[state.selectedNodeId] : null;
   const selectedPaper = state.papers.find((p) => p.slug === state.selectedPaperSlug) ?? null;
 
-  // Library collections: a removed collection stops filtering the list.
+  // Library collections: results of an imported package are accepted with it, never checked one by one.
   const packageAliases = new Set(packages?.installed.map((item) => item.alias) ?? []);
-  const libraryNames = new Set([...packageAliases, ...(packages?.collections.map((item) => item.name) ?? [])]);
-  const activeCollection = libraryCollection && (!packages || libraryNames.has(libraryCollection)) ? libraryCollection : undefined;
   const checking = needsCheck(selectedNode, packageAliases) ? selectedNode : undefined;
   const reviewingNow = Boolean(checking && reviewing && checking.collection === reviewing);
   const startChecking = (collection: string) => {
-    setLibraryCollection(collection);
     setReviewing(collection);
     setSkipped(new Set());
     const first = uncheckedIn(state.nodes, collection)[0];
@@ -602,6 +598,12 @@ export function App() {
                     +
                   </button>
                 )}
+                {state.activeView === 'library' && (
+                  <span style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => setPackageModal({ kind: 'import' })} style={{ ...buttonStyle('secondary'), padding: '1px 8px' }} title="Bring the approved results of another project into this library, with their citations">Import…</button>
+                    <button onClick={() => setPackageModal({ kind: 'export' })} style={{ ...buttonStyle('secondary'), padding: '1px 8px' }} title="Package this project's approved results so another project can import them">Export…</button>
+                  </span>
+                )}
                 {showPaperList && (
                   <AddPaperButton onAdd={handleAddPaper} />
                 )}
@@ -618,12 +620,11 @@ export function App() {
 
               {/* List body */}
               {state.activeView === 'library' && (
-                <LibraryBar
+                <LibraryList
+                  nodes={state.nodes}
                   data={packages}
-                  selected={activeCollection}
-                  onSelect={(name) => { setLibraryCollection(name); if (name !== reviewing) setReviewing(undefined); }}
-                  onImport={() => setPackageModal({ kind: 'import' })}
-                  onExport={() => setPackageModal({ kind: 'export' })}
+                  selectedId={state.selectedNodeId}
+                  onSelect={handleSelectNode}
                   onAccept={(alias) => send({ type: 'packageApprove', alias })}
                   onUpdate={(alias) => setPackageModal({ kind: 'update', alias })}
                   onRemove={(alias) => send({ type: 'packageRemove', alias })}
@@ -632,15 +633,13 @@ export function App() {
                   onRemoveCollection={(name) => send({ type: 'collectionRemove', name })}
                 />
               )}
-              {showNodeList && (
+              {showNodeList && state.activeView !== 'library' && (
                 <NodeList
                   nodes={state.nodes}
                   selectedId={state.selectedNodeId}
                   onSelect={handleSelectNode}
                   filterType={filterType}
                   definitionPath={state.paths?.definitions ?? 'research/definitions'}
-                  collection={activeCollection}
-                  onClearCollection={() => { setLibraryCollection(undefined); setReviewing(undefined); }}
                 />
               )}
               {showRemarkList && (

@@ -254,7 +254,7 @@ test('the plan pack lists library analogues; an adapting plan must say what tran
   assert.doesNotMatch(executePack, /Library analogues/);
 });
 
-test('the dashboard lists library results in their own view, limited to the collection chosen on its card', () => {
+test('library results stay out of the Assets list', () => {
   const React = require('react');
   const { renderToStaticMarkup } = require('react-dom/server');
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, '../webview-src/components/NodeList.tsx')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'] });
@@ -266,7 +266,7 @@ test('the dashboard lists library results in their own view, limited to the coll
     { id: 'lib_a', type: 'lemma', title: 'Library lemma A', status: 'draft', tags: [], filePath: `${LIB}/lib_a.md`, body: '', origin: 'library', collection: 'thesis' },
     { id: 'lib_b', type: 'lemma', title: 'Library lemma B', status: 'approved', tags: [], filePath: `${LIB}/lib_b.md`, body: '', origin: 'library', collection: 'thesis' },
   ];
-  const render = (filterType, collection) => renderToStaticMarkup(React.createElement(NodeList, { nodes, selectedId: null, onSelect: () => {}, filterType, collection, onClearCollection: () => {} }));
+  const render = (filterType) => renderToStaticMarkup(React.createElement(NodeList, { nodes, selectedId: null, onSelect: () => {}, filterType }));
   const assets = render('asset');
   assert.match(assets, /Main theorem/);
   assert.doesNotMatch(assets, /Library lemma/);
@@ -279,10 +279,4 @@ test('the dashboard lists library results in their own view, limited to the coll
   assert.match(library, /✓ KNOWN RESULT</, 'a checked known result shows one purple badge');
   assert.match(library, /NOT CHECKED · KNOWN RESULT</, 'an unchecked one shows the grey badge');
   assert.doesNotMatch(library, /<span[^>]*>approved<\/span>/i, 'no separate status badge next to it');
-  assert.doesNotMatch(library, /Showing/);
-  const only = render('library', 'thesis');
-  assert.match(only, /Showing <strong>thesis<\/strong> only/);
-  assert.match(only, />Show the whole library</);
-  assert.match(only, /Library lemma A/);
-  assert.doesNotMatch(render('library', 'other'), /Library lemma A/);
 });
