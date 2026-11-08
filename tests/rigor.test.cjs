@@ -18,7 +18,7 @@ const { RIGOR_KEYS, RIGOR_OPTIONS } = load('../src/models/settings.ts');
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
 const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n';
 const SETTINGS = '.research-assistant-loop/settings.json';
-const settings = (rigor = {}, extra = {}) => JSON.stringify({ version: 1, rigor, ...extra });
+const settings = (rigor = {}, extra = {}) => JSON.stringify({ version: 1, rigor: { verifyExtracted: 'off', ...rigor }, ...extra });
 
 const asset = (id, extra = {}, status = 'draft', proof = '') => matter.stringify(`\n## Statement\n\nFor every natural number n, ${id} holds.\n${proof}`, { type: extra.type ?? 'theorem', title: id, status, source: { kind: 'original' }, depends_on: [], uses_definitions: [], tags: [], ...extra });
 const definition = (title, text, extra = {}, status = 'draft') => matter.stringify(`\n${text}\n`, { type: 'definition', title: `Definition (${title})`, status, depends_on: [], ...extra });

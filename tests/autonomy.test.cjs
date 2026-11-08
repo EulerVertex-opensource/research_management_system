@@ -459,7 +459,7 @@ test('autonomous mode checks a library result against its source before using it
   assert.equal((await f.core.next()).stage, 'plan');
 
   // At hand-back, what only an agent checked is listed for the researcher.
-  assert.deepEqual((await f.core.autonomySummary()).agentChecked, { definitions: [], citations: ['lib_known'], rechecked: [] });
+  assert.deepEqual((await f.core.autonomySummary()).agentChecked, { definitions: [], citations: ['lib_known'], rechecked: [], proofs: [] });
   await f.core.report({ outcome: 'none', summary: 'No approach in sight.' });
   await f.core.park('main_theorem', 'agent_gave_up', 'Nothing in sight.');
   f.map.set(SETTINGS, JSON.stringify({ version: 1, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, autonomyRevisions: 0 }));

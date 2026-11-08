@@ -40,7 +40,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 // These tests drive a proof straight to approval; the independent check has its own tests (verify-proof.test.cjs).
-const NO_PROOF_CHECK = JSON.stringify({ version: 1, rigor: { verifyProofs: 'off' } });
+const NO_PROOF_CHECK = JSON.stringify({ version: 1, rigor: { verifyProofs: 'off', verifyExtracted: 'off' } });
 
 function fixture(initial = {}) {
   const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', '.research-assistant-loop/settings.json': NO_PROOF_CHECK, ...initial });

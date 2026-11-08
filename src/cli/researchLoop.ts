@@ -10,7 +10,7 @@ import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH
 import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
-import { AGENT_PROVIDERS, MAINTENANCE_COMMAND } from '../services/AgentProviders';
+import { AGENT_PROVIDERS, LOOP_COMMAND, MAINTENANCE_COMMAND } from '../services/AgentProviders';
 import { migrateApprovals } from '../services/ApprovalStore';
 import { LoopGit } from '../services/LoopGit';
 import { PublishPreview, ResearchSync } from '../services/ResearchSync';
@@ -63,6 +63,9 @@ const USAGE = `Usage: research-loop <command> [options]
   teach revise <id> --file <draft.md|->   (a rewording the researcher asked for: ## Proof with ## Changes; the loop checks and applies it)
   teach style [--add "rule"]   (the project's proof style; --add after the researcher agreed to keep a rule)
   validate [--fix]
+  check next --ids a,b [--source <file or paper>] [--count N]   (after extracting: independent checks, run in the extracting chat; never drives the loop)
+  check verdict <id> confirmed|rejected --summary "..."
+  check coverage --source <file or paper> --ids a,b complete|gaps --summary "..."
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
   idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk|conjecture] [--asset ID]... [--tag TAG]... [--origin agent|researcher]   (agent by default; researcher only for the researcher's own idea in their words)
@@ -597,7 +600,7 @@ async function main(): Promise<void> {
   const session = typeof args.flags.session === 'string' ? args.flags.session : undefined;
   const out = (value: unknown) => process.stdout.write((typeof value === 'string' ? value : JSON.stringify(value, null, 2)) + '\n');
   // The agent drives the loop through these commands: each is a sign of life (status is also what a researcher runs in a terminal).
-  const alive = () => (command !== 'status' && command !== 'teach' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
+  const alive = () => (command !== 'status' && command !== 'teach' && command !== 'check' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
   await alive();
   switch (command) {
     case 'status': {
@@ -671,6 +674,50 @@ async function main(): Promise<void> {
       await core.touch(session);
       const reminder = vocabularyReminder(report.summary);
       out(json ? { ...result, ...core.statusSummary(), ...(reminder ? { reminder } : {}) } : [`${result.message}\nStage: ${result.stage}`, reminder].filter(Boolean).join('\n'));
+      return;
+    }
+    case 'check': {
+      // Extraction checks: run in the chat that extracted. Not a driving command, so this chat never becomes the loop's, takes no lock, and leaves the loop's stage and pack alone.
+      const batchOf = () => ids(text(args.flags.ids, 'ids'));
+      const source = typeof args.flags.source === 'string' && args.flags.source.trim() ? args.flags.source.trim() : undefined;
+      if (sub === 'verdict') {
+        const verdict = args.positional[3];
+        if (verdict !== 'confirmed' && verdict !== 'rejected') throw new Error('check verdict <id> confirmed|rejected --summary "..."');
+        out(await core.recordExtractionCheck(text(third, 'id'), verdict, typeof args.flags.summary === 'string' ? args.flags.summary : ''));
+        return;
+      }
+      if (sub === 'coverage') {
+        const verdict = third;
+        if (verdict !== 'complete' && verdict !== 'gaps') throw new Error('check coverage --source <file or paper> --ids a,b complete|gaps --summary "..."');
+        out(await core.recordCoverage(text(source, 'source'), batchOf(), verdict, typeof args.flags.summary === 'string' ? args.flags.summary : ''));
+        return;
+      }
+      if (sub !== 'next') throw new Error('check next --ids a,b [--source <file or paper>] [--count N] | check verdict <id> confirmed|rejected --summary "..." | check coverage --source ... --ids ... complete|gaps --summary "..."');
+      const batch = batchOf();
+      const plan = await core.extractionChecks(batch);
+      if (!plan.enabled) { out(json ? { enabled: false } : 'Checking extracted results is off (Settings, How thorough: Check what is extracted). Request approval as usual.'); return; }
+      const count = Math.min(8, Math.max(1, Number(args.flags.count) || 4));
+      const tasks = [];
+      for (const node of plan.pending.slice(0, count)) tasks.push({ id: node.id, mode: node.mode, ...(await core.extractionCheckTask(node)) });
+      const coverage = !plan.pending.length && source ? await core.coverageDue(source, batch) : undefined;
+      const coverageTask = coverage?.due ? await core.coverageTask(source!, batch) : undefined;
+      if (json) { out({ enabled: true, pending: plan.pending, checked: plan.checked, skipped: plan.skipped, tasks, ...(coverage ? { coverage: { due: coverage.due, last: coverage.last?.reason, ...(coverageTask ?? {}) } } : {}) }); return; }
+      const lines: string[] = [];
+      if (plan.checked.length) lines.push(`Checked: ${plan.checked.map((item) => `${item.id} ${item.verdict}`).join(', ')}.`);
+      if (plan.skipped.length) lines.push(`Not checked: ${plan.skipped.map((item) => `${item.id} (${item.why})`).join(', ')}.`);
+      const again = `Then run ${LOOP_COMMAND} check next --ids ${batch.join(',')}${source ? ` --source "${source}"` : ''} again.`;
+      if (tasks.length) {
+        lines.push(`${plan.pending.length} to check${plan.pending.length > tasks.length ? ` (${tasks.length} now)` : ''}. You extracted them, so do not check them yourself: run one independent subagent per check${tasks.length > 1 ? ', in parallel, all in one message' : ''} (research-worker-deep where available), giving each only its instruction:`);
+        for (const task of tasks) lines.push(`- ${task.id} (${task.mode}, pack ~${task.tokens} tokens): ${task.instruction}`);
+        lines.push(again);
+      } else if (coverageTask) {
+        lines.push(`Every node is checked. One independent subagent now checks that the extraction is complete: ${coverageTask.instruction}`, again);
+      } else {
+        if (coverage && !coverage.due && coverage.last?.reason === 'gaps') lines.push(`The coverage checks still found gaps; tell the researcher what remains: ${coverage.last.text.split('\n').slice(0, 6).join(' / ')}`);
+        const rejected = plan.checked.filter((item) => item.verdict === 'rejected');
+        lines.push(`Every extracted node is checked${source ? '' : ' (pass --source to also check the extraction is complete)'}. Now request approval for them (request_approval); each request carries its verdict.${rejected.length ? ` Did not pass: ${rejected.map((item) => `${item.id} (${item.summary.replace(/\.$/, '')})`).join('; ')}. Tell the researcher; do not fix them unasked.` : ''}`);
+      }
+      out(lines.join('\n'));
       return;
     }
     case 'validate': {

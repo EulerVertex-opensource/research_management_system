@@ -10,7 +10,7 @@ export interface Provenance { performed_by: string; created_at: string; base_com
 
 /** search_request: the researcher asked for more counterexample search on an asset, `rounds` of it. */
 /** `node_check`: an agent's independent check of a definition or citation before auto mode approves it; `reason` is the verdict, `digest` the node version checked. */
-export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check';
+export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check' | 'proof_check' | 'extraction_check';
 
 export interface DecisionInfo {
   id: string;
@@ -28,6 +28,9 @@ export interface DecisionInfo {
   rounds?: number;
   /** direction and search_request: the last object-search round before it, so later limits count only the rounds after. */
   searchRound?: number;
+  /** proof_check: the statement it was checked against, and the statements of the dependencies and definitions it read. */
+  statementDigest?: string;
+  dependencyDigests?: Record<string, string>;
 }
 
 export interface CheckInfo { id: string; target: string; outcome: string; statementDigest?: string; createdAt?: string; performedBy?: string }
@@ -49,13 +52,14 @@ export function decisionId(kind: DecisionKind, target: string, provenance: Prove
   return `decision_${stamp(provenance.created_at)}_${kind}_${safeIdPart(target)}_${suffix}`;
 }
 
-export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number }
+export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number; statementDigest?: string; dependencyDigests?: Record<string, string> }
 
 export function decisionMarkdown(kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: DecisionExtra = {}): string {
-  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check' };
+  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check', proof_check: 'Independent proof check', extraction_check: 'Extraction coverage check' };
   return stringifyMarkdown(`\n${text.trim() || '(no text)'}\n`, clean({
     type: 'decision', title: `${titles[kind]}: ${target}`, kind, target, reason: extra.reason,
-    failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound, ...provenance,
+    failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound,
+    statement_digest: extra.statementDigest, dependency_digests: extra.dependencyDigests, ...provenance,
   }));
 }
 
@@ -70,6 +74,9 @@ export function parseDecision(id: string, raw: string): DecisionInfo | undefined
     digest: typeof data.digest === 'string' ? data.digest : undefined,
     rounds: typeof data.rounds === 'number' && Number.isInteger(data.rounds) && data.rounds > 0 ? data.rounds : undefined,
     searchRound: typeof data.search_round === 'number' && Number.isInteger(data.search_round) && data.search_round >= 0 ? data.search_round : undefined,
+    statementDigest: typeof data.statement_digest === 'string' ? data.statement_digest : undefined,
+    dependencyDigests: data.dependency_digests && typeof data.dependency_digests === 'object' && !Array.isArray(data.dependency_digests)
+      ? Object.fromEntries(Object.entries(data.dependency_digests as Record<string, unknown>).map(([key, value]) => [key, String(value)])) : undefined,
   };
 }
 

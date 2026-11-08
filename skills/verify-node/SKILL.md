@@ -1,11 +1,16 @@
 ---
 name: verify-node
-description: Independently check a definition, or a result taken from a source (a citation or a library result), before auto mode approves it, and report a confirmed or rejected verdict. Used by the research loop's verify_node stage.
+description: Independently check a definition, a result taken from a source (a citation or a library result), or a written proof as it stands (the researcher's manuscript, say), and give a confirmed or rejected verdict. Used by the research loop's verify_node stage and by research-loop check right after extraction.
 ---
 
-# Check a definition or a cited result
+# Check a definition, a cited result, or a written proof
 
-Auto mode (and autonomous mode) approves a definition or a result taken from a source only after this check. Nobody else reads it before the loop builds on it, so check as the researcher would. Input: the context pack from `research-loop next`. For anything else run `research-loop show <id> [--section Heading]`. Change no file: the verdict is your report.
+Auto mode (and autonomous mode) approves a definition, a result taken from a source, or a proof no plan of the loop wrote only after this check; without auto mode the researcher reviews with your verdict. Check as the researcher would. You come here two ways:
+
+- The loop's `verify_node` stage: the pack is the one `research-loop next` names; the verdict is your `report`.
+- `research-loop check` after an extraction: the pack and the exact `check verdict` command are in your instruction.
+
+For anything else run `research-loop show <id> [--section Heading]`. Change no file.
 
 ## A definition
 
@@ -22,9 +27,17 @@ Auto mode (and autonomous mode) approves a definition or a result taken from a s
 - The definitions it uses must mean what the source means by those words.
 - If the source cannot be read (no transcription, the location does not exist), report `question --question "..."`.
 
+## A proof as written
+
+- The verify-proof skill's standard applies: check the `## Proof` against the statement step by step, as a referee would. Every step follows; every hypothesis of a dependency or cited result holds where it is used; nothing is assumed that the statement does not give; every case is covered.
+- A step the author calls clear is still checked. A gap that a short argument would close is still a gap: name it, and say the argument.
+- Dependencies are black boxes: use their statements in the pack, not their proofs.
+- On a re-check (the pack says which statements changed), check every step that uses them against their current text.
+
 ## Verdict
 
-- `report confirmed --summary "<what you checked, in a line or two>"`.
-- `report rejected --summary "<the first problem: what is wrong, where, and what would fix it>"`. The node then waits for the researcher with your verdict; the loop does not check that version again.
+- In the loop: `report confirmed --summary "<what you checked, in a line or two>"`, or `report rejected --summary "<the first problem: what is wrong, where, and what would fix it>"`.
+- After an extraction: the same two verdicts with `research-loop check verdict <id> confirmed|rejected --summary "..."`.
+- A rejected node waits for the researcher with your verdict, and that version is not checked again. A rejected proof is kept: it is the researcher's to revise.
 
 Do not read remarks; this is a checking stage, and the hooks refuse it.

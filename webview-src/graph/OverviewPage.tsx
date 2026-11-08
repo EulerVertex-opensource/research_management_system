@@ -163,6 +163,7 @@ function Autonomy({ payload, onShowInResults, onOpenActivity }: Pick<Props, 'onS
           <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 2 }}>
             {run.agentChecked.definitions.length > 0 && <li>Definitions: {names(run.agentChecked.definitions)}</li>}
             {run.agentChecked.citations.length > 0 && <li>Checked against their source: {names(run.agentChecked.citations)}</li>}
+            {(run.agentChecked.proofs ?? []).length > 0 && <li>Proofs checked as written: {names(run.agentChecked.proofs)}</li>}
             {run.agentChecked.rechecked.length > 0 && <li>Proofs re-checked after a change: {names(run.agentChecked.rechecked)}</li>}
           </ul>
           <div style={{ fontSize: 12, color: COLOR.muted }}>No person has read these yet; an independent agent checked each one.</div>

@@ -83,7 +83,7 @@ export interface ContextFocus {
   /** Stage `verify_proof` as a re-check: what changed since the proof was written or last checked. */
   recheck?: string[];
   /** Stage `verify_node`: the definition, or the cited or library result, to check. */
-  node?: { id: string; mode: 'definition' | 'citation' };
+  node?: { id: string; mode: 'definition' | 'citation' | 'proof'; changed?: string[] };
 }
 
 export interface RenderedContext { text: string; tokens: number; included: ContextItem[]; omitted: ContextItem[]; files: string[] }
@@ -156,6 +156,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
   const target = focus.assetId;
   if (focus.researcherInput) notes.push(`Researcher input: ${focus.researcherInput}`);
   if (focus.changesRequested) notes.push(`The researcher requested changes: ${focus.changesRequested}`);
+  if (focus.node?.changed?.length) notes.push(`Re-check: ${focus.node.changed.join(', ')} changed since this proof was last checked. The pack shows their current text. Check every step that uses them against it: a step that held for the old text may not hold now.`);
   if (focus.recheck?.length) notes.push(`Re-check: ${focus.recheck.join(', ')} changed since this proof was written or last checked. The pack shows their current text. Check every step that uses them against it: a step that held for the old text may not hold now.`);
   if (focus.direction) notes.push(`${focus.ownDirection ? 'Your own latest direction (autonomous mode), which this plan must follow' : 'Latest researcher direction'}: ${focus.direction}`);
 
@@ -283,6 +284,13 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
     case 'verify_node': {
       const node = focus.node;
       if (!node) break;
+      if (node.mode === 'proof') {
+        asset(node.id, 'all', 0, 'the statement and the proof to verify, as written');
+        for (const dep of deps(node.id)) asset(dep, 'statement', 1, 'dependency the proof may use as a black box');
+        definitionsOf([node.id], 1, 2);
+        excluded.push('remarks', 'proofs of dependencies');
+        break;
+      }
       if (node.mode === 'definition') {
         definition(node.id, 0, 'the definition to check');
         for (const dep of list(sources.definitions.get(node.id)?.data.depends_on)) definition(dep, 1, 'a definition it builds on');

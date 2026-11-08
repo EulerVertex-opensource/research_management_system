@@ -157,14 +157,14 @@ test('auto approvals in one selection are followed by a fresh one: supporting re
 test('a kind switched off stays with the researcher', async () => {
   // Checked at the end (Fast): the definition comes to the researcher once the proof is in.
   const f = fixture();
-  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off', verifyProofs: 'off' } }));
+  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off', verifyProofs: 'off', verifyExtracted: 'off' } }));
   await driveToFalsify(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   await prove(f);
   assert.equal((await f.core.next()).stage, 'waiting');
   assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'definition' && item.target === 'natural'));
   // Agreed before proving (Careful, the default): the same definition comes to the researcher before any search.
   const careful = fixture();
-  careful.map.set(SETTINGS, auto({ definitions: false }));
+  careful.map.set(SETTINGS, auto({ definitions: false }, { rigor: { verifyProofs: 'off', verifyExtracted: 'off' } }));
   await careful.core.start('claude', { goal: 'Prove the main theorem.' });
   careful.map.set(paths.projectMd, project);
   await careful.core.report({ outcome: 'complete', summary: 'Drafted' });
@@ -436,8 +436,9 @@ test('a definition that fails its check waits for the researcher, and is not che
   assert.equal((await f.core.next()).stage, 'verify_node');
 });
 
-test('without auto mode nothing is checked: the researcher approves definitions as before', async () => {
+test('without auto mode, and with extracted results not checked, the researcher approves definitions as before', async () => {
   const f = fixture();
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, rigor: { verifyProofs: 'off', verifyExtracted: 'off' } }));
   await driveToSelect(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   assert.equal((await f.core.next()).stage, 'waiting');
   assert.equal(nodeChecks(f).length, 0);

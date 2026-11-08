@@ -19,7 +19,12 @@ export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
   | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'verify_node' | 'conjecture' | 'waiting' | 'ready';
 /** What `verify_node` checks: a definition, or a result taken from a source (a citation or a library result). */
-export interface NodeCheckTarget { id: string; mode: 'definition' | 'citation' }
+/**
+ * What an independent check reads: a definition, a result against its cited source, or a proof as
+ * written (one no loop plan produced, such as the researcher's manuscript). `changed`: a re-check of
+ * a proof after these dependencies or definitions changed.
+ */
+export interface NodeCheckTarget { id: string; mode: 'definition' | 'citation' | 'proof'; changed?: string[] }
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 /** `package`: one review of an imported research package (target: its alias) that approves all of its results at once. */
@@ -156,6 +161,8 @@ export interface LoopState {
   scaffoldBrief?: { missing?: string[]; incomplete?: string[]; missingDefinitions?: string[] };
   /** Definitions drafted to fill a gap while the researcher asked to be waited for (rigor.missingDefinitions: wait). */
   awaitingDefinitions?: string[];
+  /** Nodes the scaffold or sources stage just extracted, to be checked independently before anything else (rigor verifyExtracted). */
+  extractedChecks?: string[];
   parked: Record<string, { reason: string; at: string; note?: string }>;
   pendingQuestion?: LoopQuestion;
   answers: LoopAnswer[];

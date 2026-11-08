@@ -44,6 +44,8 @@ export const RIGOR_OPTIONS = {
   agreeDefinitions: ['main', 'off'],
   /** When a statement or definition a result rests on changes: send everything downstream back to review, or mark it for re-check. */
   onDependencyChange: ['revert', 'flag'],
+  /** Results and definitions just extracted from a manuscript, paper, or notes: an independent agent checks them right away (research-loop check), or nobody does before the researcher. */
+  verifyExtracted: ['agent', 'off'],
   /** A definition used but missing: the agent drafts it, then waits for the researcher or goes on with the draft. */
   missingDefinitions: ['wait', 'continue'],
   /** A result stuck with no direction from the researcher: set it aside, or let the agent try one new approach itself. */

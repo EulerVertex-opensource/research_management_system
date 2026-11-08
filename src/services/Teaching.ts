@@ -1,7 +1,8 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
 import { parseMarkdown } from './Frontmatter';
-import { EVENTS_PATH, LoopFiles, dashboardLinkPath, isApproved, proofDigest, statementDigest, writeDashboardLinks } from './ResearchLoopModel';
+import { EVENTS_PATH, LoopFiles, dashboardLinkPath, isApproved, proofDigest, sharedFolders, statementDigest, writeDashboardLinks } from './ResearchLoopModel';
+import { DecisionInfo, parseDecision, sortDecisions } from './ResearchRecords';
 import { readApprovals } from './ApprovalStore';
 import { normalizeProse, sha } from '../domain/digests';
 import { INACTIVE_STATUSES, definitionKindOf } from '../domain/nodeKinds';
@@ -85,15 +86,26 @@ export class Teaching {
     return raw.split('\n').filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return {}; } }).filter((event) => event.type === 'report');
   }
 
+  /** Independent checks of proofs as written, oldest first. */
+  private async proofChecks(): Promise<DecisionInfo[]> {
+    const folder = sharedFolders(this.paths.researchRoot).decisions;
+    const checks: DecisionInfo[] = [];
+    for (const file of await this.files.listFiles(folder).catch(() => [] as string[])) {
+      const info = parseDecision(path.posix.basename(file, '.md'), await this.files.readFile(file).catch(() => ''));
+      if (info?.kind === 'proof_check') checks.push(info);
+    }
+    return sortDecisions(checks);
+  }
+
   /**
    * Everything the teaching material is built from. A result counts as
    * verified when the researcher (or auto mode) approved this exact version, or
    * an independent check confirmed this exact proof of this exact statement.
    */
   private async sources() {
-    const [assets, definitions, plans, approvals, project, reports] = await Promise.all([
+    const [assets, definitions, plans, approvals, project, reports, proofChecks] = await Promise.all([
       this.nodes('asset'), this.nodes('definition'), this.plans(), readApprovals(this.files, this.paths.researchRoot).then((file) => file.records).catch(() => []),
-      this.files.readFile(this.paths.projectMd).catch(() => ''), this.reports(),
+      this.files.readFile(this.paths.projectMd).catch(() => ''), this.reports(), this.proofChecks(),
     ]);
     const required = new Set(requiredAssetIds(project));
     const inputs: StudyInput[] = [];
@@ -117,8 +129,11 @@ export class Teaching {
       const checkedBy = proof ? plans.find((plan) => plan.data.target_asset === node.id && plan.data.status === 'succeeded'
         && plan.data.proof_digest === proof && plan.data.statement_digest === statement && plan.data.verified_proof_digest === proof
         && checkedAgainstCurrent(plan.data.dependency_digests)) : undefined;
-      if (!approved && !checkedBy) continue;
-      const confirmed = checkedBy ? reports.filter((event) => event.stage === 'verify_proof' && event.outcome === 'confirmed' && event.assetId === node.id).pop()?.at : undefined;
+      // A proof no plan wrote (the researcher's manuscript), checked independently as written: the latest check of this proof decides.
+      const proofCheck = proof && !checkedBy ? proofChecks.filter((check) => check.target === node.id && check.digest === proof && check.statementDigest === statement).pop() : undefined;
+      const checkedAsWritten = proofCheck?.reason === 'confirmed' && checkedAgainstCurrent(proofCheck.dependencyDigests ?? {});
+      if (!approved && !checkedBy && !checkedAsWritten) continue;
+      const confirmed = checkedBy ? reports.filter((event) => event.stage === 'verify_proof' && event.outcome === 'confirmed' && event.assetId === node.id).pop()?.at : checkedAsWritten ? proofCheck!.createdAt : undefined;
       inputs.push({
         id: node.id, kind: 'asset', type: String(node.data.type ?? ''), title: String(node.data.title ?? node.id), raw: node.raw,
         verified: approved ? 'approved' : 'checked', prerequisites: [...list(node.data.depends_on), ...list(node.data.uses_definitions)],

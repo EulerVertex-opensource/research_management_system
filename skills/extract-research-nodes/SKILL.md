@@ -15,7 +15,7 @@ When the researcher hands over a batch of materials to organize, sort each part 
   1. The manuscript is the researcher's finished work: extract all of it as written, `source.kind: original`. Every result becomes an asset with its statement and proof (under `## Proof`), and every definition it states, standard or newly introduced, becomes a definition node (Definitions, assumptions, and conventions). A proof's `\ref` or `\cite` to another result becomes a `depends_on` or a cited library or paper node, and a use of a defined term or notation becomes a `uses_definitions`, so the graph reproduces the manuscript's dependencies.
   2. Propose `project.md` text from the abstract and introduction, with the main theorems as `required_results`.
   3. The prose: `plan-manuscript` (scope adopt) splits the TeX into section files and writes briefs citing the new node IDs, then `draft-latex` wraps the passages that present them in blocks. A Markdown draft gets the outline and briefs only; `draft-latex` writes its TeX when the researcher asks.
-  4. Finish below, then request approval of the extracted nodes (`request_approval`) so the researcher reviews them together.
+  4. Finish and Check below, then request approval of the extracted nodes (`request_approval`) so the researcher reviews them together, each with its check's verdict.
 - A paper PDF: `import-math-paper` (transcription in `papers/<slug>/`, PDF in the local source folder), then extract its useful results and definitions below.
 - Notes, drafts, or TeX with mathematical content: results and definitions below; anything that is not yet a statement (an approach, a question, an observation) becomes an idea (`type: idea`, `status: draft`, `idea_kind`).
 - Earlier work or known results the project will use, not prove: the library (below).
@@ -71,7 +71,7 @@ Use the library when the researcher asks to import known results, or names a col
 
   Keep one paper per collection; results from another paper go in that paper's collection.
 
-The researcher checks each extracted result against its source in VS Code (Library: a card per collection, then *Check N results…*, one result at a time beside its location); the research loop then uses it as known and never re-proves it. There is no bulk acceptance for extracted results: a dropped hypothesis or a wrong theorem number would become a known result. When the researcher turned on auto mode for citations (or autonomous mode), the loop's `verify_node` stage stands in for that check: an independent agent compares each result with its cited location before it is approved, and one that fails waits for the researcher. After a batch, list the new IDs per collection with their locations so the checking is quick. Removing a whole collection is the researcher's action in the Library; its paper stays indexed.
+The researcher checks each extracted result against its source in VS Code (Library: a card per collection, then *Check N results…*, one result at a time beside its location); the research loop then uses it as known and never re-proves it. There is no bulk acceptance for extracted results: a dropped hypothesis or a wrong theorem number would become a known result. When the researcher wants extracted results checked (Check below), an independent agent compares each result with its cited location right after extraction, and the researcher checks with its verdict; with auto mode for citations (or autonomous mode) a result that passes is approved, and one that fails waits for the researcher. After a batch, list the new IDs per collection with their locations so the checking is quick. Removing a whole collection is the researcher's action in the Library; its paper stays indexed.
 
 ## Packages
 
@@ -101,3 +101,19 @@ If the researcher agrees, repoint the project's results to the definition they c
 ## Finish
 
 Run `research-maintenance validate` and fix every problem, then `research-maintenance links --preview` and `--apply` for the new or changed bodies (see that skill for review of missed mentions). Run `check-notation` on new or materially revised assets. If the researcher asked for candidates rather than files, return the same content as Markdown blocks with YAML frontmatter. Flag uncertain readings and source passages that still need checking.
+
+## Check
+
+After writing nodes into files (not candidates), and unless the loop's own `scaffold` or `sources` stage is extracting (the loop checks those itself), run in this chat:
+
+```bash
+node .agents/skills/research-loop/scripts/research-loop.cjs check next --ids <every node you created or changed> --source <the source file, or the paper slug>
+```
+
+It says whether the researcher wants extracted results checked (Settings, How thorough: *Check what is extracted*). When that is off, go on to approval. When it is on, it hands out one task per node: a definition for what its users need, a result taken from a source against its location, a written proof (the researcher's manuscript, say) step by step as written. A statement without a proof is skipped: the loop proves it later.
+
+- You extracted these nodes, so never check them yourself. Run each task in its own fresh subagent (`research-worker-deep` where available; several in parallel, all in one message), giving it only its instruction. The subagent records its verdict with `check verdict`.
+- Run `check next` again until every node is checked. With `--source` it then hands out one coverage check, which compares the source with what was extracted. Extract what it finds missing (validate and link as above), add the new IDs to `--ids`, and run `check next` again. After two coverage checks in a row that found gaps, the rest goes to the researcher.
+- Then request approval. Each request carries its node's verdict; with automatic approval, what passed is approved. Tell the researcher what did not pass and why. Do not rewrite the researcher's own text unasked: a failed check of their proof is theirs to judge.
+
+`check` never drives the research loop: running it does not make this chat the loop's chat, takes no lock, and leaves the loop's stage and context pack alone. Never run `research-loop next` or `report` here for the checks.

@@ -208,7 +208,7 @@ export interface AutonomyView {
   agentChecked?: AgentCheckedView;
 }
 
-export interface AgentCheckedView { definitions: string[]; citations: string[]; rechecked: string[] }
+export interface AgentCheckedView { definitions: string[]; citations: string[]; rechecked: string[]; proofs: string[] }
 
 /** One line of the Activity timeline. */
 export interface HistoryEntry { at: string; text: string; tone: LoopTone; target?: string }

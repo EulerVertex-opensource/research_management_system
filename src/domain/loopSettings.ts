@@ -19,17 +19,17 @@ export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
  * researcher does not respond). A Record so a new policy without a place does not compile.
  */
 export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away'> = {
-  refuteSearch: 'checks', verifyProofs: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks',
+  refuteSearch: 'checks', verifyProofs: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks', verifyExtracted: 'checks',
   missingDefinitions: 'away', whenStuck: 'away', unansweredQuestions: 'away',
 };
 export const CHECK_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'checks');
 export const AWAY_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'away');
-type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'verifyProofs' | 'agreeDefinitions' | 'onDependencyChange'>;
+type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'verifyProofs' | 'agreeDefinitions' | 'onDependencyChange' | 'verifyExtracted'>;
 
 /** How thorough: Careful is the default; Fast trades checks for progress. Presets cover the checks only. */
 export const RIGOR_PRESETS: Record<'careful' | 'fast', CheckPolicy> = {
-  careful: { refuteSearch: 'all', verifyProofs: 'agent', agreeDefinitions: 'main', onDependencyChange: 'revert' },
-  fast: { refuteSearch: 'main', verifyProofs: 'off', agreeDefinitions: 'off', onDependencyChange: 'flag' },
+  careful: { refuteSearch: 'all', verifyProofs: 'agent', agreeDefinitions: 'main', onDependencyChange: 'revert', verifyExtracted: 'agent' },
+  fast: { refuteSearch: 'main', verifyProofs: 'off', agreeDefinitions: 'off', onDependencyChange: 'flag', verifyExtracted: 'off' },
 };
 export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' };
 
@@ -63,6 +63,7 @@ export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(ty
   refuteSearch: { label: 'Look for counterexamples before proving', hint: 'A search for a counterexample before each proof catches false statements early, at a cost in tokens.', options: { all: 'Every result', main: 'Main results only', off: 'Never' } },
   verifyProofs: { label: 'Check each proof', hint: 'The agent that planned a proof also writes it. An independent check catches gaps before the proof is approved. If you check them yourself, proofs are never approved automatically, whatever the level above allows.', options: { agent: 'An independent agent verifies it', researcher: 'I verify every proof myself', off: 'No separate check' } },
   agreeDefinitions: { label: 'Agree on definitions before proving', hint: 'The definitions a main result’s statement uses decide what the goal means.', options: { main: 'Main results’ definitions first', off: 'Check them at the end' } },
+  verifyExtracted: { label: 'Check what is extracted', hint: 'After results and definitions are extracted from a manuscript, paper, or notes, an independent agent checks each one right away (a proof step by step, a cited result against its source, a definition for what its users need) and then looks for anything the extraction missed. You review with its verdicts; with automatic approval, what passes is approved. One check per result, so it costs tokens.', options: { agent: 'An independent agent checks them right away', off: 'No separate check' } },
   onDependencyChange: { label: 'When something a result rests on changes', hint: 'A changed definition or statement can make the proofs built on it be about something else.', options: { revert: 'Everything downstream back to review', flag: 'Mark it for re-check' } },
   missingDefinitions: { label: 'When a definition is used but missing', hint: 'The agent drafts it in either case; it never accepts it for you.', options: { wait: 'Draft it, then wait for me', continue: 'Draft it and go on' } },
   whenStuck: { label: 'When a result is stuck and you give no direction', hint: 'After the failed-attempt limit, or when a construction search runs out.', options: { park: 'Set it aside', retry: 'Agent tries one new approach itself' } },
@@ -146,9 +147,12 @@ export function normalizeLoopSettings(raw: unknown): { settings: LoopSettings; p
   }
   const rigorInput = input.rigor && typeof input.rigor === 'object' && !Array.isArray(input.rigor) ? input.rigor as Record<string, unknown> : {};
   if (input.rigor !== undefined && rigorInput !== input.rigor) problems.push('rigor is malformed; using the careful defaults.');
+  // A check added later is missing from older settings: it follows the preset the other checks still match (Fast stays Fast).
+  const fastBefore = CHECK_KEYS.every((key) => rigorInput[key] === undefined ? key === 'verifyExtracted' : rigorInput[key] === RIGOR_PRESETS.fast[key as keyof CheckPolicy]);
+  const fallback = (key: RigorKey) => (key === 'verifyExtracted' && fastBefore ? RIGOR_PRESETS.fast.verifyExtracted : DEFAULT_RIGOR[key]);
   const rigor = Object.fromEntries(RIGOR_KEYS.map((key) => {
     const value = rigorInput[key];
-    if (value === undefined) return [key, DEFAULT_RIGOR[key]];
+    if (value === undefined) return [key, fallback(key)];
     if ((RIGOR_OPTIONS[key] as readonly unknown[]).includes(value)) return [key, value];
     problems.push(`rigor.${key} is not one of ${RIGOR_OPTIONS[key].join(', ')}; using ${DEFAULT_RIGOR[key]}.`);
     return [key, DEFAULT_RIGOR[key]];
