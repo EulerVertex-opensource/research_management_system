@@ -60,7 +60,7 @@ An obstruction that reads like a step of a proof of the target is worth a `recor
 
 Reread the statement and the example from the pack, not from memory or the search reasoning. Recheck every assumption and every calculation step, and try to break the example.
 
-Add `## Verdict` to the example: `confirmed` or `rejected`, with the reason.
+Add `## Verdict` to the example. Begin its first line with the word `confirmed` or `rejected`, then give the reason; only that leading word is read as the outcome.
 - **Rejected:** set the example `status: archived`. The loop keeps the candidate on the board as a near-miss and continues the search.
 - **Confirmed:** leave it `draft`. The loop asks the researcher to confirm it and parks the asset meanwhile.
 

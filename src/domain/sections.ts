@@ -18,6 +18,18 @@ export function sectionContent(body: string, heading: string): string {
   return match ? match[1].trim() : '';
 }
 
+/**
+ * The outcome a `## Verdict` states: its first non-empty line must begin with
+ * the word `confirmed` or `rejected` (emphasis allowed, a reason may follow on
+ * the line). The explanation below never counts, so "rejection count" in a
+ * confirmed verdict, or "not confirmed", cannot decide it; anything else is undefined.
+ */
+export function verdictOutcome(verdict: string): 'confirmed' | 'rejected' | undefined {
+  const first = verdict.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? '';
+  const match = /^(confirmed|rejected)\b/i.exec(first.replace(/^[>*_\s]+/, ''));
+  return match ? (match[1].toLowerCase() as 'confirmed' | 'rejected') : undefined;
+}
+
 export function hasSection(body: string, heading: string): boolean {
   return new RegExp(`^## ${escapeRegExp(heading)}[ \\t]*$`, 'm').test(body);
 }

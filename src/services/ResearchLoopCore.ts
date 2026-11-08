@@ -23,7 +23,7 @@ import {
 import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
-import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
+import { hasSection, sectionContent, statementPart, stripManagedBlocks, verdictOutcome } from '../domain/sections';
 import { ProofRevision, REVISIONS_DIR, withProof } from '../domain/revisions';
 import { understandingParts } from '../domain/understanding';
 import { layoutReport } from '../domain/layout';
@@ -995,8 +995,8 @@ export class ResearchLoopCore {
     if (kind === 'definition') return policy.definitions && await this.nodeChecked({ id: request.target, mode: 'definition' }, raw) ? 'definitions' : undefined;
     if (data.type === 'example' && typeof data.refutes === 'string') {
       if (request.kind !== 'counterexample' || !policy.counterexamples) return undefined;
-      const verdict = sectionContent(parsed.content, 'Verdict');
-      return /confirm/i.test(verdict) && !/reject/i.test(verdict) ? 'counterexamples' : undefined;
+      // Only the verdict's leading word decides; its explanation may say "rejection" or "not confirmed" of other things.
+      return verdictOutcome(sectionContent(parsed.content, 'Verdict')) === 'confirmed' ? 'counterexamples' : undefined;
     }
     if (request.kind === 'counterexample') return undefined;
     if (locateNodeFile(file, this.paths)?.origin === 'library') return policy.citations && await this.nodeChecked({ id: request.target, mode: 'citation' }, raw) ? 'citations' : undefined;
@@ -2999,7 +2999,7 @@ export class ResearchLoopCore {
         return `Stage search_summary for asset ${asset}, round ${round}. Use the search-object skill (Summarize). Write one round record ${this.shared.checks}/search_${asset}_r${round}_<slug>.md (type search_round, title, target_asset ${asset}, ## Obstructions with one line per reason a family of candidates fails, ## Limitations naming what no worker covered). Record an obstruction that reads like a proof step with record_idea (kind approach). Change nothing else.${report('summarized')}`;
       }
       case 'verify_counterexample':
-        return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
+        return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example, beginning with the word confirmed or rejected, then the reason. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
         const requested = state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined;
         return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `First check the pack's library analogues: a known result proving a version of this statement can be adapted (list it under adapts) instead of proving from scratch. Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with an adapted result also ## Adapted from; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID). If no genuinely new approach is in sight, write no plan and report none --summary "<what the failed plans show and why nothing new is in sight>": it spends no attempt, and the result counts as stuck.`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report(state.current.planId ? 'complete --plan <id>|question' : 'complete --plan <id>|none|question')}`;
@@ -3432,7 +3432,9 @@ export class ResearchLoopCore {
         const exampleId = state.current.counterexampleId!;
         const example = parseMarkdown(await this.files.readFile(`${this.paths.assets}/${exampleId}.md`));
         if (report.outcome === 'confirmed') {
-          if (!sectionContent(example.content, 'Verdict')) throw new Error(`${exampleId} needs a ## Verdict.`);
+          const verdict = sectionContent(example.content, 'Verdict');
+          if (!verdict) throw new Error(`${exampleId} needs a ## Verdict.`);
+          if (verdictOutcome(verdict) !== 'confirmed') throw new Error(`## Verdict of ${exampleId} must begin with the word confirmed (the reason follows), matching the reported outcome.`);
           await this.enqueueApproval('counterexample', exampleId, `Independently verified counterexample to ${assetId}; confirm or reject.`);
           state.parked[assetId] = { reason: 'counterexample_pending', at: this.now() };
           if ((await this.autoApproveQueued()).includes(`counterexample:${exampleId}`)) return finish(`Counterexample ${exampleId} confirmed automatically (auto mode); ${assetId} is deprecated. Continue with next.`, 'select', { assetId: undefined, counterexampleId: undefined });

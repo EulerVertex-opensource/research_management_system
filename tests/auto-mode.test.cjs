@@ -16,6 +16,7 @@ const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
 const { normalizeLoopSettings, parseLoopSettings, validateSettingsPatch, applyLoopPatch, DEFAULT_LOOP_SETTINGS } = load('../src/domain/loopSettings.ts');
 const { normalizeConfig } = load('../src/services/ProjectPathsCore.ts');
 const { preToolUseDecision } = load('../src/services/ResearchLoopHooks.ts');
+const { verdictOutcome } = load('../src/domain/sections.ts');
 
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
 const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n    role: the central claim\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n\n## Background\n\nNone.\n';
@@ -251,6 +252,47 @@ test('counterexamples are confirmed automatically only when switched on', async 
       assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'counterexample'));
     }
   }
+});
+
+test('a verdict is read from its leading word only, never from words in its explanation', () => {
+  const cases = [
+    ['confirmed\n\nDividing by the actual rejection count gives the stated expression.', 'confirmed'],
+    ['confirmed\n\n### Step 2\n\nBoth rejected null hypotheses are accounted for.', 'confirmed'],
+    ['Confirmed: every hypothesis holds.', 'confirmed'],
+    ['**Confirmed.** The bound is attained at n = 3.', 'confirmed'],
+    ['rejected', 'rejected'],
+    ['rejected: the second inequality fails at n = 2; it was confirmed only for n = 1.', 'rejected'],
+    ['not confirmed', undefined],
+    ['unconfirmed', undefined],
+    ['The counterexample is confirmed.', undefined],
+    ['', undefined],
+  ];
+  for (const [text, outcome] of cases) assert.equal(verdictOutcome(text), outcome, JSON.stringify(text));
+});
+
+test('auto mode confirms a counterexample whose verdict explanation mentions a rejection count', async () => {
+  const f = fixture();
+  f.map.set(SETTINGS, auto({ counterexamples: true }));
+  await f.core.start('claude', { goal: 'Investigate.' });
+  f.map.set(paths.projectMd, project);
+  await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  await f.core.resolveApproval(f.core.current.approvalQueue[0].id, 'approved', '', 'test');
+  await f.core.next();
+  f.map.set('research/assets/main_theorem.md', asset());
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await f.core.next()).stage, 'search');
+  writeRound(f, { status: 'survived' });
+  await f.core.report({ outcome: 'searched', summary: 'Found' });
+  const exampleFile = `research/assets/${f.core.current.current.counterexampleId}.md`;
+  const original = f.map.get(exampleFile);
+  // A confirmed report whose verdict does not lead with the word is sent back, not left for guessing.
+  f.map.set(exampleFile, original + '\n## Verdict\n\nThe example holds.\n');
+  await assert.rejects(f.core.report({ outcome: 'confirmed', summary: 'Checked' }), /must begin with the word confirmed/);
+  f.map.set(exampleFile, original + '\n## Verdict\n\nconfirmed\n\n### Calculation\n\nDividing by the actual rejection count gives the stated expression.\n');
+  await f.core.report({ outcome: 'confirmed', summary: 'Checked' });
+  assert.equal(status(f, 'research/assets/main_theorem.md'), 'deprecated');
+  assert.ok(!f.core.current.approvalQueue.some((item) => item.kind === 'counterexample'));
 });
 
 const verdict = (f, planId, text) => {
