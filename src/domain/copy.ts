@@ -22,6 +22,7 @@ const STAGE_TEXT: Record<string, string> = {
   plan: 'planning a proof of {result}',
   execute: 'proving {result}',
   verify_proof: 'checking the proof of {result}',
+  verify_node: 'checking {result} before it is approved',
   conjecture: 'making a conjecture precise',
   waiting: 'stopped until you act',
   ready: 'done with every main result',

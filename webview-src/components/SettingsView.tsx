@@ -24,8 +24,8 @@ interface Props {
 const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?: string }> = {
   proofs: { label: 'Proofs', hint: 'a proof a succeeded plan produced, over approved dependencies' },
   supporting: { label: 'Supporting assets', hint: 'examples a required result uses' },
-  citations: { label: 'Citations & library', hint: 'results citing an indexed paper with a location, and library results' },
-  definitions: { label: 'Definitions', hint: 'definitions the results use' },
+  citations: { label: 'Citations & library', hint: 'results citing an indexed paper with a location, and library results, once an independent agent checked each against its source (spends tokens)' },
+  definitions: { label: 'Definitions', hint: 'definitions the results use, once an independent agent checked each (well formed, fits its uses, does not make a goal trivial; spends tokens)' },
   conjectures: { label: 'Conjecture statements', hint: 'conjectures to state in the paper, once a counterexample search found nothing' },
   conjectureIdeas: { label: 'Turn ideas into conjectures', hint: 'when nothing else is actionable, the agent makes conjecture ideas precise and searches them for counterexamples (spends tokens)' },
   counterexamples: { label: 'Counterexamples', hint: 'verified counterexamples', warning: 'Confirming a counterexample deprecates the result it refutes.' },

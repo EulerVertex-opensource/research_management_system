@@ -204,7 +204,11 @@ export interface AutonomyView {
   addedGoals: string[];
   /** Questions it decided itself; each is kept as an idea. */
   decided: number;
+  /** Approved in this run on an independent agent's check alone: definitions, results taken from a source, and proofs re-checked after something they rest on changed. */
+  agentChecked?: AgentCheckedView;
 }
+
+export interface AgentCheckedView { definitions: string[]; citations: string[]; rechecked: string[] }
 
 /** One line of the Activity timeline. */
 export interface HistoryEntry { at: string; text: string; tone: LoopTone; target?: string }

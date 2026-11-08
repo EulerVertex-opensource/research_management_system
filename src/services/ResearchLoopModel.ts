@@ -17,7 +17,9 @@ export type AgentProvider = 'claude' | 'codex';
 export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
-  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'conjecture' | 'waiting' | 'ready';
+  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'verify_node' | 'conjecture' | 'waiting' | 'ready';
+/** What `verify_node` checks: a definition, or a result taken from a source (a citation or a library result). */
+export interface NodeCheckTarget { id: string; mode: 'definition' | 'citation' }
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 /** `package`: one review of an imported research package (target: its alias) that approves all of its results at once. */
@@ -143,6 +145,10 @@ export interface LoopState {
     stageStartedAt: string; baseCommit?: string; statementDigest?: string;
     /** The object-search round in progress: its mode, number, and the direction each worker slot was given. */
     search?: { mode: SearchMode; round: number; slots: SearchSlot[]; candidateId?: string; properties?: string[]; requested?: boolean };
+    /** Stage `verify_proof` as a re-check: the dependencies and definitions that changed since the proof was written or last checked. */
+    recheck?: string[];
+    /** Stage `verify_node`: the definition, or the cited or library result, checked before auto mode approves it. */
+    node?: NodeCheckTarget;
   };
   /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
   /** constructionProof: digest of the proof a verified search construction wrote into the asset; it vouches for that proof as a verified plan would. */

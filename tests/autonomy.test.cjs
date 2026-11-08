@@ -32,6 +32,7 @@ function memoryFiles(initial = {}) {
     writeFile: async (file, content) => { map.set(file, content); },
     exists: async (file) => map.has(file),
     listFiles: async (folder, extension = '.md') => [...map.keys()].filter((file) => path.posix.dirname(file) === folder && file.endsWith(extension)).sort(),
+    listDirs: async (folder) => [...new Set([...map.keys()].filter((file) => file.startsWith(`${folder}/`)).map((file) => `${folder}/${file.slice(folder.length + 1).split('/')[0]}`).filter((dir) => [...map.keys()].some((file) => file.startsWith(`${dir}/`))))].sort(),
     deleteFile: async (file) => { map.delete(file); },
   };
 }
@@ -113,6 +114,51 @@ test('a stuck result waits on the agent, which gives it more attempts with its o
   await fail(f, 'attempt_3', '\n## Difference from failed plans\n\n- attempt_1: a different route\n- attempt_2: another route\n');
   assert.equal(f.core.current.autonomy.deciding, 'main_theorem');
   assert.equal(f.core.current.autonomy.spent, 3);
+});
+
+test('no new approach in sight: report none spends no attempt and sends the agent to decide', async () => {
+  const f = fixture({ maxFailedPlans: 3 });
+  await driveToPlan(f);
+  await fail(f, 'attempt_1');
+  assert.equal(f.core.current.autonomy.spent, 1);
+  await assert.rejects(f.core.report({ outcome: 'none', summary: '' }), /--summary/);
+  const none = await f.core.report({ outcome: 'none', summary: 'Every route needs the base case, which reflexivity cannot reach.' });
+  assert.equal(f.core.current.autonomy.spent, 1, 'nothing was executed, so nothing is spent');
+  assert.equal(f.core.current.autonomy.deciding, 'main_theorem', 'the agent decides: a new direction or set it aside');
+  assert.match(none.message, /No new approach is in sight for main_theorem: Every route needs the base case/);
+  assert.equal(f.core.current.pendingQuestion, undefined);
+  assert.equal([...f.map.keys()].filter((file) => file.startsWith('research/plans/')).length, 1, 'no failed plan is recorded for it');
+
+  // Its own direction, and then still no plan: the result is set aside instead of spending an attempt on a filler plan.
+  await f.core.allocate('main_theorem', 2, 'Split off the base case.');
+  const again = await f.core.report({ outcome: 'none', summary: 'Splitting off the base case leaves the same gap.' });
+  assert.match(again.message, /set aside with your note/);
+  assert.equal(f.core.current.parked.main_theorem.reason, 'agent_gave_up');
+  assert.equal(f.core.current.parked.main_theorem.note, 'Splitting off the base case leaves the same gap.');
+  assert.equal(f.core.current.autonomy.spent, 1);
+});
+
+test('report none with a plan written is refused, and a pending plan cannot be skipped', async () => {
+  const f = fixture();
+  await driveToPlan(f);
+  f.map.set('research/plans/attempt_1.md', plan('attempt_1', 'main_theorem', 'pending'));
+  await assert.rejects(f.core.report({ outcome: 'none', summary: 'Nothing new.' }), /report complete --plan/);
+});
+
+test('without autonomous mode, report none at the plan stage asks the researcher for a direction', async () => {
+  const f = fixture({ autonomy: { enabled: false }, autoApprove: { enabled: true, project: true } });
+  await f.core.start('claude', { goal: 'Prove the main theorem.' });
+  f.map.set(paths.projectMd, project);
+  await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  await f.core.next();
+  f.map.set('research/assets/main_theorem.md', asset('main_theorem'));
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  assert.equal((await f.core.next()).stage, 'plan');
+  const none = await f.core.report({ outcome: 'none', summary: 'Every route needs the base case.' });
+  assert.equal(none.stage, 'plan');
+  assert.equal(f.core.current.pendingQuestion.kind, 'blocked');
+  assert.match(f.core.current.pendingQuestion.prompt, /No new approach is in sight for main_theorem/);
 });
 
 test('setting a result aside leaves nothing to do alone: the loop hands back with a handoff', async () => {
@@ -389,4 +435,36 @@ test('the Overview sees the run: budget while it works, and after hand-back what
   const payload = buildGraphPayload({ nodes, project: weaker, projectApproved: true, state: f.core.current, manuscript: undefined, sectionsDir: 'sections', now: 'now' });
   const main = payload.nodes.find((node) => node.id === 'main_theorem');
   assert.deepEqual([main.progressLabel, main.progressDetail], ['Set aside by the agent', 'No route past the base case.']);
+});
+
+test('autonomous mode checks a library result against its source before using it as known', async () => {
+  const f = fixture({ maxFailedPlans: 3 });
+  const LIB = 'research/library/thesis/assets';
+  f.map.set(`${LIB}/lib_known.md`, matter.stringify('\n## Statement\n\nEvery n satisfies P(n).\n', { type: 'lemma', title: 'Known lemma', status: 'draft', source: { kind: 'original' }, depends_on: [], uses_definitions: [], tags: [] }));
+  await f.core.start('claude', { goal: 'Prove the main theorem.' });
+  f.map.set(paths.projectMd, project);
+  await f.core.report({ outcome: 'complete', summary: 'Drafted' });
+  assert.equal((await f.core.next()).stage, 'scaffold');
+  f.map.set('research/assets/main_theorem.md', asset('main_theorem', { depends_on: ['lib_known'] }));
+  await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
+  await f.core.report({ outcome: 'none', summary: 'No sources' });
+  const next = await f.core.next();
+  assert.equal(next.stage, 'verify_node');
+  assert.deepEqual(f.core.current.current.node, { id: 'lib_known', mode: 'citation' });
+  assert.match(next.instruction, /every hypothesis kept/);
+  assert.equal(matter(f.map.get(`${LIB}/lib_known.md`)).data.status, 'draft', 'not used as known before the check');
+  await f.core.report({ outcome: 'confirmed', summary: 'Matches Theorem 2.1 of the thesis.' });
+  assert.equal(matter(f.map.get(`${LIB}/lib_known.md`)).data.status, 'approved');
+  assert.equal(f.core.current.autonomy.spent, 0, 'a check spends no attempt');
+  assert.equal((await f.core.next()).stage, 'plan');
+
+  // At hand-back, what only an agent checked is listed for the researcher.
+  assert.deepEqual((await f.core.autonomySummary()).agentChecked, { definitions: [], citations: ['lib_known'], rechecked: [] });
+  await f.core.report({ outcome: 'none', summary: 'No approach in sight.' });
+  await f.core.park('main_theorem', 'agent_gave_up', 'Nothing in sight.');
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, autonomyRevisions: 0 }));
+  const handed = await f.core.next();
+  assert.match(handed.instruction, /approved on an independent agent's check alone/);
+  const handoff = [...f.map.entries()].find(([file]) => file.startsWith('research/handoffs/'))[1];
+  assert.match(handoff, /Approved on an independent agent's check alone; worth your review:\n- Results taken from a source \(checked against it\): lib_known/);
 });

@@ -191,10 +191,10 @@ test('migrate --apply refuses uncommitted research changes in a git repository',
   } finally { p.cleanup(); }
 });
 
-test('bundled skills: fourteen skills, each referenced script is built and installed with its skill', () => {
+test('bundled skills: fifteen skills, each referenced script is built and installed with its skill', () => {
   const skillsRoot = path.resolve(__dirname, '../skills');
   const skills = fs.readdirSync(skillsRoot).filter((name) => fs.existsSync(path.join(skillsRoot, name, 'SKILL.md'))).sort();
-  assert.deepEqual(skills, ['check-notation', 'draft-latex', 'execute-proof', 'explore-research', 'extract-research-nodes', 'import-math-paper', 'plan-manuscript', 'plan-proof', 'research-loop', 'research-maintenance', 'revise-manuscript-prose', 'search-object', 'teach', 'verify-proof']);
+  assert.deepEqual(skills, ['check-notation', 'draft-latex', 'execute-proof', 'explore-research', 'extract-research-nodes', 'import-math-paper', 'plan-manuscript', 'plan-proof', 'research-loop', 'research-maintenance', 'revise-manuscript-prose', 'search-object', 'teach', 'verify-node', 'verify-proof']);
   const vscode = { Uri: {}, workspace: {}, FileType: {} };
   const { SKILL_SCRIPTS, isBundledSkillManifest } = load('../src/services/SkillInstallerService.ts', { vscode });
   const { RETIRED_SKILLS } = load('../src/services/AgentProviders.ts');

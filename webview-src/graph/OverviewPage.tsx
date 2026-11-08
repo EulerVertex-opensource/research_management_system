@@ -158,6 +158,16 @@ function Autonomy({ payload, onShowInResults, onOpenActivity }: Pick<Props, 'onS
         </ul>
       ))}
       {run.addedGoals.length > 0 && row('Goals it added', <>{names(run.addedGoals)}<div style={{ fontSize: 12, color: COLOR.muted }}>Your own goals are all still there. Keep or drop either kind in project.md.</div></>)}
+      {run.agentChecked && row('Approved on the agent\'s check alone', (
+        <>
+          <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {run.agentChecked.definitions.length > 0 && <li>Definitions: {names(run.agentChecked.definitions)}</li>}
+            {run.agentChecked.citations.length > 0 && <li>Checked against their source: {names(run.agentChecked.citations)}</li>}
+            {run.agentChecked.rechecked.length > 0 && <li>Proofs re-checked after a change: {names(run.agentChecked.rechecked)}</li>}
+          </ul>
+          <div style={{ fontSize: 12, color: COLOR.muted }}>No person has read these yet; an independent agent checked each one.</div>
+        </>
+      ))}
       {spending && row('Where the attempts went', spending)}
       {run.decided > 0 && row('Questions it decided', <>{plural(run.decided, 'question')}, each kept as an idea with the default it chose. <button style={link} onClick={onOpenActivity}>Activity →</button></>)}
     </Block>

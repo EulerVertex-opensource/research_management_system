@@ -80,18 +80,22 @@ export interface ContextFocus {
   ownDirection?: boolean;
   /** Object search: the round, this worker's slot (search) or the round's results (search_summary), and the board. */
   search?: { mode: SearchMode; round: number; slot?: SearchSlot; board: string; roundDigest?: string; requested?: boolean };
+  /** Stage `verify_proof` as a re-check: what changed since the proof was written or last checked. */
+  recheck?: string[];
+  /** Stage `verify_node`: the definition, or the cited or library result, to check. */
+  node?: { id: string; mode: 'definition' | 'citation' };
 }
 
 export interface RenderedContext { text: string; tokens: number; included: ContextItem[]; omitted: ContextItem[]; files: string[] }
 
 export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
-  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000, conjecture: 10000,
+  search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000, verify_node: 12000, conjecture: 10000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
-  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep', conjecture: 'deep',
+  scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep', verify_node: 'deep', conjecture: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }
@@ -152,6 +156,7 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
   const target = focus.assetId;
   if (focus.researcherInput) notes.push(`Researcher input: ${focus.researcherInput}`);
   if (focus.changesRequested) notes.push(`The researcher requested changes: ${focus.changesRequested}`);
+  if (focus.recheck?.length) notes.push(`Re-check: ${focus.recheck.join(', ')} changed since this proof was written or last checked. The pack shows their current text. Check every step that uses them against it: a step that held for the old text may not hold now.`);
   if (focus.direction) notes.push(`${focus.ownDirection ? 'Your own latest direction (autonomous mode), which this plan must follow' : 'Latest researcher direction'}: ${focus.direction}`);
 
   switch (focus.stage) {
@@ -273,6 +278,23 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
       for (const node of sources.assets.values()) if (!node.origin && node.data.type === 'conjecture' && ['draft', 'approved'].includes(node.data.status)) asset(node.id, 'statement', 2, 'an existing conjecture; do not state it again');
       add('index', 'index', undefined, 'all', 3, 'existing IDs, for depends_on, uses_definitions, and serves');
       excluded.push('proofs (a conjecture is stated, not proved)', 'paper transcriptions');
+      break;
+    }
+    case 'verify_node': {
+      const node = focus.node;
+      if (!node) break;
+      if (node.mode === 'definition') {
+        definition(node.id, 0, 'the definition to check');
+        for (const dep of list(sources.definitions.get(node.id)?.data.depends_on)) definition(dep, 1, 'a definition it builds on');
+        const users = [...sources.assets.values()].filter((item) => list(item.data.uses_definitions).includes(node.id));
+        for (const user of users) asset(user.id, 'statement', 1, 'a result that uses it: the definition must say what this statement needs');
+        add('project', 'project', sources.projectFile, ['Main Problem', 'Required Results'], 2, 'the goals: a definition must not make them trivial or vacuous');
+      } else {
+        asset(node.id, 'all', 0, 'the result taken from a source: check it against the cited location');
+        definitionsOf([node.id], 1, 2);
+        add('papers', 'papers', sources.paperIndexFile, 'all', 2, 'indexed papers: read the cited location with show <paper_slug> --section ...');
+      }
+      excluded.push('remarks', 'plans and proofs of other results');
       break;
     }
     case 'verify_proof':

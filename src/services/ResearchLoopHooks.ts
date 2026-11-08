@@ -505,7 +505,7 @@ export function writingToolDecision(input: HookInput): ToolDecision {
 }
 
 /** Stages that check work independently: the checker never sees remarks, which are explanations nobody checked. */
-const CHECKING_STAGES = new Set(['verify_proof', 'verify_counterexample', 'verify_construction']);
+const CHECKING_STAGES = new Set(['verify_proof', 'verify_node', 'verify_counterexample', 'verify_construction']);
 
 /**
  * Remark rules in the loop's own chat: its remarks say from loop (never posing

@@ -18,7 +18,7 @@ const { DEFAULT_LOOP_SETTINGS, rigorPreset } = load('../src/domain/loopSettings.
 
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
 const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n    role: the central claim\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n\n## Background\n\nNone.\n';
-const asset = () => matter.stringify('\n## Statement\n\nFor every natural number n, n = n.\n', { type: 'theorem', title: 'Main theorem', status: 'draft', source: { kind: 'original' }, depends_on: [], uses_definitions: [], tags: [] });
+const asset = (extra = {}) => matter.stringify('\n## Statement\n\nFor every natural number n, n = n.\n', { type: 'theorem', title: 'Main theorem', status: 'draft', source: { kind: 'original' }, depends_on: [], uses_definitions: [], tags: [], ...extra });
 const plan = (id, failed = []) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\nProve reflexivity.\n\n## Plan\n\n1. [ ] Apply equality reflexivity.\n\n## Verification\n\nCheck the equality.\n${failed.length ? `\n## Difference from failed plans\n\nUnlike ${failed.join(', ')}, it states each step.\n` : ''}`, { type: 'plan', title: id, status: 'pending', target_asset: 'main_theorem', inspired_by: [], tags: [] });
 const SETTINGS = '.research-assistant-loop/settings.json';
 const ASSET = 'research/assets/main_theorem.md';
@@ -36,6 +36,16 @@ function memoryFiles(initial = {}) {
   };
 }
 
+/** Auto mode approves a definition or citation only after an independent check: confirm each one the loop asks for. */
+async function confirmNodeChecks(f) {
+  let next = await f.core.next();
+  while (next.stage === 'verify_node') {
+    await f.core.report({ outcome: 'confirmed', summary: `Checked ${f.core.current.current.node.id}.` });
+    next = await f.core.next();
+  }
+  return next;
+}
+
 let counter = 0;
 function fixture(settingsText) {
   const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', ...(settingsText ? { [SETTINGS]: settingsText } : {}) });
@@ -44,7 +54,7 @@ function fixture(settingsText) {
 }
 
 /** Goals approved, main_theorem scaffolded, searched, planned, and proved by `planId`. */
-async function proveOnce(f, planId = 'attempt_1', failed = []) {
+async function proveOnce(f, planId = 'attempt_1', failed = [], scaffold = { [ASSET]: asset() }) {
   if (!f.core.current) {
     await f.core.start('claude', { goal: 'Prove the main theorem.' });
     f.map.set(paths.projectMd, project);
@@ -52,10 +62,10 @@ async function proveOnce(f, planId = 'attempt_1', failed = []) {
     const request = f.core.current.approvalQueue.find((item) => item.kind === 'project');
     if (request) await f.core.resolveApproval(request.id, 'approved', '', 'test');
     assert.equal((await f.core.next()).stage, 'scaffold');
-    f.map.set(ASSET, asset());
+    for (const [file, content] of Object.entries(scaffold)) f.map.set(file, content);
     await f.core.report({ outcome: 'complete', summary: 'Scaffolded' });
     await f.core.report({ outcome: 'none', summary: 'No sources' });
-    assert.equal((await f.core.next()).stage, 'search');
+    assert.equal((await confirmNodeChecks(f)).stage, 'search');
     await searchNothing(f);
   }
   assert.equal(f.core.current.stage, 'plan');
@@ -167,4 +177,49 @@ test('agents may not stamp a proof as verified', () => {
   assert.equal(deny({ tool_name: 'Edit', tool_input: { file_path: 'research/plans/attempt_1.md', old_string: 'status: succeeded', new_string: 'status: succeeded\nverified_proof_digest: abc' } }), true);
   assert.equal(deny({ tool_name: 'Bash', tool_input: { command: "sed -i 's/^tags:/verified_proof_digest: abc\\ntags:/' research/plans/attempt_1.md" } }), true);
   assert.equal(deny({ tool_name: 'Edit', tool_input: { file_path: 'research/plans/attempt_1.md', old_string: 'x', new_string: '## Verdict\n\nconfirmed' } }), false);
+});
+
+const DEFINITION = 'research/definitions/natural.md';
+const definition = (text) => matter.stringify(`\n${text}\n`, { type: 'definition', title: 'Definition (natural)', status: 'draft', source: { kind: 'original' }, depends_on: [] });
+const withDefinition = { [ASSET]: asset({ uses_definitions: ['natural'] }), [DEFINITION]: definition('A natural number is a non-negative integer.') };
+
+test('a verified proof is checked again when a definition it uses changes, and an approved one marked for re-check keeps its approval', async () => {
+  const f = fixture(settings('agent', { autoApprove: { enabled: true }, rigor: { verifyProofs: 'agent', onDependencyChange: 'flag' } }));
+  await proveOnce(f, 'attempt_1', [], withDefinition);
+  await f.core.next();
+  writeVerdict(f, 'attempt_1', 'confirmed: every step follows.');
+  await f.core.report({ outcome: 'confirmed', summary: 'Checked' });
+  assert.equal(matter(f.map.get(ASSET)).data.status, 'approved');
+  assert.equal(matter(f.map.get(DEFINITION)).data.status, 'approved');
+
+  // The researcher sharpens the definition: main_theorem stays approved but is marked for re-check.
+  f.map.set(DEFINITION, f.map.get(DEFINITION).replace('a non-negative integer', 'a positive integer'));
+  await f.core.reconcile('natural');
+  assert.equal((await f.core.recheckFlags()).main_theorem, 'natural');
+  // The changed definition itself stays with the researcher: a main result's statement uses it.
+  assert.equal((await f.core.next()).stage, 'waiting');
+  await f.core.resolveApproval(f.core.current.approvalQueue.find((item) => item.target === 'natural').id, 'approved', '', 'test');
+  const next = await f.core.next();
+  assert.equal(next.stage, 'verify_proof');
+  assert.deepEqual(f.core.current.current.recheck, ['natural']);
+  assert.match(f.map.get('research/plans/attempt_1.md'), /^## Earlier verdict/m, 'the first verdict is kept under another heading');
+  writeVerdict(f, 'attempt_1', 'confirmed: reflexivity holds for positive integers too.');
+  const done = await f.core.report({ outcome: 'confirmed', summary: 'Still holds' });
+  assert.match(done.message, /re-check mark is cleared/);
+  assert.equal(matter(f.map.get(ASSET)).data.status, 'approved');
+  assert.equal((await f.core.recheckFlags()).main_theorem, undefined);
+});
+
+test('a verification no longer counts once a definition the proof uses changed', async () => {
+  const f = fixture(settings('agent', { rigor: { verifyProofs: 'agent', agreeDefinitions: 'off' } }));
+  await proveOnce(f, 'attempt_1', [], withDefinition);
+  await f.core.next();
+  writeVerdict(f, 'attempt_1', 'confirmed: every step follows.');
+  await f.core.report({ outcome: 'confirmed', summary: 'Checked' });
+  assert.ok(queued(f).includes('asset:main_theorem'));
+  // Edited while the proof waits for the researcher (the definition is still a draft, so nothing is reverted).
+  f.map.set(DEFINITION, f.map.get(DEFINITION).replace('a non-negative integer', 'a positive integer'));
+  const next = await f.core.next();
+  assert.equal(next.stage, 'verify_proof', 'the check was made against the old definition');
+  assert.deepEqual(f.core.current.current.recheck, ['natural']);
 });

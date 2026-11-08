@@ -8,13 +8,13 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, ASSESSMENT_PATH, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, GoalAssessment, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  LoopExtension, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
+  LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES } from '../domain/nodeKinds';
 import { RankedConjecture, describeConjectures, rankConjectures } from '../domain/conjectures';
 import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
-import type { AutonomyView } from '../models/graph';
+import type { AgentCheckedView, AutonomyView } from '../models/graph';
 import { readLoopSettings } from './LoopSettingsStore';
 import { AUTONOMOUS_AUTO_APPROVE, DEFAULT_LOOP_SETTINGS, LOOP_NUMBER_FIELDS } from '../domain/loopSettings';
 import {
@@ -65,9 +65,10 @@ type Selection =
   | { stage: 'discuss_goals' | 'draft_project' | 'review_project' | 'ready'; note?: string }
   | { stage: 'scaffold'; missing: string[]; incomplete: string[]; missingDefinitions?: string[] }
   | { stage: 'plan'; assetId: string }
-  | { stage: 'verify_proof'; assetId: string; planId: string }
+  | { stage: 'verify_proof'; assetId: string; planId: string; recheck?: string[] }
   | { stage: 'search'; assetId: string; mode: SearchMode }
   | { stage: 'conjecture'; ideaId: string }
+  | { stage: 'verify_node'; node: NodeCheckTarget }
   | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
 type Finish = (message: string, next: LoopStage, patch?: Partial<LoopState['current']>) => Promise<{ stage: LoopStage; message: string }>;
 type SearchRound = NonNullable<LoopState['current']['search']>;
@@ -229,6 +230,8 @@ export class ResearchLoopCore {
     state.stage = stage;
     state.current = { ...state.current, ...patch, stageStartedAt: this.now(), baseCommit: await this.git?.head() };
     if (!SEARCH_STAGES.has(stage)) delete state.current.search;
+    if (stage !== 'verify_proof') delete state.current.recheck;
+    if (stage !== 'verify_node') delete state.current.node;
     if (stage !== 'waiting') delete state.waitingOn;
     await this.takeSnapshot();
     await this.save();
@@ -939,6 +942,8 @@ export class ResearchLoopCore {
         done.add(request.id);
         await this.approveRequest(request, 'auto');
         await this.event('auto_approved', { kind: request.kind, target: request.target, rule });
+        // autoRule grants a held request only when the agent's re-check lifts the hold.
+        if ((request.kind === 'asset' || request.kind === 'definition') && (await this.holds())[`${request.kind}:${request.target}`]) await this.clearRecheckByAgent(request.target, request.kind);
         granted.push(`${request.kind}:${request.target}`);
         progress = true;
       }
@@ -977,24 +982,25 @@ export class ResearchLoopCore {
     const data = parsed.data;
     if (data.status !== 'draft') return undefined;
     const hold = (await this.holds())[`${kind}:${request.target}`];
-    if (hold) {
+    // Held because something it rests on changed: the agent's re-check against the current dependencies may lift it.
+    if (hold && !(isLiftableHold(hold.reason) && await this.holdLifted(kind, request.target, raw, data, file, policy, hold.at))) {
       const note = ` (auto mode: needs your review — ${hold.reason.replace(/_/g, ' ')})`;
       const queued = this.state?.approvalQueue.find((item) => item.id === request.id);
       if (queued && !queued.reason.endsWith(note)) { queued.reason += note; await this.save(); }
       return undefined;
     }
-    if (kind === 'definition') return policy.definitions ? 'definitions' : undefined;
+    if (kind === 'definition') return policy.definitions && await this.nodeChecked({ id: request.target, mode: 'definition' }, raw) ? 'definitions' : undefined;
     if (data.type === 'example' && typeof data.refutes === 'string') {
       if (request.kind !== 'counterexample' || !policy.counterexamples) return undefined;
       const verdict = sectionContent(parsed.content, 'Verdict');
       return /confirm/i.test(verdict) && !/reject/i.test(verdict) ? 'counterexamples' : undefined;
     }
     if (request.kind === 'counterexample') return undefined;
-    if (locateNodeFile(file, this.paths)?.origin === 'library') return policy.citations ? 'citations' : undefined;
+    if (locateNodeFile(file, this.paths)?.origin === 'library') return policy.citations && await this.nodeChecked({ id: request.target, mode: 'citation' }, raw) ? 'citations' : undefined;
     if (isCited(data.source)) {
       const source = data.source as { paper_id?: unknown; location?: unknown };
       const indexed = typeof source.paper_id === 'string' && (await this.paperIds()).has(source.paper_id);
-      return policy.citations && indexed && typeof source.location === 'string' && source.location.trim() ? 'citations' : undefined;
+      return policy.citations && indexed && typeof source.location === 'string' && source.location.trim() && await this.nodeChecked({ id: request.target, mode: 'citation' }, raw) ? 'citations' : undefined;
     }
     // A citation request for a result that cites nothing is not a citation.
     if (request.kind === 'citation') return undefined;
@@ -1688,10 +1694,173 @@ export class ResearchLoopCore {
       && plan.data.proof_digest === proof && plan.data.statement_digest === statement);
   }
 
-  /** The plan whose proof still awaits the independent check: one produced the current proof, and no verification has confirmed it. */
-  private async unverifiedPlan(assetId: string, raw: string): Promise<string | undefined> {
+  /**
+   * A hold an agent's check may lift (something the node rests on changed): a proof re-checked
+   * against its current dependencies, or a definition or cited result checked again since the hold.
+   */
+  private async holdLifted(kind: 'asset' | 'definition', id: string, raw: string, data: Record<string, any>, file: string, policy: AutoApprovePolicy, heldAt: string): Promise<boolean> {
+    if (kind === 'definition') return policy.definitions && this.nodeChecked({ id, mode: 'definition' }, raw, heldAt);
+    if (PROVABLE_TYPES.has(data.type) && !isCited(data.source) && locateNodeFile(file, this.paths)?.origin !== 'library') return policy.proofs && this.recheckSettled(id, raw);
+    if (locateNodeFile(file, this.paths)?.origin === 'library' || isCited(data.source)) return policy.citations && this.nodeChecked({ id, mode: 'citation' }, raw, heldAt);
+    return false;
+  }
+
+  /** The latest independent check of exactly this version of the node confirmed it (and, with `after`, was made after that time). */
+  private async nodeChecked(node: NodeCheckTarget, raw: string, after?: string): Promise<boolean> {
+    const verdict = await this.nodeVerdict(node, raw);
+    return verdict?.reason === 'confirmed' && (!after || verdict.createdAt > after);
+  }
+
+  private async nodeVerdict(node: NodeCheckTarget, raw: string): Promise<DecisionInfo | undefined> {
+    const digest = researchDigest(raw, node.mode === 'definition' ? 'definition' : 'asset');
+    return sortDecisions(await this.decisions()).filter((decision) => decision.kind === 'node_check' && decision.target === node.id && decision.digest === digest).pop();
+  }
+
+  /** The node a queued approval names, when auto mode would approve it once an independent check confirms this version. */
+  private async nodeCheckFor(request: ApprovalRequest, policy: AutoApprovePolicy): Promise<NodeCheckTarget | undefined> {
+    if (request.kind !== 'definition' && request.kind !== 'citation' && request.kind !== 'asset') return undefined;
+    const kind: ResultKind = request.kind === 'definition' ? 'definition' : 'asset';
+    const file = await findNodeFile(this.files, this.paths, kind, request.target);
+    const raw = file ? await this.files.readFile(file).catch(() => '') : '';
+    if (!file || !raw || researchDigest(raw, kind) !== request.digest) return undefined;
+    let data: Record<string, any>;
+    try { data = parseMarkdown(raw).data; } catch { return undefined; }
+    if (data.status !== 'draft') return undefined;
+    const node: NodeCheckTarget | undefined = kind === 'definition' ? (policy.definitions ? { id: request.target, mode: 'definition' } : undefined)
+      : policy.citations && (locateNodeFile(file, this.paths)?.origin === 'library' || isCited(data.source)) && data.type !== 'example' ? { id: request.target, mode: 'citation' } : undefined;
+    if (!node) return undefined;
+    const hold = (await this.holds())[`${kind}:${request.target}`];
+    if (hold && !isLiftableHold(hold.reason)) return undefined;
+    // One check per version: a confirmed one is approved by autoRule, a rejected one stays with the researcher.
+    const verdict = await this.nodeVerdict(node, raw);
+    if (verdict && (!hold || verdict.createdAt > hold.at)) return undefined;
+    return node;
+  }
+
+  /** The first queued definition or citation auto mode waits to see checked. */
+  private async nodeToCheck(): Promise<NodeCheckTarget | undefined> {
+    const settings = await this.loopSettings();
+    const policy = settings.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : settings.autoApprove;
+    if (!policy.enabled) return undefined;
+    // Definitions first: results are read in their terms.
+    const queue = [...this.require().approvalQueue].sort((a, b) => Number(b.kind === 'definition') - Number(a.kind === 'definition'));
+    for (const request of queue) {
+      const node = await this.nodeCheckFor(request, policy);
+      if (node) return node;
+    }
+    return undefined;
+  }
+
+  private async needsNodeCheck(node: NodeCheckTarget): Promise<boolean> {
+    const settings = await this.loopSettings();
+    const policy = settings.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : settings.autoApprove;
+    if (!policy.enabled) return false;
+    const request = this.require().approvalQueue.find((item) => item.target === node.id && (node.mode === 'definition' ? item.kind === 'definition' : item.kind === 'citation' || item.kind === 'asset'));
+    return Boolean(request && await this.nodeCheckFor(request, policy));
+  }
+
+  /** Record the verdict of a node check as a shared decision, then let auto mode act on it. */
+  private async recordNodeCheck(node: NodeCheckTarget, verdict: 'confirmed' | 'rejected', summary: string): Promise<string> {
+    const kind: ResultKind = node.mode === 'definition' ? 'definition' : 'asset';
+    const file = await findNodeFile(this.files, this.paths, kind, node.id);
+    const raw = file ? await this.files.readFile(file).catch(() => '') : '';
+    if (!raw) throw new Error(`${node.id} is gone; run ${LOOP_COMMAND} next.`);
+    await this.writeDecision('node_check', node.id, summary, { reason: verdict, digest: researchDigest(raw, kind) });
+    await this.event('node_checked', { assetId: node.id, mode: node.mode, verdict });
+    if (verdict === 'confirmed') {
+      const granted = await this.autoApproveQueued();
+      return granted.some((item) => item.endsWith(`:${node.id}`)) ? `${node.id} checked and approved automatically (auto mode). Continue with next.` : `${node.id} checked; it still waits for what else it needs. Continue with next.`;
+    }
+    const request = this.require().approvalQueue.find((item) => item.target === node.id);
+    const note = ` (the agent's check found a problem: ${summary.split('\n')[0].slice(0, 200)})`;
+    if (request && !request.reason.includes("the agent's check found a problem")) { request.reason += note; await this.save(); }
+    return `${node.id} did not pass the check; it waits for the researcher with your verdict. Continue with next.`;
+  }
+
+  /**
+   * The plan whose proof needs an independent check now, and what changed since it was written or
+   * last checked. With "verify each proof", a proof counts as checked only against the current
+   * statements of its dependencies and definitions. With no separate check, a proof is checked only
+   * when something it rests on changed and auto mode would otherwise approve it. Never when the
+   * researcher checks every proof, or for a proof no plan of the loop produced.
+   */
+  private async proofToCheck(assetId: string, raw: string): Promise<{ planId: string; changed: string[] } | undefined> {
+    const { verifyProofs } = (await this.loopSettings()).rigor;
+    if (verifyProofs === 'researcher') return undefined;
     const plans = await this.vouchingPlans(assetId, raw);
-    return plans.some((plan) => plan.data.verified_proof_digest === proofDigest(raw)) ? undefined : plans[0]?.id;
+    if (!plans.length) return undefined;
+    let data: Record<string, any>;
+    try { data = parseMarkdown(raw).data; } catch { return undefined; }
+    const proof = proofDigest(raw);
+    const deps = await this.dependencyDigests(data);
+    const current = (plan: AssetInfo) => !deps || sameDigests(plan.data.dependency_digests, deps);
+    if (plans.some((plan) => current(plan) && (verifyProofs !== 'agent' || plan.data.verified_proof_digest === proof))) return undefined;
+    const plan = plans.find((item) => item.data.verified_proof_digest === proof) ?? plans[0];
+    const changed = deps ? changedDigests(plan.data.dependency_digests, deps) : [];
+    if (verifyProofs === 'agent') return { planId: plan.id, changed };
+    return changed.length && await this.agentMayRecheck() ? { planId: plan.id, changed } : undefined;
+  }
+
+  /** Auto mode covers proofs and the researcher does not check every proof: an agent's re-check may stand in for them when something a proof rests on changed. */
+  private async agentMayRecheck(): Promise<boolean> {
+    const settings = await this.loopSettings();
+    const policy = settings.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : settings.autoApprove;
+    return policy.enabled && policy.proofs && settings.rigor.verifyProofs !== 'researcher';
+  }
+
+  /** A result marked for re-check whose proof is vouched for against its current dependencies, none of which still waits for its own re-check. */
+  private async recheckSettled(assetId: string, raw: string): Promise<boolean> {
+    let parsed: matter.GrayMatterFile<string>;
+    try { parsed = parseMarkdown(raw); } catch { return false; }
+    if (await this.heldDependency(parsed.data)) return false;
+    return (await this.proofIsVouched(assetId, raw, parsed)) || (await this.constructionIsVouched(assetId, raw, parsed));
+  }
+
+  /** A result this one depends on is still held from auto mode (reverted or marked for re-check, and not settled again). */
+  private async heldDependency(data: Record<string, any>): Promise<boolean> {
+    const holds = await this.holds();
+    return (Array.isArray(data.depends_on) ? data.depends_on as unknown[] : []).some((dep) => Boolean(holds[`asset:${String(dep)}`]));
+  }
+
+  private async clearRecheckByAgent(id: string, kind: 'asset' | 'definition' = 'asset'): Promise<void> {
+    await this.clearHold(kind, id);
+    await this.event('recheck_cleared', { id, by: 'agent' });
+  }
+
+  /** Keep a plan's earlier verdict under another heading before a re-check writes a new one. */
+  private async setAsideVerdict(planId: string): Promise<void> {
+    const file = `${this.paths.plans}/${planId}.md`;
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw || !/^## Verdict[ \t]*$/m.test(raw)) return;
+    await this.writeOwned(file, raw.replace(/^## Verdict[ \t]*$/gm, '## Earlier verdict'));
+  }
+
+  /**
+   * A re-check found that the proof no longer holds after something it rests on changed. That is no
+   * failed approach: the plan is abandoned, the proof leaves the asset (an approved one goes back to
+   * draft and stays held from auto mode), and the loop plans the result anew.
+   */
+  private async rejectStaleProof(assetId: string, planId: string, changed: string[]): Promise<string> {
+    const planFile = `${this.paths.plans}/${planId}.md`;
+    const plan = parseMarkdown(await this.files.readFile(planFile));
+    plan.data.status = 'abandoned';
+    delete plan.data.verified_proof_digest;
+    await this.writeOwned(planFile, stringifyMarkdown(`${plan.content.trimEnd()}\n\n## Failure\n\nAfter ${changed.join(', ')} changed, the independent re-check found the proof no longer holds; ## Verdict names the step. Not counted as a failed approach.\n`, plan.data));
+    const assetFile = `${this.paths.assets}/${assetId}.md`;
+    const asset = parseMarkdown(await this.files.readFile(assetFile));
+    const wasApproved = asset.data.status === 'approved';
+    if (wasApproved) asset.data.status = 'draft';
+    const body = asset.content.replace(/^## Proof[ \t]*\r?\n[\s\S]*?(?=^## |^<!-- research-assistant:|(?![\s\S]))/m, '').trimEnd() + '\n';
+    await this.writeOwned(assetFile, stringifyMarkdown(body, asset.data));
+    if (wasApproved) {
+      const approvals = await this.approvals();
+      approvals.records = approvals.records.filter((record) => !(record.kind === 'asset' && record.target === assetId));
+      await this.writeApprovals(approvals);
+    }
+    await this.clearHold('asset', assetId);
+    await this.addHold('asset', assetId, 'dependency_changed');
+    await this.event('recheck_rejected', { assetId, planId, changed });
+    return `After ${changed.join(', ')} changed, the proof of ${assetId} no longer holds (## Verdict in ${planId}); it ${wasApproved ? 'goes back to draft and ' : ''}will be planned anew. This is not counted as a failed approach. Continue with next.`;
   }
 
   /** Independent verification found a gap: the plan fails, pointing at its verdict, and the proof leaves the asset. */
@@ -1722,12 +1891,43 @@ export class ResearchLoopCore {
     return finish(`${what} (${failures}/${limit}). Next: a different plan.`, 'plan', { planId: await this.pendingPlan(assetId) });
   }
 
+  /**
+   * The plan stage found no genuinely new approach. Nothing was executed, so no attempt is spent and
+   * no failed plan is recorded: the result is stuck now. In autonomous mode the agent decides itself
+   * (a new direction with budget allocate, or set it aside); a second "none" right after its own
+   * direction, before any plan under it was tried, sets the result aside. Otherwise the researcher is
+   * asked for a direction, as after the failed-plan limit.
+   */
+  private async noNewPlan(files: { added: string[] }, summary: string, finish: Finish, autonomous: boolean): Promise<{ stage: LoopStage; message: string }> {
+    const assetId = this.require().current.assetId!;
+    if (!summary.trim()) throw new Error('Say in --summary why no new approach is in sight: what the failed plans show.');
+    const written = files.added.filter((file) => path.posix.dirname(file) === this.paths.plans);
+    if (written.length) throw new Error(`You wrote ${written.join(', ')}: report complete --plan <id> to execute it, or remove it and report none.`);
+    await this.event('no_new_plan', { assetId });
+    if (autonomous) {
+      const direction = latestDirection(await this.decisions(), assetId);
+      if (direction?.reason === 'autonomous' && !(await this.failuresSinceDirection(assetId))) {
+        await this.park(assetId, 'agent_gave_up', summary.trim());
+        return finish(`No plan came from your own direction for ${assetId}; it is set aside with your note. Continue with next.`, 'select', { assetId: undefined, planId: undefined });
+      }
+      await finish(`No new approach for ${assetId}.`, 'plan', { planId: undefined });
+      return { stage: 'plan', message: await this.decideStuck(assetId, `No new approach is in sight for ${assetId}: ${summary.trim()}`) };
+    }
+    await finish(`No new approach for ${assetId}.`, 'plan', { planId: undefined });
+    await this.askQuestion('blocked', `No new approach is in sight for ${assetId}: ${summary.trim()} Give a new direction, or skip to set it aside.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
+    return { stage: 'plan', message: `No new approach for ${assetId}. Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.` };
+  }
+
   private async pendingPlan(assetId: string): Promise<string | undefined> {
     return (await this.plans()).find((plan) => plan.data.type === 'plan' && plan.data.target_asset === assetId && plan.data.status === 'pending')?.id;
   }
 
   /** Select the next stage; auto approvals granted on the way are followed by a fresh selection over the updated files. */
   private async computeSelection(): Promise<Selection> {
+    return this.withNodeCheck(await this.selectAndApprove());
+  }
+
+  private async selectAndApprove(): Promise<Selection> {
     let selection = await this.selectOnce();
     for (let pass = 0; pass < MAX_AUTO_PASSES; pass++) {
       if (!(await this.autoApproveQueued()).length) return selection;
@@ -1735,6 +1935,13 @@ export class ResearchLoopCore {
     }
     await this.event('auto_pass_limit', { stage: selection.stage });
     return selection;
+  }
+
+  /** A queued definition or citation that auto mode would approve once checked goes first: proof work may rest on it. */
+  private async withNodeCheck(selection: Selection): Promise<Selection> {
+    if (!['plan', 'search', 'conjecture', 'waiting'].includes(selection.stage)) return selection;
+    const node = await this.nodeToCheck();
+    return node ? { stage: 'verify_node', node } : selection;
   }
 
   private async selectOnce(): Promise<Selection> {
@@ -1797,11 +2004,22 @@ export class ResearchLoopCore {
     const checks = await this.checks();
     const decisions = await this.decisions();
     const settled = new Set<string>();
-    let candidate: { stage: 'plan'; assetId: string } | { stage: 'search'; assetId: string; mode: SearchMode } | { stage: 'verify_proof'; assetId: string; planId: string } | undefined;
+    let candidate: { stage: 'plan'; assetId: string } | { stage: 'search'; assetId: string; mode: SearchMode } | { stage: 'verify_proof'; assetId: string; planId: string; recheck?: string[] } | undefined;
+    const flags = await this.recheckFlags();
+    const agentRechecks = await this.agentMayRecheck();
     for (const id of order) {
       const asset = assets.get(id)!;
       const verified = asset.data.status === 'approved' && isApproved(approvals, 'asset', id, asset.raw);
-      if (verified) { settled.add(id); continue; }
+      if (verified) {
+        settled.add(id);
+        // Marked for re-check (something it rests on changed) while auto mode may let the agent's re-check stand in for the researcher.
+        if (flags[id] && agentRechecks) {
+          const check = await this.proofToCheck(id, asset.raw);
+          if (check) { if (!candidate) candidate = { stage: 'verify_proof', assetId: id, planId: check.planId, recheck: check.changed.length ? check.changed : [flags[id]] }; }
+          else if (await this.recheckSettled(id, asset.raw)) await this.clearRecheckByAgent(id);
+        }
+        continue;
+      }
       if (asset.data.status === 'approved') {
         // Approved without a matching record: the researcher must re-approve.
         const parsed = parseMarkdown(asset.raw); parsed.data.status = 'draft';
@@ -1837,9 +2055,10 @@ export class ResearchLoopCore {
       }
       if (state.parked[id]) continue;
       if (proofText(asset.body) && !state.progress[id]?.changesRequested) {
-        // A proof the loop wrote is checked independently before it goes to approval, when the researcher asked for that.
-        const unverified = rigor.verifyProofs === 'agent' ? await this.unverifiedPlan(id, asset.raw) : undefined;
-        if (unverified) { if (!candidate) candidate = { stage: 'verify_proof', assetId: id, planId: unverified }; continue; }
+        // A proof the loop wrote is checked independently before it goes to approval, when the researcher asked for that,
+        // and again when something it rests on changed since.
+        const check = await this.proofToCheck(id, asset.raw);
+        if (check) { if (!candidate) candidate = { stage: 'verify_proof', assetId: id, planId: check.planId, ...(check.changed.length ? { recheck: check.changed } : {}) }; continue; }
         await this.enqueueApproval('asset', id, 'Proof is written; review and approve or request changes.');
         settled.add(id); continue;
       }
@@ -2239,9 +2458,13 @@ export class ResearchLoopCore {
     if (perAsset && state.current.assetId) {
       const file = `${this.paths.assets}/${state.current.assetId}.md`;
       const data = (await this.files.exists(file)) ? parseMarkdown(await this.files.readFile(file)).data : undefined;
-      if (!data || data.status !== 'draft' || state.parked[state.current.assetId]) recompute = true;
+      // A re-check of an approved result marked for re-check runs on an approved asset.
+      const recheckingApproved = state.stage === 'verify_proof' && Boolean(state.current.recheck?.length) && data?.status === 'approved';
+      if (!data || (data.status !== 'draft' && !recheckingApproved) || state.parked[state.current.assetId]) recompute = true;
       if (data?.type === CONJECTURE_TYPE && !SEARCH_STAGES.has(state.stage)) recompute = true;
     }
+    // A node check whose target no longer waits for auto mode (approved meanwhile, changed, or held for the researcher) is dropped.
+    if (state.stage === 'verify_node' && !(state.current.node && await this.needsNodeCheck(state.current.node))) recompute = true;
     if (state.stage === 'conjecture') {
       const idea = state.current.ideaId ? await this.files.readFile(`${this.paths.ideas}/${state.current.ideaId}.md`).catch(() => '') : '';
       let draft = false;
@@ -2254,8 +2477,14 @@ export class ResearchLoopCore {
       const selection = await this.computeSelection();
       const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined, ideaId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined, ideaId: undefined };
       if (selection.stage === 'conjecture') patch.ideaId = selection.ideaId;
+      if (selection.stage === 'verify_node') { patch.node = selection.node; patch.assetId = selection.node.id; }
       if (selection.stage === 'plan' && 'assetId' in selection) patch.planId = await this.pendingPlan(selection.assetId);
-      if (selection.stage === 'verify_proof') patch.planId = selection.planId;
+      if (selection.stage === 'verify_proof') {
+        patch.planId = selection.planId;
+        patch.recheck = selection.recheck?.length ? selection.recheck : undefined;
+        // A re-check writes a fresh verdict: the earlier one stays in the plan under another heading, so it cannot pass for the new one.
+        if (selection.recheck?.length) await this.setAsideVerdict(selection.planId);
+      }
       if (selection.stage === 'search') {
         const search = await this.nextSearchRound(selection.assetId, selection.mode);
         if (!search) {
@@ -2336,6 +2565,8 @@ export class ResearchLoopCore {
       missing: state.scaffoldBrief?.missing, incomplete: state.scaffoldBrief?.incomplete, researcherInput: state.researcherInput?.text,
       changesRequested: assetId ? state.progress[assetId]?.changesRequested : undefined,
       ...(assetId ? directionFocus(latestDirection(await this.decisions(), assetId)) : {}),
+      ...(state.stage === 'verify_proof' && state.current.recheck?.length ? { recheck: state.current.recheck } : {}),
+      ...(state.stage === 'verify_node' && state.current.node ? { node: state.current.node, assetId: undefined } : {}),
     };
     const search = assetId && (state.stage === 'search' || state.stage === 'search_summary') ? state.current.search : undefined;
     const writeManifest = (rendered: RenderedContext, manifest: ContextManifest, extra: Record<string, unknown> = {}) => this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id), ...extra }, null, 2) + '\n');
@@ -2510,12 +2741,20 @@ export class ResearchLoopCore {
         return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
         const requested = state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined;
-        return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `First check the pack's library analogues: a known result proving a version of this statement can be adapted (list it under adapts) instead of proving from scratch. Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with an adapted result also ## Adapted from; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID).`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report('complete --plan <id>|question')}`;
+        return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `First check the pack's library analogues: a known result proving a version of this statement can be adapted (list it under adapts) instead of proving from scratch. Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with an adapted result also ## Adapted from; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID). If no genuinely new approach is in sight, write no plan and report none --summary "<what the failed plans show and why nothing new is in sight>": it spends no attempt, and the result counts as stuck.`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report(state.current.planId ? 'complete --plan <id>|question' : 'complete --plan <id>|none|question')}`;
       }
       case 'execute':
         return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. A result the plan adapts comes with its proof in the pack: follow it and check each changed step, rather than proving the step anew. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft), then set the plan status succeeded and add ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
       case 'verify_proof':
-        return `Stage verify_proof for asset ${asset} (plan ${state.current.planId}). Use the verify-proof skill. Check the ## Proof in the pack against the statement, step by step, as a referee would: every step follows, every hypothesis of a cited result holds, nothing is assumed that the statement does not give. Do not read the plan's reasoning. Add ## Verdict to ${this.paths.plans}/${state.current.planId}.md: first line confirmed or rejected; for rejected, name the first step that fails and why. Change nothing else; never edit ${asset}.${report('confirmed|rejected|question')}`;
+        return `Stage verify_proof for asset ${asset} (plan ${state.current.planId}).${state.current.recheck?.length ? ` This is a re-check: ${state.current.recheck.join(', ')} changed since the proof was written or last checked; check every step that uses them against their current text (the pack notes it).` : ''} Use the verify-proof skill. Check the ## Proof in the pack against the statement, step by step, as a referee would: every step follows, every hypothesis of a cited result holds, nothing is assumed that the statement does not give. Do not read the plan's reasoning. Add ## Verdict to ${this.paths.plans}/${state.current.planId}.md: first line confirmed or rejected; for rejected, name the first step that fails and why. Change nothing else; never edit ${asset}.${report('confirmed|rejected|question')}`;
+      case 'verify_node': {
+        const node = state.current.node;
+        if (!node) return `Run: ${LOOP_COMMAND} next`;
+        const what = node.mode === 'definition'
+          ? `the definition ${node.id}: it is well formed (every symbol and term it uses is defined, by itself or by a definition it lists in depends_on, and nothing is circular), it says what the results that use it need, and it does not make a goal trivial, vacuous, or a different problem (an empty class, a condition that already contains the conclusion, a weaker notion than the goals mean)${'; when it cites a source, it matches the source'}`
+          : `the result ${node.id}, taken from a source: read the cited location (${LOOP_COMMAND} show <paper_slug> --section ...; a library collection names its paper) and check that the statement matches it exactly: every hypothesis kept, quantifiers and their order, constants, the theorem number or page`;
+        return `Stage verify_node for ${node.id}. Auto mode approves it only after an independent check; the researcher is not asked. Use the verify-node skill and check ${what}. Read only the pack and what you request with show. Change no file: your verdict is the report. Report confirmed --summary "<what you checked>" or rejected --summary "<the first problem: what is wrong and what would fix it>"; question only when the source cannot be read.${report('confirmed|rejected|question')}`;
+      }
       case 'conjecture': {
         const idea = state.current.ideaId ?? '(none)';
         return `Stage conjecture for the idea ${idea}. The pack holds the idea, the results it relates to, the goals, and the existing conjectures. Make it precise as one new conjecture in ${this.paths.assets}/<id>.md: type conjecture, title, status draft, source.kind original, depends_on, uses_definitions, serves (the results it would unblock or strengthen: an open goal, a set-aside result, or a proved one), a precise statement, and ## Motivation (why it is believed: evidence, special cases; and what it would give). Use existing definitions (search the library first, ${LOOP_COMMAND} library search <words>) or draft new ones in ${this.paths.definitions}/. Do not search, plan, or prove it: the loop searches it for a counterexample next, and the researcher agrees on its statement. If it cannot be stated precisely, or it is known, false, or trivial, write nothing and report none with the reason; the idea stays for the researcher with your note. Run research-maintenance validate and links.${report('complete --asset <id>|none|question')}`;
@@ -2766,6 +3005,7 @@ export class ResearchLoopCore {
       return { added, modified };
     };
     if (report.outcome === 'question') {
+      // Being stuck without a new approach is report none at the plan stage; a question there is a genuine one, unless it names the failures.
       const kind: QuestionKind = stage === 'plan' && report.question?.toLowerCase().includes('fail') ? 'blocked' : 'discussion';
       if (run) return { stage: this.require().stage, message: await this.decideAlone(kind, report.question || report.summary) };
       await this.askQuestion(kind, report.question || report.summary);
@@ -2950,7 +3190,8 @@ export class ResearchLoopCore {
         return finish(`Candidate rejected. Next: plan for ${assetId}.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
       }
       case 'plan': {
-        if (report.outcome !== 'complete') throw new Error('plan outcome must be complete --plan <id> or question.');
+        if (report.outcome === 'none') return this.noNewPlan(await validated(), report.summary, finish, Boolean(run));
+        if (report.outcome !== 'complete') throw new Error('plan outcome must be complete --plan <id>, none, or question.');
         const { added } = await validated();
         const assetId = state.current.assetId!;
         const newPlans = added.filter((file) => path.posix.dirname(file) === this.paths.plans);
@@ -3008,8 +3249,18 @@ export class ResearchLoopCore {
           if (!/^confirmed\b/i.test(verdict)) throw new Error(`## Verdict of ${planId} must begin with confirmed.`);
           const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
           plan.data.verified_proof_digest = proofDigest(assetRaw);
+          // The check read the current statements of the dependencies and definitions: it vouches for the proof against those.
+          const assetData = parseMarkdown(assetRaw).data;
+          const checkedAgainst = await this.dependencyDigests(assetData);
+          if (checkedAgainst) plan.data.dependency_digests = checkedAgainst;
           await this.writeOwned(planFile, stringifyMarkdown(plan.content, plan.data));
-          await this.event('proof_verified', { assetId, planId });
+          const recheck = state.current.recheck;
+          await this.event('proof_verified', { assetId, planId, ...(recheck?.length ? { recheck } : {}) });
+          if (recheck?.length && assetData.status === 'approved' && isApproved((await this.approvals()).records, 'asset', assetId, assetRaw)) {
+            // An approved result marked for re-check: it stays approved, and the mark goes.
+            await this.clearRecheckByAgent(assetId);
+            return finish(`The proof of ${assetId} still holds after ${recheck.join(', ')} changed (independent re-check); its re-check mark is cleared. Continue with next.`, 'select', { assetId: undefined, planId: undefined });
+          }
           const rewrite = plan.data.purpose === 'rewrite';
           if (rewrite) await this.finishRewrite(assetId, plan.content, plan.data, assetRaw);
           await this.enqueueApproval('asset', assetId, rewrite ? 'Proof reworded at your request in the teaching chat, verified independently.' : `Proof from ${planId}, verified independently.`);
@@ -3020,8 +3271,17 @@ export class ResearchLoopCore {
         if (!/^rejected\b/i.test(verdict)) throw new Error(`## Verdict of ${planId} must begin with rejected.`);
         // A rejected rewording costs nothing: the verified proof it would have replaced comes back.
         if (plan.data.purpose === 'rewrite') return finish(await this.rejectRewrite(assetId, planId), 'select', { assetId: undefined, planId: undefined });
+        if (state.current.recheck?.length) return finish(await this.rejectStaleProof(assetId, planId, state.current.recheck), 'select', { assetId: undefined, planId: undefined });
         await this.rejectProof(assetId, planId);
         return this.afterFailedPlan(assetId, planId, `Independent verification rejected the proof from ${planId}`, finish, Boolean(run));
+      }
+      case 'verify_node': {
+        await validated();
+        const node = state.current.node;
+        if (!node) throw new Error(`No node check is in progress. Run: ${LOOP_COMMAND} next`);
+        if (report.outcome !== 'confirmed' && report.outcome !== 'rejected') throw new Error('verify_node outcome must be confirmed, rejected, or question.');
+        if (!report.summary.trim()) throw new Error('Give your verdict in --summary: what you checked, or the first problem and what would fix it.');
+        return finish(await this.recordNodeCheck(node, report.outcome, report.summary.trim()), 'select', { assetId: undefined, node: undefined });
       }
       default:
         throw new Error(`Stage ${stage} takes no report. Run: ${LOOP_COMMAND} next`);
@@ -3258,9 +3518,16 @@ export class ResearchLoopCore {
     await this.event('autonomy_handover', { reason, spent: run.spent });
     const ranked = (await this.rankedConjectures()).filter((item) => item.agreed || item.falsified);
     const conjectures = ranked.length ? `\n\nConjectures worth taking up next, best first:\n${describeConjectures(ranked, CONJECTURES_LISTED)}` : '';
-    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent reassessed what the goals still need ${run.revisions} time(s), keeping yours` : ''}${run.explored ? `; it took up ${run.explored} conjecture(s) as goals of its own` : ''}.${conjectures}`);
+    const checked = agentCheckedSince((await this.recentEvents(Number.MAX_SAFE_INTEGER)).filter((event) => String(event.at ?? '') >= run.startedAt));
+    const checkedLines = [
+      checked.definitions.length ? `- Definitions: ${checked.definitions.join(', ')}` : '',
+      checked.citations.length ? `- Results taken from a source (checked against it): ${checked.citations.join(', ')}` : '',
+      checked.rechecked.length ? `- Proofs re-checked after something they rest on changed: ${checked.rechecked.join(', ')}` : '',
+    ].filter(Boolean);
+    const review = checkedLines.length ? `\n\nApproved on an independent agent's check alone; worth your review:\n${checkedLines.join('\n')}` : '';
+    await this.writeHandoff(`${text} ${run.spent} attempt(s) spent${run.revisions ? `; the agent reassessed what the goals still need ${run.revisions} time(s), keeping yours` : ''}${run.explored ? `; it took up ${run.explored} conjecture(s) as goals of its own` : ''}.${review}${conjectures}`);
     await this.pause(text);
-    return `${text} The loop is handed back to the researcher: stop working now and tell them briefly what was proved, what was set aside, and what waits for their review${ranked.length ? `, and recommend the conjectures worth taking up next (${ranked.slice(0, 3).map((item) => item.id).join(', ')}; ${LOOP_COMMAND} conjecture list ranks them)` : ''}.`;
+    return `${text} The loop is handed back to the researcher: stop working now and tell them briefly what was proved, what was set aside, and what waits for their review${checkedLines.length ? ', including what was approved on an independent agent\'s check alone (the handoff lists it)' : ''}${ranked.length ? `, and recommend the conjectures worth taking up next (${ranked.slice(0, 3).map((item) => item.id).join(', ')}; ${LOOP_COMMAND} conjecture list ranks them)` : ''}.`;
   }
 
   autonomyNote(run: NonNullable<LoopState['autonomy']>): string {
@@ -3427,6 +3694,7 @@ export class ResearchLoopCore {
       if (event.type === 'autonomy_decided') decided += 1;
     }
     const handover = events.filter((event) => event.type === 'autonomy_handover').pop();
+    const agentChecked = agentCheckedSince(events);
     return {
       active: state.status === 'running' && !run.handedOverAt, startedAt: run.startedAt, handedOverAt: run.handedOverAt,
       reason: run.handedOverAt && typeof handover?.reason === 'string' ? handover.reason : undefined,
@@ -3435,6 +3703,7 @@ export class ResearchLoopCore {
       revisions: run.revisions ?? 0, revisionLimit: settings.autonomyRevisions,
       spending: [...spending].map(([id, attempts]) => ({ id, attempts })).sort((a, b) => b.attempts - a.attempts),
       proved, setAside, addedGoals, decided,
+      ...(agentChecked.definitions.length || agentChecked.citations.length || agentChecked.rechecked.length ? { agentChecked } : {}),
     };
   }
 
@@ -3585,6 +3854,28 @@ export class ResearchLoopCore {
     for (const answer of this.state.answers) if (!answer.consumed) { answer.consumed = true; changed = true; }
     if (changed) await this.save();
   }
+}
+
+/** What was approved on an agent's check alone, from a run's events: confirmed node checks, and proofs re-checked after a dependency changed. */
+function agentCheckedSince(events: Array<Record<string, unknown>>): AgentCheckedView {
+  const view: AgentCheckedView = { definitions: [], citations: [], rechecked: [] };
+  const add = (list: string[], id: unknown) => { if (typeof id === 'string' && id && !list.includes(id)) list.push(id); };
+  for (const event of events) {
+    if (event.type === 'node_checked' && event.verdict === 'confirmed') add(event.mode === 'definition' ? view.definitions : view.citations, event.assetId);
+    if (event.type === 'proof_verified' && Array.isArray(event.recheck) && event.recheck.length) add(view.rechecked, event.assetId);
+  }
+  return view;
+}
+
+/** Holds an agent's re-check may lift: something the result rests on changed. A change to the result itself, or an approval without a record, stays with the researcher. */
+function isLiftableHold(reason: string): boolean {
+  return reason === 'dependency_changed' || reason.startsWith('recheck:');
+}
+
+/** The dependencies whose statement digest differs from the one stamped (added, removed, or changed). */
+function changedDigests(stamped: unknown, current: Record<string, string>): string[] {
+  const old = stamped && typeof stamped === 'object' && !Array.isArray(stamped) ? stamped as Record<string, unknown> : {};
+  return [...new Set([...Object.keys(old), ...Object.keys(current)])].filter((id) => old[id] !== current[id]).sort();
 }
 
 function sameDigests(stamped: unknown, current: Record<string, string>): boolean {

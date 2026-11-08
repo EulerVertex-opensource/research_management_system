@@ -9,7 +9,8 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 export interface Provenance { performed_by: string; created_at: string; base_commit?: string; extension_version?: string }
 
 /** search_request: the researcher asked for more counterexample search on an asset, `rounds` of it. */
-export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request';
+/** `node_check`: an agent's independent check of a definition or citation before auto mode approves it; `reason` is the verdict, `digest` the node version checked. */
+export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check';
 
 export interface DecisionInfo {
   id: string;
@@ -51,7 +52,7 @@ export function decisionId(kind: DecisionKind, target: string, provenance: Prove
 export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number }
 
 export function decisionMarkdown(kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: DecisionExtra = {}): string {
-  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested' };
+  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check' };
   return stringifyMarkdown(`\n${text.trim() || '(no text)'}\n`, clean({
     type: 'decision', title: `${titles[kind]}: ${target}`, kind, target, reason: extra.reason,
     failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound, ...provenance,

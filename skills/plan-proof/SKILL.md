@@ -22,6 +22,7 @@ A draft (unchecked) library result may be adapted, since the plan rechecks its a
   - `## Assumed definitions`: draft definitions and unproved dependencies relied on;
   - with `adapts`, `## Adapted from`: per adapted ID, the hypotheses that transfer and the steps that change;
   - with failed plans present, `## Difference from failed plans`: one bullet per failed plan ID naming the new information or route.
+- No genuinely new approach in sight (every route you see repeats a failed plan, or needs a step nothing available supplies): write no plan and report `none --summary "<what the failed plans show and why nothing new is in sight>"`. Never write a filler plan just to have one: executing it spends an attempt and records a failure that says nothing. `none` spends no attempt; the result counts as stuck, and the loop asks the researcher for a direction (in autonomous mode, you decide).
 - If the loop reports the failed-plan limit is reached since the last researcher direction, do not write another plan; report `question`.
 - Unclear statement or missing definition: report `question --question "..."`.
 

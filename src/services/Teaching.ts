@@ -105,8 +105,18 @@ export class Teaching {
       const approved = node.data.status === 'approved' && isApproved(approvals, 'asset', node.id, node.raw);
       const proof = sectionContent(node.body, 'Proof').trim() ? proofDigest(node.raw) : undefined;
       const statement = statementDigest(node.raw);
+      // A check made against an older statement of a dependency or definition no longer vouches for the proof.
+      const checkedAgainstCurrent = (stamped: unknown) => {
+        if (!stamped || typeof stamped !== 'object' || Array.isArray(stamped)) return true;
+        const current: Record<string, string> = {};
+        for (const id of list(node.data.depends_on)) { const dep = assets.get(id); if (dep) current[id] = statementDigest(dep.raw); }
+        for (const id of list(node.data.uses_definitions)) { const dep = definitions.get(id); if (dep) current[id] = statementDigest(dep.raw); }
+        const entries = Object.entries(stamped as Record<string, unknown>);
+        return entries.length === Object.keys(current).length && entries.every(([id, digest]) => current[id] === digest);
+      };
       const checkedBy = proof ? plans.find((plan) => plan.data.target_asset === node.id && plan.data.status === 'succeeded'
-        && plan.data.proof_digest === proof && plan.data.statement_digest === statement && plan.data.verified_proof_digest === proof) : undefined;
+        && plan.data.proof_digest === proof && plan.data.statement_digest === statement && plan.data.verified_proof_digest === proof
+        && checkedAgainstCurrent(plan.data.dependency_digests)) : undefined;
       if (!approved && !checkedBy) continue;
       const confirmed = checkedBy ? reports.filter((event) => event.stage === 'verify_proof' && event.outcome === 'confirmed' && event.assetId === node.id).pop()?.at : undefined;
       inputs.push({

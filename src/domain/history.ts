@@ -34,6 +34,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
       if (stage === 'plan') return entry(`Started planning a proof of ${name}.`);
       if (stage === 'execute') return entry(`Started proving ${name}.`);
       if (stage === 'verify_proof') return entry(`Started checking the proof of ${name}.`);
+      if (stage === 'verify_node') return entry(`Started checking ${name} before it is approved.`);
       if (stage === 'search') return entry(`Started a search round on ${name}.`);
       if (stage === 'verify_counterexample') return entry(`Started checking a possible counterexample to ${name}.`);
       if (stage === 'verify_construction') return entry(`Started checking a candidate for ${name}.`);
@@ -67,7 +68,9 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'refuted': return { text: `${name} is disproved by ${title(text(event.exampleId))}.`, tone: 'error', target: asset };
     case 'counterexample_rejected': return { text: `You rejected the possible counterexample ${title(text(event.exampleId))}.`, tone: 'info' };
     case 'construction_found': return entry(`Found a candidate for ${name}.`, 'success');
-    case 'proof_verified': return entry(`An independent check confirmed the proof of ${name}.`, 'success');
+    case 'proof_verified': return entry(Array.isArray(event.recheck) && event.recheck.length ? `An independent re-check confirmed the proof of ${name} still holds after ${event.recheck.map((id) => title(String(id))).join(', ')} changed.` : `An independent check confirmed the proof of ${name}.`, 'success');
+    case 'node_checked': return entry(text(event.verdict) === 'confirmed' ? `An independent check confirmed ${name}${text(event.mode) === 'citation' ? ' against its source' : ''}.` : `An independent check found a problem with ${name}; it waits for your review.`, text(event.verdict) === 'confirmed' ? 'success' : 'warning');
+    case 'recheck_rejected': return entry(`After ${Array.isArray(event.changed) ? event.changed.map((id) => title(String(id))).join(', ') : 'a dependency'} changed, an independent re-check found a gap in the proof of ${name}; the agent will plan it anew.`, 'warning');
     case 'proof_rejected': return entry(`An independent check found a gap in the proof of ${name}; the agent will try another approach.`, 'warning');
     case 'search_round': return entry(`Search round ${Number(event.round) || '?'} on ${name}: ${plural(Number(event.candidates) || 0, 'candidate')}.`);
     case 'search_finished': return entry(`The search on ${name} finished${event.rounds ? ` after ${plural(Number(event.rounds), 'round')}` : ''}.`);
@@ -82,7 +85,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'autonomy_revision': return entry(`With ${plural(Array.isArray(event.setAside) ? event.setAside.length : 0, 'set-aside result')} in the way, the agent is reassessing what the goals still need; yours stay.`, 'warning');
     case 'autonomy_handover': return entry(`The autonomous run ended: ${text(event.reason)}. Over to you.`, 'warning');
     case 'recheck_flagged': { const id = text(event.id); return { text: `${title(id)} needs a re-check: ${title(text(event.because))} changed.`, tone: 'warning', target: id }; }
-    case 'recheck_cleared': { const id = text(event.id); return { text: `You confirmed ${title(id)} still holds.`, tone: 'success', target: id }; }
+    case 'recheck_cleared': { const id = text(event.id); return { text: text(event.by) === 'agent' ? `${title(id)} was re-checked independently and approved again automatically.` : `You confirmed ${title(id)} still holds.`, tone: 'success', target: id }; }
     case 'auto_mode_reset': return entry('Automatic approval was switched on outside the dashboard, so it was turned off.', 'warning');
     case 'plans_abandoned': return entry(`Dropped ${plural(Array.isArray(event.plans) ? event.plans.length : 0, 'proof plan')} for ${name}.`);
     case 'idea_saved': {

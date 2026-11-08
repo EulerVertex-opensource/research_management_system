@@ -71,7 +71,7 @@ Use the library when the researcher asks to import known results, or names a col
 
   Keep one paper per collection; results from another paper go in that paper's collection.
 
-The researcher checks each extracted result against its source in VS Code (Library: a card per collection, then *Check N results…*, one result at a time beside its location); the research loop then uses it as known and never re-proves it. There is no bulk acceptance for extracted results: a dropped hypothesis or a wrong theorem number would become a known result. After a batch, list the new IDs per collection with their locations so the checking is quick. Removing a whole collection is the researcher's action in the Library; its paper stays indexed.
+The researcher checks each extracted result against its source in VS Code (Library: a card per collection, then *Check N results…*, one result at a time beside its location); the research loop then uses it as known and never re-proves it. There is no bulk acceptance for extracted results: a dropped hypothesis or a wrong theorem number would become a known result. When the researcher turned on auto mode for citations (or autonomous mode), the loop's `verify_node` stage stands in for that check: an independent agent compares each result with its cited location before it is approved, and one that fails waits for the researcher. After a batch, list the new IDs per collection with their locations so the checking is quick. Removing a whole collection is the researcher's action in the Library; its paper stays indexed.
 
 ## Packages
 
