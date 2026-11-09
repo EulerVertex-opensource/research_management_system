@@ -85,6 +85,40 @@ test('plan pack keeps only Goal and Failure of failed plans plus related ideas a
   assert.match(pack.text, /requested changes: Use induction/);
 });
 
+test('plan pack offers ideas from similar results, dead ends, and observations to promote, without any link to the target', () => {
+  const result = (title, definition, statement, status = 'draft') => node({ type: 'theorem', title, status, source: { kind: 'self_proved' }, depends_on: [], uses_definitions: [definition] }, `\n## Statement\n\n${statement}\n`);
+  const idea = (title, kind, related, body, status = 'draft') => node({ type: 'idea', title, status, idea_kind: kind, related_assets: related }, body);
+  const plan = (target, status, ideas) => node({ type: 'plan', title: `plan for ${target}`, status, target_asset: target, inspired_by: ideas }, `\n## Goal\n\nTarget: [asset](../assets/${target}.md)\n\nGo.\n\n## Plan\n\n1. [ ] Step.\n\n## Verification\n\nDone.\n${status === 'failed' ? '\n## Failure\n\nStuck.\n' : status === 'succeeded' ? '\n## Outcome\n\nProved.\n' : ''}`);
+  const s = sources({
+    assets: { similar_widget: result('Widget colour theorem', 'widget', 'Widgets are colourful.', 'approved'), far_sprocket: result('Sprocket theorem', 'sprocket', 'Sprockets turn.') },
+    ideas: {
+      paint: idea('Paint argument', 'approach', ['similar_widget'], '\nREUSABLE TRICK.\n'),
+      spectral: idea('Spectral trick', 'approach', [], '\nPROVED SIMILAR.\n'),
+      sprocket_idea: idea('Gear count', 'approach', ['far_sprocket'], '\nSPROCKET IDEA.\n'),
+      red: idea('Widgets are never red', 'observation', ['similar_widget'], '\nThey seemed blue.\n\n## Refutation\n\nWIDGETS CAN BE RED.\n', 'refuted'),
+      reflect: idea('Widgets reflect light', 'observation', ['main_theorem'], '\nREFLECTION.\n'),
+      reuse: idea('Compare with gadgets', 'approach', ['main_theorem'], '\nLINKED AND USED.\n'),
+    },
+    plans: { p_similar: plan('similar_widget', 'succeeded', ['spectral', 'reuse']), p_reflect: plan('similar_widget', 'failed', ['reflect']) },
+  });
+  const pack = renderContext(planContext({ stage: 'plan', assetId: 'main_theorem' }, s), s, 'loop show').text;
+  assert.match(pack, /### Ideas from similar results \(not linked to this one\)/);
+  assert.match(pack, /- spectral \(approach\): Spectral trick\. Why: used by p_similar, which proved the similar result similar_widget; used for similar_widget \(succeeded\)\. PROVED SIMILAR\./);
+  assert.match(pack, /- paint \(approach\): Paint argument\. Why: recorded for the similar result similar_widget\. REUSABLE TRICK\./);
+  assert.ok(pack.indexOf('- spectral') < pack.indexOf('- paint'), 'an idea that proved a similar result ranks first');
+  assert.doesNotMatch(pack, /SPROCKET IDEA/);
+  assert.match(pack, /### Dead ends near this result[\s\S]*- red \(observation, refuted\): Widgets are never red\. Why shown: recorded for the similar result similar_widget\. Refutation: WIDGETS CAN BE RED\./);
+  assert.match(pack, /### Linked ideas plans already used\n\n- reflect \(observation\): Widgets reflect light; used for similar_widget \(failed\)\n- reuse \(approach\): Compare with gadgets; used for similar_widget \(succeeded\)/);
+  assert.match(pack, /### Observations to promote before relying on them\n\n- reflect: plans for similar_widget already rely on it\. If this plan needs it too, promote it to a lemma first \(idea promote reflect --id <lemma_id> --statement "\.\.\." --into main_theorem\)/);
+  // Linked open ideas are still in the pack, used or not.
+  assert.match(pack, /LINKED AND USED/);
+  assert.match(pack, /REFLECTION/);
+  // A refuted observation linked to the target reaches a counterexample search too.
+  const linkedRed = sources({ ideas: { red: idea('Widgets are never red', 'observation', ['main_theorem'], '\nThey seemed blue.\n\n## Refutation\n\nWIDGETS CAN BE RED.\n', 'refuted') } });
+  const search = renderContext(planContext({ stage: 'search', assetId: 'main_theorem', search: { mode: 'refute', round: 1, slot: { slot: 1, direction: 'small_cases', label: 'Small.' }, board: '' } }, linkedRed), linkedRed, 'loop show').text;
+  assert.match(search, /### idea red \[Refutation\][\s\S]*WIDGETS CAN BE RED/);
+});
+
 test('over budget, whole low-priority items are dropped and listed; priority 0 always stays', () => {
   const plans = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`attempt_${index}`, failedPlan(`attempt_${index}`).replace('OBSTRUCTION', 'OBSTRUCTION ' + 'x'.repeat(2000))]));
   const s = sources({ plans });

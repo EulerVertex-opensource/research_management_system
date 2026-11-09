@@ -11,7 +11,8 @@ import {
   LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
-import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES } from '../domain/nodeKinds';
+import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES, REUSABLE_IDEA_KINDS, WARNING_SECTION, toIdeaKind } from '../domain/nodeKinds';
+import { ideaUsage, promotionCandidates, triedRecords, usageLine } from '../domain/ideaUsage';
 import { RankedConjecture, describeConjectures, rankConjectures } from '../domain/conjectures';
 import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutoApproveRule, LoopSettings } from '../models/settings';
 import type { AgentCheckedView, AutonomyView } from '../models/graph';
@@ -23,7 +24,7 @@ import {
 import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
 import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
-import { hasSection, sectionContent, statementPart, stripManagedBlocks, verdictOutcome } from '../domain/sections';
+import { appendToSection, hasSection, sectionContent, statementPart, stripManagedBlocks, verdictOutcome } from '../domain/sections';
 import { ProofRevision, REVISIONS_DIR, withProof } from '../domain/revisions';
 import { understandingParts } from '../domain/understanding';
 import { layoutReport } from '../domain/layout';
@@ -1237,8 +1238,9 @@ export class ResearchLoopCore {
     // An idea a round already took up stays tried even after the statement changes: its outcome is on the board instead.
     const { candidates: allCandidates, rounds: allRounds } = await this.searchRecords();
     const everTried = new Set([...allRounds.filter((item) => item.target === assetId).flatMap((item) => item.directions), ...allCandidates.filter((item) => item.target === assetId).map((item) => item.direction ?? '')]);
+    // Tried is per result: a test case tried for another result is still open for this one.
     const ideas = [...(await this.collect(this.paths.ideas)).values()]
-      .filter((idea) => idea.data.idea_kind === 'test_case' && idea.data.status === 'draft' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId) && !everTried.has(idea.id))
+      .filter((idea) => idea.data.idea_kind === 'test_case' && idea.data.status !== 'archived' && Array.isArray(idea.data.related_assets) && idea.data.related_assets.includes(assetId) && !everTried.has(idea.id) && !triedRecords(idea.data).some((record) => record.target === assetId))
       .map((idea) => ({ id: idea.id, title: String(idea.data.title ?? idea.id), origin: typeof idea.data.origin === 'string' ? idea.data.origin : undefined }));
     const slots = assignDirections({ mode, round, width: limits.width, tried: progress.directionsTried, ideas, specialFromRound: settings.specialDirectionsFromRound, nearMiss: progress.nearMisses[0]?.id });
     if (mode === 'refute') return { mode, round, slots, ...(requested ? { requested: true } : {}) };
@@ -1320,11 +1322,11 @@ export class ResearchLoopCore {
     const triedIdeas: TriedIdea[] = [];
     for (const idea of ideas) {
       if (idea.data.idea_kind !== 'test_case') continue;
-      const record = idea.data.tried_in && typeof idea.data.tried_in === 'object' ? idea.data.tried_in as Record<string, unknown> : undefined;
+      const record = triedRecords(idea.data).filter((item) => item.target === assetId).pop();
       const title = String(idea.data.title ?? idea.id);
-      if (record?.target === assetId) {
+      if (record) {
         triedIdeas.push({ id: idea.id, title, round: typeof record.round === 'number' ? record.round : undefined, outcome: String(record.outcome ?? 'tried'), earlier: record.statement_digest !== digest });
-      } else if (!record && related(idea) && progress.directionsTried.includes(idea.id)) {
+      } else if (related(idea) && progress.directionsTried.includes(idea.id)) {
         const written = progress.candidates.filter((item) => item.direction === idea.id);
         triedIdeas.push({ id: idea.id, title, round: written[0]?.round ?? progress.rounds.find((item) => item.directions.includes(idea.id))?.round, outcome: triedOutcome(written, idea.id) });
       }
@@ -1334,7 +1336,11 @@ export class ResearchLoopCore {
     return { triedIdeas, observations };
   }
 
-  /** A round took up test-case ideas as directions: each is resolved with what came of it, so no later round assigns it again and the board shows the outcome. */
+  /**
+   * A round took up test-case ideas as directions: each records what came of it for this result, so
+   * no later round for this result assigns it again and the board shows the outcome. The idea stays
+   * open: a search on another result it relates to still tries it.
+   */
   private async closeTriedIdeas(assetId: string, search: SearchRound, digest: string): Promise<void> {
     const progress = await this.searchProgressFor(assetId);
     for (const slot of search.slots) {
@@ -1342,15 +1348,14 @@ export class ResearchLoopCore {
       const raw = await this.files.readFile(file).catch(() => '');
       if (!raw) continue;
       const parsed = parseMarkdown(raw);
-      if (parsed.data.type !== 'idea' || parsed.data.status !== 'draft') continue;
+      if (parsed.data.type !== 'idea' || parsed.data.status === 'archived') continue;
+      const records = triedRecords(parsed.data);
+      if (records.some((record) => record.target === assetId && record.round === search.round)) continue;
       const written = progress.candidates.filter((item) => item.round === search.round && item.slot === slot.slot);
       const outcome = triedOutcome(written, slot.direction);
-      const resolvedBy = written[0]?.id ?? `search round ${search.round} of ${assetId}`;
-      parsed.data.status = 'resolved';
-      parsed.data.resolved_by = resolvedBy;
-      parsed.data.tried_in = { target: assetId, round: search.round, slot: slot.slot, statement_digest: digest, outcome };
-      await this.writeOwned(file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Resolution\n\nTried in search round ${search.round} for ${assetId} (slot ${slot.slot}): ${outcome}\n`, parsed.data));
-      await this.event('idea_resolved', { ideaId: slot.direction, resolvedBy });
+      parsed.data.tried_in = [...records, { target: assetId, round: search.round, slot: slot.slot, statement_digest: digest, outcome }];
+      await this.writeOwned(file, stringifyMarkdown(appendToSection(parsed.content, 'Tried', `- Search round ${search.round} for ${assetId} (slot ${slot.slot}): ${outcome}`), parsed.data));
+      await this.event('idea_tried', { ideaId: slot.direction, assetId, round: search.round, outcome });
     }
   }
 
@@ -1618,9 +1623,15 @@ export class ResearchLoopCore {
     return ideaId;
   }
 
+  /**
+   * Write a pending plan from an idea. The plan lists the idea in `inspired_by`; the idea itself is
+   * not changed, so it stays open for other results (where it was used is derived from the plans).
+   */
   async convertIdea(ideaId: string, assetId: string, goal: string, steps: string, verification: string): Promise<string> {
     const ideaRaw = await this.files.readFile(`${this.paths.ideas}/${ideaId}.md`);
-    if (parseMarkdown(ideaRaw).data.type !== 'idea') throw new Error('Source must be an idea.');
+    const idea = parseMarkdown(ideaRaw).data;
+    if (idea.type !== 'idea') throw new Error('Source must be an idea.');
+    if (idea.status === 'refuted') throw new Error(`${ideaId} was refuted (see its ## Refutation); a plan cannot rest on it.`);
     if (!(await this.files.exists(`${this.paths.assets}/${assetId}.md`))) throw new Error(`Unknown asset: ${assetId}`);
     const checklist = steps.split(/\r?\n/).map((step) => step.trim()).filter(Boolean).map((step, index) => `${index + 1}. [ ] ${step.replace(/^\d+\.\s*(?:\[[ xX]\])?\s*/, '')}`).join('\n');
     if (!goal.trim() || !checklist || !verification.trim()) throw new Error('Goal, steps, and verification are required.');
@@ -1629,23 +1640,106 @@ export class ResearchLoopCore {
     const difference = failed.length ? `\n## Difference from failed plans\n\n${failed.map((id) => `- ${id}: new route from idea ${ideaId}`).join('\n')}\n` : '';
     const raw = stringifyMarkdown(`\n## Goal\n\nTarget: [asset](../assets/${assetId}.md)\n\n${goal.trim()}\n\n## Plan\n\n${checklist}\n\n## Verification\n\n${verification.trim()}\n${difference}`, { type: 'plan', title: goal.trim().slice(0, 80), status: 'pending', target_asset: assetId, inspired_by: [ideaId], tags: [] });
     await this.files.writeFile(`${this.paths.plans}/${planId}.md`, raw);
-    await this.resolveIdea(ideaId, planId);
     if (this.state?.parked[assetId]) { await this.clearPark(assetId, `new plan ${planId} from idea ${ideaId}`); await this.save(); }
     await this.event('idea_converted', { ideaId, planId, assetId });
     return planId;
   }
 
-  /** Mark an idea resolved by a decision, plan, or asset; the idea itself is kept. */
+  /**
+   * Mark an idea resolved by a decision or an asset; the idea itself is kept. A plan never resolves
+   * an approach or observation (it uses it, and other results may too), and a test case is never
+   * resolved (where it was tried is recorded per result).
+   */
   async resolveIdea(ideaId: string, resolvedBy: string, note?: string): Promise<void> {
     const file = `${this.paths.ideas}/${ideaId}.md`;
     const parsed = parseMarkdown(await this.files.readFile(file));
     if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
     if (parsed.data.status === 'resolved' && parsed.data.resolved_by === resolvedBy) return;
+    const kind = toIdeaKind(parsed.data.idea_kind);
+    if (kind === 'test_case') throw new Error(`${ideaId} is a test case: each search round records where it was tried, and it stays open for the other results it relates to. Archive it to drop it.`);
+    if (REUSABLE_IDEA_KINDS.has(kind) && await this.files.exists(`${this.paths.plans}/${resolvedBy}.md`)) {
+      throw new Error(`A plan uses the ${kind} ${ideaId} without using it up: list it in the plan's inspired_by, and it stays open for other results. ${kind === 'observation' ? 'To settle it, promote it to a lemma (idea promote) or refute it (idea refute).' : 'If it cannot work in general, mark it obstructed (idea obstruct).'}`);
+    }
+    if (kind === 'observation' && !(await findNodeFile(this.files, this.paths, 'asset', resolvedBy))) throw new Error(`An observation is resolved only by the lemma it became: use idea promote, or idea refute when it is false.`);
     parsed.data.status = 'resolved';
     parsed.data.resolved_by = resolvedBy;
     const content = note ? `${parsed.content.trimEnd()}\n\n## Resolution\n\n${note}\n` : parsed.content;
     await this.files.writeFile(file, stringifyMarkdown(content, parsed.data));
     await this.event('idea_resolved', { ideaId, resolvedBy });
+  }
+
+  /**
+   * Turn an open observation (or the recurring step of an approach) into a draft lemma, so proofs
+   * rely on it through depends_on rather than on an unproved idea. `into` names the results that
+   * should depend on it; an approved one is refused, since a new dependency re-opens its approval,
+   * which is the researcher's call. The loop proves the lemma like any other draft result.
+   */
+  async promoteIdea(ideaId: string, options: { id: string; statement: string; title?: string; type?: string; into?: string[]; usesDefinitions?: string[] }): Promise<{ assetId: string; into: string[] }> {
+    const file = `${this.paths.ideas}/${ideaId}.md`;
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
+    const kind = toIdeaKind(parsed.data.idea_kind);
+    if (!REUSABLE_IDEA_KINDS.has(kind)) throw new Error(`Only an observation or an approach is promoted to a lemma; ${ideaId} is a ${kind}.`);
+    if (parsed.data.status !== 'draft') throw new Error(`${ideaId} is ${parsed.data.status}; only an open idea is promoted.`);
+    const type = options.type ?? 'lemma';
+    if (type !== 'lemma' && type !== 'proposition') throw new Error('--type is lemma or proposition.');
+    const id = options.id.trim();
+    if (!/^[a-z][a-z0-9_]*$/.test(id) || isLibraryId(id)) throw new Error(`Invalid asset ID ${id}: use lowercase letters, digits, and underscores, without the ${LIBRARY_PREFIX} prefix.`);
+    if (await findNodeFile(this.files, this.paths, 'asset', id) || await findNodeFile(this.files, this.paths, 'definition', id)) throw new Error(`Node ID already exists: ${id}`);
+    const statement = options.statement.trim();
+    if (!statement) throw new Error('--statement is required: state precisely what the lemma claims, with its hypotheses.');
+    const into = [...new Set(options.into ?? [])];
+    const targets: Array<{ file: string; parsed: matter.GrayMatterFile<string> }> = [];
+    for (const target of into) {
+      const targetFile = await findNodeFile(this.files, this.paths, 'asset', target);
+      if (!targetFile || locateNodeFile(targetFile, this.paths)?.origin === 'library') throw new Error(`Unknown project asset: ${target}`);
+      const data = parseMarkdown(await this.files.readFile(targetFile));
+      if (data.data.status === 'approved') throw new Error(`${target} is approved: making it depend on ${id} re-opens its approval, which is the researcher's call. Promote without --into ${target}, then ask the researcher to add the dependency.`);
+      if (INACTIVE_STATUSES.has(String(data.data.status))) throw new Error(`${target} is ${String(data.data.status)}; it takes no new dependency.`);
+      targets.push({ file: targetFile, parsed: data });
+    }
+    const uses = [...new Set(options.usesDefinitions ?? [])];
+    for (const definition of uses) if (!(await findNodeFile(this.files, this.paths, 'definition', definition))) throw new Error(`Unknown definition: ${definition}`);
+    const title = options.title?.trim() || String(parsed.data.title ?? id);
+    await this.writeOwned(`${this.paths.assets}/${id}.md`, stringifyMarkdown(`\n## Statement\n\n${statement}\n`, { type, title, status: 'draft', source: { kind: 'original' }, depends_on: [], uses_definitions: uses, tags: [] }));
+    for (const target of targets) {
+      const deps = Array.isArray(target.parsed.data.depends_on) ? target.parsed.data.depends_on.map(String) : [];
+      if (deps.includes(id)) continue;
+      target.parsed.data.depends_on = [...deps, id];
+      await this.writeOwned(target.file, stringifyMarkdown(target.parsed.content, target.parsed.data));
+    }
+    await this.resolveIdea(ideaId, id, `Promoted to the ${type} ${id}${into.length ? `, a dependency of ${into.join(', ')}` : ''}.`);
+    await this.event('idea_promoted', { ideaId, assetId: id, into });
+    return { assetId: id, into };
+  }
+
+  /**
+   * Settle an idea as a warning: an observation found false (`refuted`) or an approach shown not
+   * to work in general (`obstructed`; a failure on one result is a failed plan, not this). The
+   * reason is kept, and similar results see it so they do not try the same thing.
+   */
+  async markIdea(ideaId: string, status: 'refuted' | 'obstructed', reason: string): Promise<void> {
+    const file = `${this.paths.ideas}/${ideaId}.md`;
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
+    const kind = toIdeaKind(parsed.data.idea_kind);
+    const expected = status === 'refuted' ? 'observation' : 'approach';
+    if (kind !== expected) throw new Error(`Only an ${expected} is ${status}; ${ideaId} is a ${kind}.`);
+    if (parsed.data.status !== 'draft') throw new Error(`${ideaId} is ${parsed.data.status}; only an open idea is ${status}.`);
+    if (!reason.trim()) throw new Error(`--reason is required: ${status === 'refuted' ? 'the counterexample or the argument that it is false' : 'why the approach cannot work in general'}.`);
+    parsed.data.status = status;
+    await this.files.writeFile(file, stringifyMarkdown(appendToSection(parsed.content, WARNING_SECTION[status], reason.trim()), parsed.data));
+    await this.event(`idea_${status}`, { ideaId });
+  }
+
+  /** Where each idea was used and which open observations should become lemmas; derived from the plans. */
+  async ideaUsageReport(): Promise<string> {
+    const plans = (await this.plans()).map((plan) => ({ id: plan.id, target_asset: typeof plan.data.target_asset === 'string' ? plan.data.target_asset : undefined, status: String(plan.data.status ?? 'pending'), inspired_by: Array.isArray(plan.data.inspired_by) ? plan.data.inspired_by.map(String) : [] }));
+    const ideas = [...(await this.collect(this.paths.ideas)).values()].map((idea) => ({ id: idea.id, title: String(idea.data.title ?? idea.id), status: String(idea.data.status ?? 'draft'), idea_kind: toIdeaKind(idea.data.idea_kind) }));
+    const usage = ideaUsage(plans);
+    const lines = ideas.filter((idea) => usage.has(idea.id)).map((idea) => `- ${idea.id} (${idea.idea_kind}, ${idea.status}): ${usageLine(usage.get(idea.id))}`);
+    const promote = promotionCandidates(ideas, usage).map((item) => `- ${item.id} (${item.title}): used for ${item.targets.join(', ')}. Promote it: idea promote ${item.id} --id <lemma_id> --statement "..." ${item.targets.map((target) => `--into ${target}`).join(' ')}`);
+    return [`### Ideas used by plans`, lines.length ? lines.join('\n') : 'None yet.', ...(promote.length ? ['', '### Observations to promote to lemmas', promote.join('\n')] : [])].join('\n');
   }
 
   /** Question ideas left by an unanswered question, resolved once the researcher answers it. */
@@ -2896,7 +2990,9 @@ export class ResearchLoopCore {
       const parsed = parseMarkdown(raw);
       await this.event('context_request', { id, kind, sections, stage: this.state?.stage });
       const shown = renderShow({ id, file, raw, data: parsed.data, body: parsed.content }, sections, kind);
-      return kind === 'asset' && !sections.length ? `${shown}\n\n${await this.derivedForAsset(id, raw)}` : shown;
+      if (kind === 'asset' && !sections.length) return `${shown}\n\n${await this.derivedForAsset(id, raw)}`;
+      if (kind === 'idea' && !sections.length) return `${shown}\n\n${await this.derivedForIdea(id)}`;
+      return shown;
     }
     const paper = `${this.paths.papers}/${id}/paper.md`;
     const raw = await this.files.readFile(paper).catch(() => undefined);
@@ -3039,6 +3135,14 @@ export class ResearchLoopCore {
     const refutedBy = [...(await this.collect(this.paths.assets)).values()].filter((node) => node.data.refutes === assetId).map((node) => `${node.id} (${String(node.data.status)})`);
     const line = (label: string, items: string[]) => `- ${label}: ${items.length ? items.join(', ') : 'none'}`;
     return ['### Derived relations (not stored in the file)', line('Plans', plans), line('Ideas', ideas), line('Refuted by', refutedBy)].join('\n');
+  }
+
+  /** Plans that used an idea, derived from their inspired_by; never stored in the idea. */
+  private async derivedForIdea(ideaId: string): Promise<string> {
+    const plans = (await this.plans()).filter((plan) => Array.isArray(plan.data.inspired_by) && plan.data.inspired_by.map(String).includes(ideaId))
+      .map((plan) => ({ id: plan.id, target_asset: typeof plan.data.target_asset === 'string' ? plan.data.target_asset : undefined, status: String(plan.data.status ?? 'pending'), inspired_by: [ideaId] }));
+    const usage = ideaUsage(plans).get(ideaId);
+    return ['### Derived relations (not stored in the file)', `- Used by plans: ${usage?.uses.length ? usage.uses.map((use) => `${use.plan} for ${use.target} (${use.status})`).join(', ') : 'none'}`].join('\n');
   }
 
   // ---------- report and validation ----------

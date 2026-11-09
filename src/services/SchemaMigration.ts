@@ -8,7 +8,7 @@ import { MANAGED_LINK_BLOCK, ideaPlanProblems, resolveIdeaType, stripManagedLink
 import { readApprovals, writeApprovals } from './ApprovalStore';
 import { isLegacyProject, legacyRequiredResults } from '../domain/project';
 import { sectionContent, sectionHeadings } from '../domain/sections';
-import { SCHEMA_VERSION, definitionTitle } from '../domain/nodeKinds';
+import { REUSABLE_IDEA_KINDS, SCHEMA_VERSION, definitionTitle, toIdeaKind } from '../domain/nodeKinds';
 import { assetComponents } from '../domain/digests';
 import { remarkTargetDigest } from '../domain/remarks';
 import { REMARKS_BLOCK_PATTERN, remarksOf } from '../domain/revisions';
@@ -123,6 +123,34 @@ function setKey(lines: string[], key: string, value: string): string[] {
   return [...lines.slice(0, typeLine + 1), `${key}: ${value}`, ...lines.slice(typeLine + 1)];
 }
 
+/**
+ * Schema 3 closed an approach or observation once one plan used it, and a test case once one
+ * search round tried it, so no other result could use it. Reopen it: where it was used is derived
+ * from the plans' inspired_by, and a test case keeps one tried_in record per result. Undefined when
+ * the idea needs no change.
+ */
+export function reopenUsedIdea(raw: string, planIds: ReadonlySet<string>): string | undefined {
+  let data: Record<string, unknown>;
+  try { data = parseMarkdown(raw).data; } catch { return undefined; }
+  if (data.type !== 'idea' || data.status !== 'resolved') return undefined;
+  const kind = toIdeaKind(data.idea_kind, Array.isArray(data.tags) ? data.tags.map(String) : []);
+  const by = typeof data.resolved_by === 'string' ? data.resolved_by : '';
+  const reopen = (lines: string[]) => setKey(removeKey(lines, 'resolved_by'), 'status', 'draft');
+  if (REUSABLE_IDEA_KINDS.has(kind)) return by && (planIds.has(by) || /^plan_/.test(by)) ? editFrontmatter(raw, reopen) : undefined;
+  if (kind !== 'test_case') return undefined;
+  const updated = editFrontmatter(raw, (lines) => {
+    const out = reopen(lines);
+    // tried_in: one record (a mapping) → a list of records.
+    const at = out.findIndex((line) => /^tried_in:\s*$/.test(line));
+    if (at < 0 || !/^\s+[^\s-]/.test(out[at + 1] ?? '')) return out;
+    let end = at + 1;
+    while (end < out.length && /^\s+/.test(out[end])) end++;
+    const record = out.slice(at + 1, end).map((line, index) => (index === 0 ? line.replace(/^(\s+)/, '$1- ') : `  ${line}`));
+    return [...out.slice(0, at + 1), ...record, ...out.slice(end)];
+  });
+  return updated.replace(/^## Resolution\r?\n\r?\nTried in search round (.*)$/m, '## Tried\n\n- Search round $1');
+}
+
 /** Why a project needs `migrate`; empty when it is current. */
 export async function migrationReasons(files: LoopFiles, paths: ProjectPaths): Promise<string[]> {
   const reasons = new Set<string>();
@@ -139,7 +167,9 @@ export async function migrationReasons(files: LoopFiles, paths: ProjectPaths): P
     if (ORDINAL_TITLE.test(raw)) reasons.add('numbered titles');
     if (/^used_in:/m.test(raw)) reasons.add('stored used_in lists');
   }
+  const planIds = new Set((await readAll(files, paths.plans)).map(({ file }) => idOf(file)));
   for (const { raw } of await readAll(files, paths.ideas)) {
+    if (reopenUsedIdea(raw, planIds)) reasons.add('ideas closed by the plan or search round that used them');
     if (/^type:\s*proof_record\s*$/m.test(raw) || /^target_asset:/m.test(raw)) reasons.add('plans stored under ideas');
     if (/^kind:/m.test(raw)) reasons.add('ideas with a legacy kind field');
   }
@@ -203,7 +233,8 @@ async function movePlansOutOfIdeas(files: LoopFiles, paths: ProjectPaths, report
 }
 
 async function upgradeNodes(files: LoopFiles, paths: ProjectPaths, report: MigrationReport): Promise<void> {
-  let records = 0; let titles = 0; let usedIn = 0; let questions = 0; let sources = 0; let blocks = 0;
+  let records = 0; let titles = 0; let usedIn = 0; let questions = 0; let sources = 0; let blocks = 0; let reopened = 0;
+  const planIds = new Set((await readAll(files, paths.plans)).map(({ file }) => idOf(file)));
   for (const folder of [paths.assets, paths.definitions]) {
     const nodes = await readAll(files, folder);
     for (const change of ordinalTitleFixes(nodes.map(({ file, raw }) => ({ id: idOf(file), raw })))) {
@@ -229,6 +260,8 @@ async function upgradeNodes(files: LoopFiles, paths: ProjectPaths, report: Migra
           updated = editFrontmatter(updated, (lines) => setKey(lines, 'idea_kind', 'question'));
           questions++;
         }
+        const open = reopenUsedIdea(updated, planIds);
+        if (open !== undefined) { updated = open; reopened++; }
       }
       if (updated !== raw) await files.writeFile(file, updated);
     }
@@ -237,6 +270,7 @@ async function upgradeNodes(files: LoopFiles, paths: ProjectPaths, report: Migra
   if (titles) report.notes.push(`Removed dependency numbers from ${titles} title(s); the dashboard and \`validate\` show the order.`);
   if (usedIn) report.notes.push(`Dropped stored used_in from ${usedIn} file(s); reverse links are derived.`);
   if (questions) report.notes.push(`Marked ${questions} open-question idea(s) as idea_kind: question.`);
+  if (reopened) report.notes.push(`Reopened ${reopened} idea(s) a plan or search round had closed by using them; plans' inspired_by and the test cases' tried_in records say where each was used.`);
   if (sources) report.notes.push(`Renamed source.kind self_proved to original in ${sources} file(s); approvals are unaffected.`);
   if (blocks) report.notes.push(`Removed managed link blocks from ${blocks} file(s); the dashboard derives plan and idea lists.`);
 }

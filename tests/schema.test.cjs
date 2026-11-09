@@ -14,7 +14,7 @@ function load(file, stubs = {}) {
   return module.exports;
 }
 
-const { sectionContent, hasSection, hasSectionContent, sectionHeadings, statementPart, stripManagedBlocks } = load('../src/domain/sections.ts');
+const { sectionContent, hasSection, hasSectionContent, sectionHeadings, statementPart, stripManagedBlocks, appendToSection } = load('../src/domain/sections.ts');
 const { nodeProblems, duplicateIds, stripForeignFields } = load('../src/domain/schema.ts');
 const { reverseRelations } = load('../src/domain/relations.ts');
 const { toIdeaKind, statusesFor } = load('../src/domain/nodeKinds.ts');
@@ -60,6 +60,27 @@ test('node schema rules are shared by the loop, the dashboard, and the CLI', () 
   assert.equal(toIdeaKind(undefined, ['open-question']), 'question');
   assert.equal(toIdeaKind('risk'), 'risk');
   assert.equal(toIdeaKind('nonsense'), 'approach');
+});
+
+test('idea statuses depend on the kind; warnings need their reason; appendToSection keeps one section', () => {
+  const idea = (kind, status, body = 'Text.') => nodeProblems('idea', 'i', { type: 'idea', title: 'I', status, ...(kind ? { idea_kind: kind } : {}) }, body);
+  assert.deepEqual(statusesFor('idea', 'approach'), ['draft', 'resolved', 'obstructed', 'archived']);
+  assert.deepEqual(statusesFor('idea'), statusesFor('idea', 'approach'));
+  assert.deepEqual(statusesFor('idea', 'observation'), ['draft', 'resolved', 'refuted', 'archived']);
+  assert.deepEqual(statusesFor('idea', 'test_case'), ['draft', 'archived']);
+  assert.deepEqual(idea('approach', 'resolved'), []);
+  assert.match(idea('approach', 'refuted')[0], /approach idea has status draft, resolved, obstructed, archived, not refuted/);
+  assert.match(idea(undefined, 'refuted')[0], /approach idea/);
+  assert.match(idea('question', 'obstructed')[0], /question idea/);
+  assert.match(idea('observation', 'refuted')[0], /needs ## Refutation/);
+  assert.deepEqual(idea('observation', 'refuted', 'Seemed true.\n\n## Refutation\n\nCounterexample: 0.\n'), []);
+  assert.match(idea('approach', 'obstructed', 'x\n\n## Obstruction\n\n')[0], /needs ## Obstruction/);
+  assert.match(nodeProblems('idea', 'i', { type: 'idea', title: 'I', status: 'draft', idea_kind: 'test_case', tried_in: { target: 'a' } }, 'x')[0], /tried_in must be a list/);
+  assert.deepEqual(nodeProblems('idea', 'i', { type: 'idea', title: 'I', status: 'draft', idea_kind: 'test_case', tried_in: [{ target: 'a', round: 1 }] }, 'x'), []);
+  const once = appendToSection('Body.\n', 'Tried', '- round 1');
+  assert.equal(once, 'Body.\n\n## Tried\n\n- round 1\n');
+  assert.equal(appendToSection(once, 'Tried', '- round 2'), 'Body.\n\n## Tried\n\n- round 1\n- round 2\n');
+  assert.equal(appendToSection('Body.\n\n## Tried\n\n- round 1\n\n## Notes\n\nKeep.\n', 'Tried', '- round 2'), 'Body.\n\n## Tried\n\n- round 1\n- round 2\n\n## Notes\n\nKeep.\n');
 });
 
 test('IDs are global across folders, foreign relations are dropped, and reverse relations are derived', () => {

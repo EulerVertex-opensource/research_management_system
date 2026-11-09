@@ -493,7 +493,7 @@ export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root
 const WRITING_REFUSED = new Set([...DRIVING_COMMANDS, 'pause', 'stop', 'park', 'unpark', 'focus', 'handoff']);
 const writingRefuses = (call: { command: string; sub?: string }) => WRITING_REFUSED.has(call.command)
   || (call.command === 'search' && call.sub === 'request') || (call.command === 'conjecture' && call.sub === 'request')
-  || (call.command === 'budget' && call.sub === 'allocate') || (call.command === 'idea' && call.sub === 'convert');
+  || (call.command === 'budget' && call.sub === 'allocate') || (call.command === 'idea' && (call.sub === 'convert' || call.sub === 'promote'));
 
 export const WRITING_NOTE = 'Research Assistant: this chat writes the manuscript (plan-manuscript, draft-latex, revise-manuscript-prose, check-notation). It never drives the research loop: do not run research-loop next, report, resume, or other commands that move the loop, and do not prove results here. A result the paper needs but nobody proved goes under ## Gaps of its brief (or as an idea) for the loop. The loop runs in its own chat.';
 

@@ -93,6 +93,13 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
     case 'recheck_cleared': { const id = text(event.id); return { text: text(event.by) === 'agent' ? `${title(id)} was re-checked independently and approved again automatically.` : `You confirmed ${title(id)} still holds.`, tone: 'success', target: id }; }
     case 'auto_mode_reset': return entry('Automatic approval was switched on outside the dashboard, so it was turned off.', 'warning');
     case 'plans_abandoned': return entry(`Dropped ${plural(Array.isArray(event.plans) ? event.plans.length : 0, 'proof plan')} for ${name}.`);
+    case 'idea_promoted': {
+      const id = text(event.assetId);
+      const into = Array.isArray(event.into) ? event.into.map(String) : [];
+      return { text: `An idea plans kept relying on became the draft lemma ${title(id)}${into.length ? `, which ${into.map(title).join(', ')} now ${into.length === 1 ? 'depends' : 'depend'} on` : ''}.`, tone: 'info', target: id };
+    }
+    case 'idea_refuted': return entry('An observation was found false; similar results are warned off it.', 'warning');
+    case 'idea_obstructed': return entry('An approach was shown not to work in general; similar results are warned off it.', 'warning');
     case 'idea_saved': {
       const related = Array.isArray(event.relatedAssets) ? event.relatedAssets.map(String) : [];
       return { text: `Saved an idea${related.length ? ` about ${title(related[0])}` : ''}.`, tone: 'neutral', ...(related[0] ? { target: related[0] } : {}) };

@@ -10,6 +10,7 @@ Input: the context pack from `research-loop next` (the asset's statement and `##
 - Read the statement first and note exactly what it assumes and what it concludes. Then go through the proof one step at a time.
 - For each step, check that it follows from the hypotheses, from earlier steps, or from a dependency whose statement is in the pack. When the proof applies a dependency, check every hypothesis of that dependency in this setting.
 - Check the edges: quantifiers and their order, boundary and degenerate cases, which way each inequality goes, division by quantities that could vanish, uniformity of constants, and whether "clearly" or "similarly" hides an argument that is not there.
+- A step resting only on an idea (an observation or approach recorded as `idea_…`), neither proved in the proof nor a dependency in the pack, is not established: reject it, and say it should be proved inline or promoted to a lemma.
 - A gap you can close yourself in a line or two is not a rejection; mention it in the verdict so the researcher sees it. A step that needs a new idea, a claim that is false, or a hypothesis that is never established is a rejection.
 - Do not repair the proof, and do not write a different one.
 

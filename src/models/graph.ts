@@ -105,7 +105,7 @@ export interface AttentionButton { label: string; action: GraphAction; kind?: 'p
 export interface AttentionItem {
   key: string;
   priority: AttentionPriority;
-  category: 'question' | 'counterexample' | 'approval' | 'manuscript_invalid' | 'manuscript_stale' | 'parked' | 'uncovered' | 'unlocked' | 'required_inactive' | 'upstream' | 'loop' | 'recheck';
+  category: 'question' | 'counterexample' | 'approval' | 'manuscript_invalid' | 'manuscript_stale' | 'parked' | 'uncovered' | 'unlocked' | 'required_inactive' | 'upstream' | 'loop' | 'recheck' | 'promote';
   title: string;
   /** Extra detail, e.g. the agent's summary of what it wants reviewed; may be empty. */
   reason: string;

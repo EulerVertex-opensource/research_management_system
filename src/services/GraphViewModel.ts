@@ -16,6 +16,7 @@ import { AgentActivity, readAgentActivity } from './AgentActivity';
 import { readApprovals } from './ApprovalStore';
 import { ManuscriptModel, loadManuscriptModel } from './ManuscriptImpactLoader';
 import { Remarks } from './Remarks';
+import { ideaUsage, promotionCandidates } from '../domain/ideaUsage';
 
 /**
  * Builds the Graph tab payload: compact node views (no bodies), mathematical
@@ -249,7 +250,8 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       ? { progress: 'stalled', progressLabel: 'Agent stopped', progressDetail: 'No activity from the agent' }
       : { progress: 'stalled', progressLabel: 'No agent working', progressDetail: 'The loop is on, but no agent is working on it' });
   }
-  const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, recheck: input.recheck, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
+  const promotions = promotionCandidates(ideas, ideaUsage(plans));
+  const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, recheck: input.recheck, promotions, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
   // The loop itself can be what waits on the researcher: an agent gone quiet, a pause, or a stopped loop's reasons that are not nodes.
   if (health.key === 'stalled' || health.key === 'agent_idle' || health.key === 'paused') {
     attention.unshift({ key: `loop:${health.key}`, priority: 0, category: 'loop', title: health.headline.replace(/\.$/, ''), reason: health.body, why: health.key === 'paused' ? 'The loop does not move while it is paused.' : 'No agent is working on the research.', ifIgnored: health.ifIgnored, blocks: [], sections: [], buttons: health.buttons });

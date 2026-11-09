@@ -5,7 +5,7 @@ import { EVENTS_PATH, LoopFiles, dashboardLinkPath, isApproved, proofDigest, sha
 import { DecisionInfo, parseDecision, sortDecisions } from './ResearchRecords';
 import { readApprovals } from './ApprovalStore';
 import { normalizeProse, sha } from '../domain/digests';
-import { INACTIVE_STATUSES, definitionKindOf } from '../domain/nodeKinds';
+import { INACTIVE_STATUSES, WARNING_SECTION, definitionKindOf } from '../domain/nodeKinds';
 import { remarkLabel } from '../domain/remarks';
 import { Remarks } from './Remarks';
 import { requiredAssetIds } from '../domain/project';
@@ -241,7 +241,11 @@ export class Teaching {
     if (proofPlan) blocks.push([`## How this proof was found (plan ${proofPlan.id})`, ...['Goal', 'Changes', 'Plan', 'Adapted from', 'Difference from failed plans', 'Verdict'].map((heading) => section(proofPlan, heading))].filter(Boolean).join('\n\n'));
     if (failed.length) blocks.push([`## Attempts that failed (${failed.length})`, ...failed.map((plan) => [`### ${String(plan.data.title ?? plan.id)} (${plan.id})`, section(plan, 'Goal'), section(plan, 'Failure'), section(plan, 'Verdict')].filter(Boolean).join('\n\n'))].join('\n\n'));
     if (adapts.length) blocks.push(`## Known results whose proof it follows\n\n${adapts.map((other) => `### ${titleOf(other)} (${other})\n\n${statementOf(other)}`).join('\n\n')}`);
-    if (ideas.length) blocks.push(`## Open doubts and questions about it\n\n${ideas.map((idea) => `- ${idea.title} (${idea.id}, ${idea.kind}${idea.origin ? `, raised by the ${idea.origin}` : ''}): ${idea.summary}`).join('\n')}`);
+    const ideaLine = (idea: (typeof ideas)[number]) => `- ${idea.title} (${idea.id}, ${idea.kind}${idea.origin ? `, raised by the ${idea.origin}` : ''}): ${idea.summary}`;
+    const open = ideas.filter((idea) => !WARNING_SECTION[idea.status]);
+    const deadEnds = ideas.filter((idea) => WARNING_SECTION[idea.status]);
+    if (open.length) blocks.push(`## Open doubts and questions about it\n\n${open.map(ideaLine).join('\n')}`);
+    if (deadEnds.length) blocks.push(`## Known dead ends near it (refuted observations, obstructed approaches)\n\n${deadEnds.map((idea) => ideaLine(idea).replace(`, ${idea.kind}`, `, ${idea.kind}, ${idea.status}`)).join('\n')}`);
     if (said.length) blocks.push(`## What the loop reported about it\n\n${said.map((event) => `- ${day(event.at)} ${event.stage} ${event.outcome}: ${event.summary}`).join('\n')}`);
     // Every node named above, as a link the researcher can click to read the file in the dashboard.
     const nodeLink = (other: string) => { const found = assets.get(other) ?? definitions.get(other); return `- ${this.reference(other, titleOf(other), found?.file)}`; };
@@ -254,15 +258,18 @@ export class Teaching {
     return blocks.filter(Boolean).join('\n\n') + '\n';
   }
 
-  private async openIdeas(id: string): Promise<Array<{ id: string; title: string; kind: string; origin?: string; summary: string }>> {
+  private async openIdeas(id: string): Promise<Array<{ id: string; title: string; kind: string; status: string; origin?: string; summary: string }>> {
     const ideas = [];
     for (const file of await this.files.listFiles(this.paths.ideas)) {
       const raw = await this.files.readFile(file).catch(() => '');
       let parsed;
       try { parsed = parseMarkdown(raw); } catch { continue; }
       const data = parsed.data;
+      // An idea a plan used stays open; a refuted or obstructed one is shown with its reason, as a dead end.
       if (['resolved', 'archived'].includes(data.status) || !list(data.related_assets).includes(id)) continue;
-      ideas.push({ id: path.posix.basename(file, '.md'), title: String(data.title ?? ''), kind: String(data.idea_kind ?? 'idea'), origin: typeof data.origin === 'string' ? data.origin : undefined, summary: strip(parsed.content).split('\n\n')[0].replace(/\s+/g, ' ').slice(0, 300) });
+      const warning = WARNING_SECTION[data.status];
+      const summary = warning ? sectionContent(parsed.content, warning) || strip(parsed.content) : strip(parsed.content);
+      ideas.push({ id: path.posix.basename(file, '.md'), title: String(data.title ?? ''), kind: String(data.idea_kind ?? 'idea'), status: String(data.status), origin: typeof data.origin === 'string' ? data.origin : undefined, summary: summary.split('\n\n')[0].replace(/\s+/g, ' ').slice(0, 300) });
     }
     return ideas;
   }

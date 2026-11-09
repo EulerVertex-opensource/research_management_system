@@ -5,7 +5,7 @@ The loop assigns each worker slot one direction, never the same one to two slots
 - an object an earlier worker recorded but could not finish (any other `test_case` idea), assigned after the untried catalog; read the idea and the board's ideas tried before working on it;
 - a revisit of a direction already tried: when the loop says so, take a route the board does not show.
 
-A test-case idea a round took up is resolved with its outcome and listed under the board's ideas tried; it is not assigned again, even after the statement changes.
+A test-case idea a round took up records its outcome for that result (`tried_in`) and is listed under the board's ideas tried; it is not assigned again for that result, even after the statement changes. It stays open: a search on another result it relates to still tries it.
 
 ## Refute mode (counterexamples)
 

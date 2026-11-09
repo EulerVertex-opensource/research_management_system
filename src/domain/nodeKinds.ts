@@ -50,18 +50,52 @@ export type NodeStatus = (typeof NODE_STATUS_LIST)[number];
 export const ACTIVE_STATUSES: ReadonlySet<string> = new Set(['draft', 'approved']);
 export const INACTIVE_STATUSES: ReadonlySet<string> = new Set(['deprecated', 'archived']);
 
-/** `resolved`: answered, or turned into a plan or lemma (see `resolved_by`); `archived`: dropped. */
-export const IDEA_STATUS_LIST = ['draft', 'resolved', 'archived'] as const;
+/**
+ * Every idea status; which ones an idea may take depends on its kind (IDEA_STATUSES_BY_KIND).
+ * `resolved`: answered, or turned into an asset (see `resolved_by`). A plan that uses an idea
+ * never resolves it: the plan lists it in `inspired_by`, and the idea stays usable elsewhere.
+ * `refuted` (an observation found false, ## Refutation) and `obstructed` (an approach shown not to
+ * work in general, ## Obstruction) are kept as warnings for similar results; `archived`: dropped.
+ */
+export const IDEA_STATUS_LIST = ['draft', 'resolved', 'refuted', 'obstructed', 'archived'] as const;
 export type IdeaStatus = (typeof IDEA_STATUS_LIST)[number];
 /** What an idea is for, so context retrieval can tell a question from an approach. */
 /** `conjecture`: a statement believed true but not yet precise or checked; the loop may turn it into a conjecture asset. */
 export const IDEA_KIND_LIST = ['approach', 'question', 'observation', 'test_case', 'risk', 'conjecture'] as const;
 export type IdeaKind = (typeof IDEA_KIND_LIST)[number];
 
+/**
+ * Statuses per idea kind. Approaches and observations are reused across results, so being used
+ * changes nothing about them; an observation that keeps recurring is promoted to a lemma
+ * (`resolved` by it). A test case is tried per result (the search records say where), so it is
+ * only open or dropped.
+ */
+export const IDEA_STATUSES_BY_KIND: Readonly<Record<IdeaKind, readonly IdeaStatus[]>> = {
+  approach: ['draft', 'resolved', 'obstructed', 'archived'],
+  observation: ['draft', 'resolved', 'refuted', 'archived'],
+  test_case: ['draft', 'archived'],
+  question: ['draft', 'resolved', 'archived'],
+  risk: ['draft', 'resolved', 'archived'],
+  conjecture: ['draft', 'resolved', 'archived'],
+};
+/** Kinds a plan uses without using them up: they stay open for other results. */
+export const REUSABLE_IDEA_KINDS: ReadonlySet<string> = new Set(['approach', 'observation']);
+/** Statuses that warn similar results off a route: shown with the reason, never hidden like `archived`. */
+export const WARNING_IDEA_STATUSES: ReadonlySet<string> = new Set(['refuted', 'obstructed']);
+/** The section a warning status needs. */
+export const WARNING_SECTION: Readonly<Record<string, string>> = { refuted: 'Refutation', obstructed: 'Obstruction' };
+/** Distinct results whose plans used one open observation before the loop suggests promoting it to a lemma. */
+export const PROMOTION_TARGETS = 2;
+
 /** An idea kind from loose input: a valid kind as given, `question` for open-question tags, else `approach`. */
 export function toIdeaKind(value: unknown, tags: readonly string[] = []): IdeaKind {
   if ((IDEA_KIND_LIST as readonly unknown[]).includes(value)) return value as IdeaKind;
   return tags.includes('open-question') ? 'question' : 'approach';
+}
+
+/** The statuses an idea of this kind may take; a missing kind reads as `approach`, as everywhere else. */
+export function ideaStatusesFor(kind: unknown): readonly IdeaStatus[] {
+  return IDEA_STATUSES_BY_KIND[toIdeaKind(kind)];
 }
 
 /** A plan is one proof attempt for one target asset; `succeeded` replaces the legacy proof_record type. */
@@ -94,8 +128,8 @@ export function nodeKindOf(type: unknown): NodeKind | undefined {
   return undefined;
 }
 
-export function statusesFor(type: string): readonly string[] {
-  if (type === 'idea') return IDEA_STATUS_LIST;
+export function statusesFor(type: string, ideaKind?: unknown): readonly string[] {
+  if (type === 'idea') return ideaStatusesFor(ideaKind);
   if (type === 'plan') return PLAN_STATUS_LIST;
   return NODE_STATUS_LIST;
 }

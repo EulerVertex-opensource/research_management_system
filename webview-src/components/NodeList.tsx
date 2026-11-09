@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ResearchNode, ResearchStatus } from '../../src/models/types';
 import { StatusBadge } from './StatusBadge';
 import { CITED_SOURCE_KINDS, IDEA_STATUS_LIST, NODE_STATUS_LIST, PLAN_STATUS_LIST } from '../../src/domain/nodeKinds';
+import { ideaUsage, promotionCandidates } from '../../src/domain/ideaUsage';
 import { CITED_COLOR, tint } from '../graph/colors';
 
 interface Props {
@@ -83,7 +84,7 @@ export function NodeListItem({ node, selected, onSelect, order, meta, innerRef }
   );
 }
 
-const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'abandoned', 'approved', 'draft', 'deprecated', 'archived'];
+const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'abandoned', 'approved', 'draft', 'refuted', 'obstructed', 'resolved', 'deprecated', 'archived'];
 
 export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions' }: Props) {
   const [search, setSearch] = useState('');
@@ -104,8 +105,21 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
     return true;
   });
 
+  // Where each idea was used, derived from the plans; an idea a plan used stays open for other results.
+  const usage = ideaUsage(nodes.filter((node) => node.type === 'plan'));
+  const promote = new Set(promotionCandidates(nodes.filter((node) => node.type === 'idea'), usage).map((item) => item.id));
+  const usedFor = (node: ResearchNode) => usage.get(node.id)?.targets.length ?? 0;
+  const ideaMeta = (node: ResearchNode) => {
+    if (node.type !== 'idea') return undefined;
+    const count = usedFor(node);
+    const used = count ? `Used for ${count} result${count === 1 ? '' : 's'}` : node.status === 'draft' ? 'Not used yet' : '';
+    return [node.idea_kind?.replace('_', ' '), used, promote.has(node.id) ? 'Promote to a lemma' : ''].filter(Boolean).join(' · ') || undefined;
+  };
+
   const sorted = [...filtered].sort((a, b) => {
     if (isLibrary && a.collection !== b.collection) return (a.collection ?? '').localeCompare(b.collection ?? '');
+    // Open ideas not used yet first, then those plans already used; dead ends after them, archived last.
+    if (a.type === 'idea' && b.type === 'idea' && a.status === 'draft' && b.status === 'draft' && Boolean(usedFor(a)) !== Boolean(usedFor(b))) return usedFor(a) ? 1 : -1;
     // Assets and definitions follow dependency order, derived by the extension; inactive ones come last.
     if (filterType === 'asset' || filterType === 'definition' || isLibrary) {
       if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
@@ -167,7 +181,7 @@ export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPa
             selected={selectedId === node.id}
             onSelect={onSelect}
             order={filterType === 'asset' || filterType === 'definition' ? node.order : undefined}
-            meta={isLibrary ? `${node.collection} · ${node.id}` : undefined}
+            meta={isLibrary ? `${node.collection} · ${node.id}` : ideaMeta(node)}
           />
         ))}
       </div>

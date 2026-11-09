@@ -435,15 +435,59 @@ test('agent-set approvals are reverted and dependency statement changes invalida
   assert.deepEqual(reverted.sort(), ['key_lemma', 'main_theorem']);
 });
 
-test('ideas remain after conversion to a linked executable plan', async () => {
-  const f = fixture({ 'research/assets/main_theorem.md': asset() });
+test('an idea stays open after conversion to a linked executable plan, so other results can use it too', async () => {
+  const f = fixture({ 'research/assets/main_theorem.md': asset(), 'research/assets/second_theorem.md': asset() });
   const ideaId = await f.core.saveIdea('Try reflexivity', 'A possibly useful observation.', ['main_theorem']);
   const planId = await f.core.convertIdea(ideaId, 'main_theorem', 'Prove reflexivity', 'Check the assumptions\nApply equality', 'Verify each equality step');
-  assert.equal(matter(f.map.get(`research/ideas/${ideaId}.md`)).data.type, 'idea');
-  assert.deepEqual([matter(f.map.get(`research/ideas/${ideaId}.md`)).data.status, matter(f.map.get(`research/ideas/${ideaId}.md`)).data.resolved_by], ['resolved', planId]);
+  const idea = matter(f.map.get(`research/ideas/${ideaId}.md`));
+  assert.deepEqual([idea.data.type, idea.data.status, idea.data.resolved_by], ['idea', 'draft', undefined]);
   const parsed = matter(f.map.get(`research/plans/${planId}.md`));
   assert.deepEqual(parsed.data.inspired_by, [ideaId]);
   assert.match(parsed.content, /2\. \[ \] Apply equality/);
+  // The same idea serves a second result; where it was used is derived from the plans.
+  const second = await f.core.convertIdea(ideaId, 'second_theorem', 'Prove it the same way', 'Apply equality', 'Check it');
+  assert.equal(matter(f.map.get(`research/ideas/${ideaId}.md`)).data.status, 'draft');
+  assert.match(await f.core.show(ideaId), new RegExp(`Used by plans: ${[planId, second].sort().map((id) => `${id} for \\w+ \\(pending\\)`).join(', ')}`));
+  assert.match(await f.core.ideaUsageReport(), new RegExp(`${ideaId} \\(approach, draft\\): used for (main|second)_theorem \\(pending\\), (main|second)_theorem \\(pending\\)`));
+  // A plan never resolves an approach.
+  await assert.rejects(f.core.resolveIdea(ideaId, planId), /inspired_by/);
+});
+
+test('an observation plans for two results rely on is suggested for promotion, and promoting makes it a lemma they depend on', async () => {
+  const f = fixture({ 'research/assets/main_theorem.md': asset(), 'research/assets/second_theorem.md': asset(), 'research/assets/done_theorem.md': asset('', { status: 'approved' }) });
+  const ideaId = await f.core.saveIdea('Squares are nonnegative', 'For real x, x^2 >= 0.', [], 'agent', [], 'observation');
+  await f.core.convertIdea(ideaId, 'main_theorem', 'Use squares', 'Bound below by a square', 'Combine');
+  await f.core.convertIdea(ideaId, 'second_theorem', 'Use squares again', 'Bound below by a square', 'Combine');
+  assert.match(await f.core.ideaUsageReport(), new RegExp(`### Observations to promote to lemmas\\n- ${ideaId} \\(Squares are nonnegative\\): used for main_theorem, second_theorem`));
+  // Never into an approved result: a new dependency re-opens its approval.
+  await assert.rejects(f.core.promoteIdea(ideaId, { id: 'square_nonneg', statement: 'For every real x, x^2 >= 0.', into: ['done_theorem'] }), /approved/);
+  await assert.rejects(f.core.promoteIdea(ideaId, { id: 'square_nonneg', statement: ' ', into: ['main_theorem'] }), /statement/);
+  const result = await f.core.promoteIdea(ideaId, { id: 'square_nonneg', statement: 'For every real x, x^2 >= 0.', into: ['main_theorem', 'second_theorem'] });
+  assert.deepEqual(result, { assetId: 'square_nonneg', into: ['main_theorem', 'second_theorem'] });
+  const lemma = matter(f.map.get('research/assets/square_nonneg.md'));
+  assert.deepEqual([lemma.data.type, lemma.data.status, lemma.data.title], ['lemma', 'draft', 'Squares are nonnegative']);
+  assert.match(lemma.content, /## Statement\n\nFor every real x, x\^2 >= 0\./);
+  for (const id of ['main_theorem', 'second_theorem']) assert.ok(matter(f.map.get(`research/assets/${id}.md`)).data.depends_on.includes('square_nonneg'));
+  const idea = matter(f.map.get(`research/ideas/${ideaId}.md`));
+  assert.deepEqual([idea.data.status, idea.data.resolved_by], ['resolved', 'square_nonneg']);
+  assert.match(idea.content, /## Resolution\n\nPromoted to the lemma square_nonneg/);
+  assert.doesNotMatch(await f.core.ideaUsageReport(), /Observations to promote/);
+});
+
+test('a refuted observation and an obstructed approach keep their reason; a refuted one cannot become a plan', async () => {
+  const f = fixture({ 'research/assets/main_theorem.md': asset() });
+  const observation = await f.core.saveIdea('Every bounded sequence converges', 'Seems so.', ['main_theorem'], 'agent', [], 'observation');
+  const approach = await f.core.saveIdea('Induct on n', 'Induction.', ['main_theorem'], 'agent', [], 'approach');
+  await assert.rejects(f.core.markIdea(observation, 'obstructed', 'x'), /Only an approach/);
+  await assert.rejects(f.core.markIdea(observation, 'refuted', ' '), /reason/);
+  await f.core.markIdea(observation, 'refuted', '(-1)^n is bounded and does not converge.');
+  await f.core.markIdea(approach, 'obstructed', 'The statement is not monotone in n.');
+  const refuted = matter(f.map.get(`research/ideas/${observation}.md`));
+  assert.equal(refuted.data.status, 'refuted');
+  assert.match(refuted.content, /## Refutation\n\n\(-1\)\^n is bounded/);
+  assert.match(f.map.get(`research/ideas/${approach}.md`), /status: obstructed[\s\S]*## Obstruction\n\nThe statement is not monotone/);
+  await assert.rejects(f.core.convertIdea(observation, 'main_theorem', 'g', 's', 'v'), /refuted/);
+  assert.deepEqual((await f.core.validateWorkspace()).problems.filter((line) => /idea_/.test(line)), []);
 });
 
 test('the brief status names only the latest parked results; the compact one only what changes', async () => {

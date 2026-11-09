@@ -3,6 +3,8 @@ import { projectSection, requiredAssetIds, requiredResults } from '../domain/pro
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 import { SearchMode, SearchSlot } from '../domain/search';
 import { searchFields, searchScore, searchSummary, searchWords } from '../domain/registry';
+import { PROMOTION_TARGETS, REUSABLE_IDEA_KINDS, WARNING_IDEA_STATUSES, WARNING_SECTION, toIdeaKind } from '../domain/nodeKinds';
+import { ideaUsage, usageLine } from '../domain/ideaUsage';
 
 /**
  * Deterministic context packs for the research loop. For each stage the loop
@@ -203,6 +205,12 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
       const nearMiss = slot?.candidateId ? sources.candidates?.get(slot.candidateId) : undefined;
       if (nearMiss) add('candidate', nearMiss.id, nearMiss.file, 'all', 0, 'the near-miss to repair');
       for (const check of sources.checks.values()) if (check.data.target_asset === target && check.data.type === 'falsification_check') add('check', check.id, check.file, ['Limitations'], 3, 'what an earlier check did not cover');
+      // A refuted observation linked to or worded like the target: its counterexample may point at one here.
+      const refuted = [...sources.ideas.values()].filter((item) => item.data.status === 'refuted' && list(item.data.related_assets).includes(target)).map((item) => item.id);
+      for (const id of [...refuted, ...similarIdeas(target, sources).filter((item) => sources.ideas.get(item.id)?.data.status === 'refuted').map((item) => item.id)].slice(0, DEAD_END_LIMIT)) {
+        const node = sources.ideas.get(id)!;
+        add('idea', id, node.file, ['Refutation'], 2, 'a refuted observation: its counterexample may point at one here');
+      }
       // A search the researcher asked for after proofs failed: where a proof broke can show where a counterexample lives.
       if (focus.search.requested) for (const plan of sources.plans.values()) if (plan.data.target_asset === target && plan.data.type === 'plan' && plan.data.status === 'failed') add('plan', plan.id, plan.file, ['Failure'], 3, 'where a proof attempt broke');
       if (slot) notes.push(`Your slot: ${slot.slot}, round ${focus.search.round}. Direction ${slot.direction}: ${slot.label}`);
@@ -252,11 +260,17 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
           if (plan.data.type === 'plan' && plan.data.status === 'failed') add('plan', plan.id, plan.file, ['Goal', 'Failure'], 2, 'failed plan: name it under ## Difference from failed plans');
           else if (plan.data.type === 'plan' && plan.data.status === 'succeeded') add('plan', plan.id, plan.file, ['Outcome'], 3, 'earlier successful attempt');
         }
-        for (const idea of sources.ideas.values()) if (idea.data.status !== 'archived' && list(idea.data.related_assets).includes(target)) add('idea', idea.id, idea.file, 'summary', 3, 'related idea');
+        // Open linked ideas, whether or not a plan used them; dead ends and ideas from similar results come in the idea guide.
+        for (const idea of sources.ideas.values()) if (idea.data.status === 'draft' && list(idea.data.related_assets).includes(target)) add('idea', idea.id, idea.file, 'summary', 3, 'related idea');
         const analogues = libraryAnalogues(target, sources);
         if (analogues.length && !current) {
           seen.add('text:library_analogues');
           items.push({ kind: 'text', id: 'library_analogues', view: 'all', priority: 2, reason: 'known results resembling the target', text: renderAnalogues(analogues) });
+        }
+        const guide = current ? '' : renderIdeaGuide(target, sources);
+        if (guide) {
+          seen.add('text:idea_guide');
+          items.push({ kind: 'text', id: 'idea_guide', view: 'all', priority: 2, reason: 'ideas from similar results, dead ends, and observations to promote', text: guide });
         }
         excluded.push('proofs of dependencies', 'full checklists of failed plans (show <plan> for one when needed)');
       } else {
@@ -337,15 +351,21 @@ const ANALOGUE_PER_COLLECTION = 3;
  * of its definitions, plus the definitions both use (or that the target's
  * definitions were derived from).
  */
-export function libraryAnalogues(targetId: string, sources: ContextSources, limit = ANALOGUE_LIMIT): LibraryAnalogue[] {
-  const target = sources.assets.get(targetId);
-  if (!target) return [];
+/** What a result is about, for finding similar ones: its own words (title, tags), its definitions' words, and its definitions with what they derive from. */
+function targetTerms(target: ContextNode, sources: ContextSources): { own: Set<string>; terms: string[]; shared: Set<string> } {
   const definitionIds = list(target.data.uses_definitions);
   const definitionTitles = definitionIds.map((id) => String(sources.definitions.get(id)?.data.title ?? id.replace(/_/g, ' ')).replace(/^Definition\s*\((.*)\)\s*$/i, '$1'));
   // The target's own title and tags say what it is; its definitions only say where it lives, so they count half.
   const own = new Set(searchWords([String(target.data.title ?? ''), ...list(target.data.tags)].join(' ')));
   const terms = [...new Set([...own, ...searchWords(definitionTitles.join(' '))])];
   const shared = new Set(definitionIds.flatMap((id) => { const from = sources.definitions.get(id)?.data.derived_from; return typeof from === 'string' ? [id, from] : [id]; }));
+  return { own, terms, shared };
+}
+
+export function libraryAnalogues(targetId: string, sources: ContextSources, limit = ANALOGUE_LIMIT): LibraryAnalogue[] {
+  const target = sources.assets.get(targetId);
+  if (!target) return [];
+  const { own, terms, shared } = targetTerms(target, sources);
   const skip = new Set([targetId, ...list(target.data.depends_on)]);
   const library = [...sources.assets.values()].filter((node) => node.origin === 'library');
   // Inverse document frequency over the library: a word every result shares ranks nothing.
@@ -370,6 +390,108 @@ export function libraryAnalogues(targetId: string, sources: ContextSources, limi
     picked.push({ id: node.id, collection: node.collection, status: String(node.data.status ?? '-'), title: String(node.data.title ?? node.id).replace(/\s+/g, ' '), summary: searchSummary(statementOf(node.body)), score });
   }
   return picked;
+}
+
+/** At most this many open ideas from similar results, and this many dead ends, in a plan pack. */
+export const IDEA_SUGGESTION_LIMIT = 3;
+export const DEAD_END_LIMIT = 4;
+/** Minimum match for a project result to count as similar, and for an idea's own words to match the target. */
+const SIMILAR_RESULT_MIN = 4;
+const SIMILAR_IDEA_MIN = 4;
+/** A plan that used the idea proved a similar result: the strongest reason to try it again. */
+const PROVED_SIMILAR_BONUS = 5;
+
+export interface IdeaSuggestion { id: string; score: number; reason: string; warning: boolean }
+/** Words most result titles share ("Main theorem", "Key lemma"); the project is too small for word frequencies to discount them. */
+const GENERIC_RESULT_WORDS = new Set(searchWords('main key theorem lemma proposition corollary result claim statement definition every all any some exist exists there holds true'));
+
+/**
+ * Ideas recorded elsewhere that may serve this result, found without any link to it: ideas worded
+ * like it, ideas about similar project results, and ideas that inspired the plans that proved them.
+ * Open approaches and observations are offered for reuse; refuted and obstructed ones as dead
+ * ends. Ideas already linked to the target (related_assets) are left to the caller.
+ */
+export function similarIdeas(targetId: string, sources: ContextSources): IdeaSuggestion[] {
+  const target = sources.assets.get(targetId);
+  if (!target) return [];
+  const found = targetTerms(target, sources);
+  const own = new Set([...found.own].filter((term) => !GENERIC_RESULT_WORDS.has(term)));
+  const terms = found.terms.filter((term) => !GENERIC_RESULT_WORDS.has(term));
+  const shared = found.shared;
+  if (!terms.length && !shared.size) return [];
+  const weight = (term: string) => (own.has(term) ? 2 : 1);
+  const best = new Map<string, IdeaSuggestion>();
+  const offer = (id: string, score: number, reason: string) => {
+    const idea = sources.ideas.get(id);
+    if (!idea || list(idea.data.related_assets).includes(targetId)) return;
+    const status = String(idea.data.status ?? 'draft');
+    const warning = WARNING_IDEA_STATUSES.has(status);
+    if (!warning && !(status === 'draft' && REUSABLE_IDEA_KINDS.has(toIdeaKind(idea.data.idea_kind)))) return;
+    const previous = best.get(id);
+    if (!previous || previous.score < score) best.set(id, { id, score, reason, warning });
+  };
+  for (const idea of sources.ideas.values()) {
+    const score = searchScore(idea, terms, weight);
+    if (score >= SIMILAR_IDEA_MIN) offer(idea.id, score, 'worded like this result');
+  }
+  const similar = [...sources.assets.values()]
+    .filter((node) => !node.origin && node.id !== targetId && node.data.type !== 'example')
+    .map((node) => ({ id: node.id, score: searchScore(node, terms, weight) + 3 * list(node.data.uses_definitions).filter((id) => shared.has(id)).length + (node.data.type === target.data.type ? 1 : 0) }))
+    .filter((entry) => entry.score >= SIMILAR_RESULT_MIN)
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    .slice(0, 5);
+  for (const { id: assetId, score } of similar) {
+    for (const idea of sources.ideas.values()) if (list(idea.data.related_assets).includes(assetId)) offer(idea.id, score, `recorded for the similar result ${assetId}`);
+    for (const plan of sources.plans.values()) {
+      if (plan.data.target_asset !== assetId || plan.data.status !== 'succeeded') continue;
+      for (const id of list(plan.data.inspired_by)) offer(id, score + PROVED_SIMILAR_BONUS, `used by ${plan.id}, which proved the similar result ${assetId}`);
+    }
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+}
+
+/** Plan-pack block: where linked ideas were used, ideas from similar results, dead ends, and observations to promote first. */
+function renderIdeaGuide(targetId: string, sources: ContextSources): string {
+  const usage = ideaUsage([...sources.plans.values()].map((plan) => ({ id: plan.id, target_asset: typeof plan.data.target_asset === 'string' ? plan.data.target_asset : undefined, status: String(plan.data.status ?? 'pending'), inspired_by: list(plan.data.inspired_by) })));
+  const depends = new Set(list(sources.assets.get(targetId)?.data.depends_on));
+  const linked = [...sources.ideas.values()].filter((idea) => list(idea.data.related_assets).includes(targetId));
+  const suggestions = similarIdeas(targetId, sources);
+  const open = suggestions.filter((item) => !item.warning).slice(0, IDEA_SUGGESTION_LIMIT);
+  const deadEnds = [
+    ...linked.filter((idea) => WARNING_IDEA_STATUSES.has(String(idea.data.status))).map((idea) => ({ id: idea.id, reason: 'linked to this result' })),
+    ...suggestions.filter((item) => item.warning),
+  ].slice(0, DEAD_END_LIMIT);
+  const kind = (idea: ContextNode) => toIdeaKind(idea.data.idea_kind);
+  const title = (idea: ContextNode) => String(idea.data.title ?? idea.id).replace(/\s+/g, ' ');
+  const firstParagraph = (text: string) => (strip(text).split(/\n\s*\n/)[0] ?? '').replace(/\s+/g, ' ').slice(0, 300);
+  const usedElsewhere = (id: string) => (usage.get(id)?.targets ?? []).filter((target) => target !== targetId);
+  const lines: string[] = [];
+  const usedLinked = linked.filter((idea) => String(idea.data.status) === 'draft' && usage.has(idea.id));
+  if (usedLinked.length) lines.push('### Linked ideas plans already used', '', ...usedLinked.map((idea) => `- ${idea.id} (${kind(idea)}): ${title(idea)}; ${usageLine(usage.get(idea.id))}`), '');
+  const became = linked.filter((idea) => String(idea.data.status) === 'resolved' && typeof idea.data.resolved_by === 'string' && sources.assets.has(String(idea.data.resolved_by)) && !depends.has(String(idea.data.resolved_by)));
+  if (became.length) lines.push('### Linked ideas that became results', '', ...became.map((idea) => `- ${idea.id} became ${String(idea.data.resolved_by)}, which is not in depends_on; a plan that needs it cites it once the researcher adds the dependency (report question).`), '');
+  if (open.length) {
+    lines.push('### Ideas from similar results (not linked to this one)', '', 'An approach or observation used for another result is not used up: reuse it when it fits, and list it in inspired_by. An observation is not a proved fact: a step that needs it proves it in the plan, or it is promoted to a lemma first.', '');
+    for (const item of open) {
+      const idea = sources.ideas.get(item.id)!;
+      const used = usageLine(usage.get(item.id));
+      lines.push(`- ${idea.id} (${kind(idea)}): ${title(idea)}. Why: ${item.reason}${used ? `; ${used}` : ''}. ${firstParagraph(idea.body)}`);
+    }
+    lines.push('');
+  }
+  if (deadEnds.length) {
+    lines.push('### Dead ends near this result', '', 'Do not assume a refuted observation, and do not retry an obstructed approach unless the plan says how it gets past the obstruction.', '');
+    for (const item of deadEnds) {
+      const idea = sources.ideas.get(item.id)!;
+      const section = WARNING_SECTION[String(idea.data.status)];
+      lines.push(`- ${idea.id} (${kind(idea)}, ${String(idea.data.status)}): ${title(idea)}. Why shown: ${item.reason}. ${section}: ${firstParagraph(sectionContent(idea.body, section) || idea.body)}`);
+    }
+    lines.push('');
+  }
+  const promote = [...linked, ...open.map((item) => sources.ideas.get(item.id)!)]
+    .filter((idea) => kind(idea) === 'observation' && String(idea.data.status) === 'draft' && usedElsewhere(idea.id).length >= PROMOTION_TARGETS - 1);
+  if (promote.length) lines.push('### Observations to promote before relying on them', '', ...promote.map((idea) => `- ${idea.id}: plans for ${usedElsewhere(idea.id).join(', ')} already rely on it. If this plan needs it too, promote it to a lemma first (idea promote ${idea.id} --id <lemma_id> --statement "..." --into ${targetId}), so the proof cites it through depends_on.`), '');
+  return lines.join('\n').trim();
 }
 
 function renderAnalogues(analogues: LibraryAnalogue[]): string {

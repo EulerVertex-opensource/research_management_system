@@ -123,6 +123,14 @@ test('the teaching pack carries the proof, how it was found, what the researcher
   assert.match(pack, /It holds up: Main theorem\./);
   assert.match(pack, /## How this proof was found \(plan lemma_plan\)[\s\S]*#### Verdict\n\nconfirmed/);
   assert.match(pack, new RegExp(`Is step 1 circular\\? \\(${id}, risk, raised by the researcher\\)`));
+  // An approach a plan used stays among the doubts; a refuted observation shows as a dead end with its reason.
+  const used = await f.core.saveIdea('Try symmetry', 'Swap the sides.', ['key_lemma'], 'agent', [], 'approach');
+  await f.core.convertIdea(used, 'key_lemma', 'By symmetry', 'Swap', 'Check');
+  const wrong = await f.core.saveIdea('Every relation is symmetric', 'Looks so.', ['key_lemma'], 'agent', [], 'observation');
+  await f.core.markIdea(wrong, 'refuted', 'The order relation < is not symmetric.');
+  const later = await f.teaching.packText('key_lemma');
+  assert.match(later, new RegExp(`## Open doubts and questions about it\\n\\n[^#]*Try symmetry \\(${used}, approach, raised by the agent\\)`));
+  assert.match(later, new RegExp(`## Known dead ends near it \\(refuted observations, obstructed approaches\\)\\n\\n- Every relation is symmetric \\(${wrong}, observation, refuted, raised by the agent\\): The order relation < is not symmetric\\.`));
   assert.match(pack, /The researcher: new to you\. Suggested aim: what it says\./);
   const links = pack.slice(pack.indexOf('## Links for the researcher'));
   assert.match(links, /- \[Key lemma\]\(\.research-assistant-loop\/open\/key_lemma\.md\)/);

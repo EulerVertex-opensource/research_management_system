@@ -424,7 +424,7 @@ test('construct limits ask the researcher; a direction resets them, silence park
   assert.match(capped.core.current.pendingQuestion.prompt, /2 candidate\(s\)/);
 });
 
-test('a test-case idea a round tried is resolved with its outcome, shown on the board, and never assigned again', async () => {
+test('a test-case idea a round tried records its outcome for that result, shows on the board, and is never assigned again there', async () => {
   const spec = 'A disk such that:\n\n- P1: G is finite.\n- P2: G is not abelian.';
   const f = fixture({ constructWidth: 1, constructRounds: 5, specialDirectionsFromRound: 99 });
   await driveToSearch(f, construction(spec));
@@ -450,16 +450,44 @@ test('a test-case idea a round tried is resolved with its outcome, shown on the 
   f.map.set(`research/checks/search_main_theorem_r${round.round}_a.md`, roundRecord());
   await f.core.report({ outcome: 'searched', summary: 'fails P2' });
   const idea = matter(f.map.get(`research/ideas/${first}.md`));
-  assert.equal(idea.data.status, 'resolved');
-  assert.equal(idea.data.tried_in.round, round.round);
-  assert.match(idea.data.tried_in.outcome, /cand_main_theorem_r5_s1_log failed: P1 ✓ P2 ✗ — P2 fails: cyclic groups are abelian\./);
-  assert.match(idea.content, /## Resolution\n\nTried in search round 5/);
+  // Trying it for this result does not use it up: it stays open, with one record per result.
+  assert.equal(idea.data.status, 'draft');
+  assert.equal(idea.data.resolved_by, undefined);
+  assert.equal(idea.data.tried_in.length, 1);
+  assert.equal(idea.data.tried_in[0].target, 'main_theorem');
+  assert.equal(idea.data.tried_in[0].round, round.round);
+  assert.match(idea.data.tried_in[0].outcome, /cand_main_theorem_r5_s1_log failed: P1 ✓ P2 ✗ — P2 fails: cyclic groups are abelian\./);
+  assert.match(idea.content, /## Tried\n\n- Search round 5 for main_theorem/);
   const board = await f.core.searchBoard('main_theorem', 'construct', 6);
   assert.match(board, new RegExp(`### Ideas tried[^\\n]*\\n\\n- ${first}, round 5: Log ansatz, variant 1 — cand_main_theorem_r5_s1_log failed`));
   // A changed specification starts the search over, but the tried idea stays tried and on the board.
   f.map.set('research/assets/main_theorem.md', construction(`${spec}\n- P3: G has order 6.`));
   const after = await f.core.searchBoard('main_theorem', 'construct', 1);
   assert.match(after, new RegExp(`- ${first} \\(under an earlier statement\\), round 5`));
+});
+
+test('a test case tried for one result is still tried for another result it relates to', async () => {
+  const f = fixture({ constructWidth: 1, constructRounds: 5, specialDirectionsFromRound: 99 });
+  await driveToSearch(f, construction());
+  f.map.set('research/assets/other_group.md', construction().replace('A small non-abelian group', 'Another non-abelian group'));
+  const shared = await f.core.saveIdea('Symmetric group S3', 'The smallest non-abelian group.', ['main_theorem', 'other_group'], 'researcher', [], 'test_case');
+  await approveSpecification(f);
+  // The researcher's test case goes first.
+  const round = f.core.current.current.search;
+  assert.equal(round.slots[0].direction, shared);
+  await f.core.next();
+  f.map.set(`research/candidates/cand_main_theorem_r${round.round}_s1_s3.md`, groupCandidate('failed'));
+  f.map.set(`research/checks/search_main_theorem_r${round.round}_a.md`, roundRecord());
+  await f.core.report({ outcome: 'searched', summary: 'S3 fails here' });
+  assert.notEqual(f.core.current.current.search?.slots[0].direction, shared, 'not assigned again for main_theorem');
+  const idea = matter(f.map.get(`research/ideas/${shared}.md`));
+  assert.equal(idea.data.status, 'draft');
+  assert.deepEqual(idea.data.tried_in.map((item) => item.target), ['main_theorem']);
+  // For the other result it is untried, so its search takes it up first.
+  const other = await f.core.nextSearchRound('other_group', 'construct');
+  assert.equal(other.slots[0].direction, shared);
+  // Resolving a test case is refused: it stays open per result, or is archived.
+  await assert.rejects(f.core.resolveIdea(shared, 'main_theorem'), /test case/);
 });
 
 test('the board shows test cases tried before outcomes were recorded, and open observations', async () => {

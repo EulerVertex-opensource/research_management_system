@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { NodeFrontmatter, NodeType, NodeSource, LayoutMode, ResearchNode, PaperEntry, ResearchStatus, IdeaKind, DefinitionKind, RemarkView } from '../../src/models/types';
-import { ASSET_TYPE_LIST, DEFINITION_KIND_LIST, IDEA_KIND_LIST, SOURCE_KIND_LIST, statusesFor } from '../../src/domain/nodeKinds';
+import { ASSET_TYPE_LIST, DEFINITION_KIND_LIST, IDEA_KIND_LIST, PROMOTION_TARGETS, SOURCE_KIND_LIST, WARNING_SECTION, statusesFor } from '../../src/domain/nodeKinds';
+import { ideaUsage } from '../../src/domain/ideaUsage';
 import { hasSectionContent } from '../../src/domain/sections';
 import { reverseRelations } from '../../src/domain/relations';
 import { isCited, sourceKind } from '../../src/domain/schema';
@@ -170,7 +171,11 @@ export function NodeDetail({
   const reverse = reverseRelations(allNodes).get(id);
   const usedIn = [...(reverse?.usedIn ?? []), ...(reverse?.usedBy ?? [])].map((ref) => allNodes.find((node) => node.id === ref)).filter((node): node is ResearchNode => Boolean(node));
   // A status that needs a section is offered only once the section has content.
-  const statusBlocked = (status: string) => (status === 'failed' && !hasSectionContent(body, 'Failure')) || (status === 'succeeded' && !hasSectionContent(body, 'Outcome'));
+  const statusBlocked = (status: string) => (status === 'failed' && !hasSectionContent(body, 'Failure')) || (status === 'succeeded' && !hasSectionContent(body, 'Outcome'))
+    || (Boolean(WARNING_SECTION[status]) && !hasSectionContent(body, WARNING_SECTION[status]));
+  // Where the idea was used, derived from the plans' inspired_by: using it never uses it up.
+  const usage = isIdea ? ideaUsage(allNodes.filter((node) => node.type === 'plan')).get(id) : undefined;
+  const promote = isIdea && (fm.idea_kind ?? 'approach') === 'observation' && fm.status === 'draft' && (usage?.targets.length ?? 0) >= PROMOTION_TARGETS;
   const isPaperSource = isCited(fm.source);
 
   const inp: React.CSSProperties = {
@@ -220,7 +225,7 @@ export function NodeDetail({
           <div style={{ flex: 1 }}>
             <label style={lbl}>Status</label>
             <select value={fm.status ?? ''} onChange={(e) => update('status', e.target.value as ResearchStatus)} style={inp}>
-              {statusesFor(fm.type).map((s) => <option key={s} value={s} disabled={s !== fm.status && statusBlocked(s)}>{s}</option>)}
+              {statusesFor(fm.type, fm.idea_kind).map((s) => <option key={s} value={s} disabled={s !== fm.status && statusBlocked(s)} title={WARNING_SECTION[s] && statusBlocked(s) ? `Write ## ${WARNING_SECTION[s]} first: why, so similar results are warned off it` : undefined}>{s}</option>)}
             </select>
           </div>
           {isDefinition && <div style={{ flex: 1 }}>
@@ -330,6 +335,23 @@ export function NodeDetail({
           <DerivedList label="Ideas" ids={reverse?.ideas ?? []} allNodes={allNodes} onNavigateNode={onNavigateNode} lbl={lbl} />
           {(reverse?.refutedBy.length ?? 0) > 0 && <DerivedList label="Refuted by" ids={reverse!.refutedBy} allNodes={allNodes} onNavigateNode={onNavigateNode} lbl={lbl} />}
         </>}
+
+        {isIdea && (usage?.targets.length ?? 0) > 0 && <div style={{ marginTop: 8, fontSize: 12 }}>
+          <label style={lbl}>Used for (derived)</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {usage!.targets.map((target) => {
+              const node = allNodes.find((item) => item.id === target);
+              const proved = usage!.succeeded.includes(target);
+              return <button key={target} type="button" onClick={() => node && onNavigateNode(node)} title={proved ? 'A plan using this idea proved it' : 'A plan used this idea; it did not prove it (yet)'}
+                style={{ padding: '1px 7px', fontSize: 11, background: 'var(--vscode-badge-background)', color: 'var(--vscode-badge-foreground)', border: 'none', borderRadius: 9, cursor: node ? 'pointer' : 'default' }}>
+                {node?.title ?? target}{proved ? ' · proved' : ''}
+              </button>;
+            })}
+          </div>
+          {promote && <div style={{ marginTop: 6, opacity: 0.8 }}>
+            Plans for {usage!.targets.length} results rely on this observation. Make it a lemma they depend on, so no proof rests on an unproved idea: ask the agent to run <code>idea promote {id}</code>.
+          </div>}
+        </div>}
 
         {isIdea && <div>
           <label style={lbl}>Related assets (optional)</label>

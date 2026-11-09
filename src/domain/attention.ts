@@ -27,6 +27,8 @@ export interface AttentionInput {
   stoppedOn?: string[];
   /** Results marked for re-check: node ID → the changed node it rests on. */
   recheck?: Record<string, string>;
+  /** Open observations plans for several results rely on (domain/ideaUsage.ts), to become lemmas. */
+  promotions?: Array<{ id: string; title: string; targets: string[] }>;
 }
 
 const open = (id: string): AttentionButton => ({ label: 'Open', action: { action: 'openNode', id }, kind: 'secondary' });
@@ -205,6 +207,23 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
         { label: 'Read it', action: { action: 'openNode', id }, kind: 'primary' },
         { label: 'Still holds', action: { action: 'confirmRecheck', id }, kind: 'secondary' },
         { label: 'Ask the agent to re-check', action: { action: 'agent', prompt: `${changed} changed after ${id} was proved. Re-read the proof of ${id} against the current ${changed} and tell me whether it still holds and what would need to change; edit nothing.` }, kind: 'secondary' },
+      ],
+    });
+  }
+
+  for (const idea of input.promotions ?? []) {
+    const results = idea.targets.filter((id) => nodes.has(id));
+    const approved = results.filter((id) => nodes.get(id)?.status === 'approved');
+    items.push({
+      key: `promote:${idea.id}`, priority: 4, category: 'promote',
+      title: `Plans for ${results.length} results rely on the observation “${idea.title}”`,
+      reason: `Used for ${mains(results)}.`,
+      why: 'It is an idea, not a proved result: each proof that needs it must prove it again inside.',
+      ifIgnored: 'The same step keeps being proved, or checked, once per result.',
+      blocks: [...new Set(results.flatMap(blocksOf))], sections: [],
+      buttons: [
+        { label: 'Make it a lemma', action: { action: 'agent', prompt: `Promote the observation ${idea.id} to a lemma: state it precisely with its hypotheses, then run research-loop idea promote ${idea.id} --id <lemma_id> --statement "..."${results.filter((id) => !approved.includes(id)).map((id) => ` --into ${id}`).join('')}.${approved.length ? ` ${listTitles(approved.map(title))} ${approved.length === 1 ? 'is' : 'are'} approved: do not add the dependency there; tell me what would change.` : ''}` }, kind: 'primary' },
+        open(idea.id),
       ],
     });
   }

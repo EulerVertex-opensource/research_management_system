@@ -1,6 +1,6 @@
 import {
   ASSET_TYPES, AssetType, CITED_SOURCE_KINDS, CONJECTURE_TYPE, DEFINITION_KIND_LIST, DefinitionKind, IDEA_KIND_LIST, IDEA_STATUS_LIST, IdeaKind, IdeaStatus, LEGACY_SOURCE_KINDS, NODE_STATUS_LIST, NodeKind, NodeStatus,
-  PLAN_STATUS_LIST, PlanStatus, SOURCE_KIND_LIST, SourceKind,
+  PLAN_STATUS_LIST, PlanStatus, SOURCE_KIND_LIST, SourceKind, WARNING_SECTION, ideaStatusesFor,
 } from './nodeKinds';
 import { CHECKLIST_STEP, hasSection, hasSectionContent } from './sections';
 
@@ -29,8 +29,10 @@ export interface DefinitionNodeData extends NodeBase {
 }
 export interface IdeaNodeData extends NodeBase {
   type: 'idea'; status: IdeaStatus; idea_kind?: IdeaKind; related_assets?: string[]; origin?: string;
-  /** The decision, plan, or asset that resolved it. */
+  /** The decision or asset that resolved it (an observation: the lemma it was promoted to). */
   resolved_by?: string;
+  /** Only on a test case: the search rounds that tried it, one record per result. */
+  tried_in?: Array<{ target: string; round?: number; slot?: number; statement_digest?: string; outcome?: string }>;
 }
 export interface PlanNodeData extends NodeBase {
   type: 'plan'; status: PlanStatus; target_asset: string; inspired_by?: string[];
@@ -103,10 +105,16 @@ export function nodeProblems(kind: NodeKind, id: string, data: Record<string, an
       if (data.definition_kind !== undefined && !(DEFINITION_KIND_LIST as readonly string[]).includes(data.definition_kind)) problems.push(`${id}: definition_kind must be one of ${DEFINITION_KIND_LIST.join(', ')}.`);
       problems.push(...sourceProblems(id, data.source, options.paperIds));
       break;
-    case 'idea':
-      if (data.type !== 'idea' || !(IDEA_STATUS_LIST as readonly string[]).includes(data.status) || !content.trim()) problems.push(`${id}: invalid idea (type idea, status ${IDEA_STATUS_LIST.join(', ')}, non-empty body).`);
-      if (data.idea_kind !== undefined && !(IDEA_KIND_LIST as readonly string[]).includes(data.idea_kind)) problems.push(`${id}: idea_kind must be one of ${IDEA_KIND_LIST.join(', ')}.`);
+    case 'idea': {
+      if (data.type !== 'idea' || !(IDEA_STATUS_LIST as readonly string[]).includes(data.status) || !content.trim()) { problems.push(`${id}: invalid idea (type idea, status ${IDEA_STATUS_LIST.join(', ')}, non-empty body).`); break; }
+      if (data.idea_kind !== undefined && !(IDEA_KIND_LIST as readonly string[]).includes(data.idea_kind)) { problems.push(`${id}: idea_kind must be one of ${IDEA_KIND_LIST.join(', ')}.`); break; }
+      const allowed = ideaStatusesFor(data.idea_kind);
+      if (!allowed.includes(data.status)) problems.push(`${id}: a ${data.idea_kind ?? 'approach'} idea has status ${allowed.join(', ')}, not ${data.status}${data.status === 'resolved' ? ' (a search round that tries it does not use it up; run `research-maintenance migrate`)' : ''}.`);
+      const section = WARNING_SECTION[data.status];
+      if (section && !hasSectionContent(content, section)) problems.push(`${id}: a ${data.status} idea needs ## ${section}: why, so similar results are warned off it.`);
+      if (data.tried_in !== undefined && !(Array.isArray(data.tried_in) && data.tried_in.every((item: unknown) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).target === 'string'))) problems.push(`${id}: tried_in must be a list of {target, round, outcome} records${data.tried_in && typeof data.tried_in === 'object' && !Array.isArray(data.tried_in) ? ' (older versions wrote one record; run `research-maintenance migrate`)' : ''}.`);
       break;
+    }
     case 'plan':
       problems.push(...planProblems(id, data, content));
       break;

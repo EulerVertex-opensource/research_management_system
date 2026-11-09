@@ -183,6 +183,35 @@ test('migration moves legacy plans and records, rebases links, marks records suc
   } finally { p.cleanup(); }
 });
 
+test('migration reopens ideas a plan or search round closed by using them, and leaves settled ones alone', () => {
+  const p = project();
+  try {
+    p.write('assets', 'a', asset('A'));
+    p.write('plans', 'attempt', plan('Attempt', 'a', ['used']));
+    const ideaFile = (data, body) => matter.stringify(body, { type: 'idea', title: data.title, status: 'resolved', ...data });
+    p.write('ideas', 'used', ideaFile({ title: 'Used approach', idea_kind: 'approach', related_assets: ['a'], resolved_by: 'attempt' }, '\nTry the bound.\n'));
+    p.write('ideas', 'promoted', ideaFile({ title: 'Promoted observation', idea_kind: 'observation', related_assets: [], resolved_by: 'a' }, '\nSquares are nonnegative.\n'));
+    p.write('ideas', 'answered', ideaFile({ title: 'Answered question', idea_kind: 'question', related_assets: [], resolved_by: 'decision_1' }, '\nIs it compact?\n'));
+    p.write('ideas', 'tried', ideaFile({ title: 'S3', idea_kind: 'test_case', related_assets: ['a'], resolved_by: 'cand_a_r2_s1_s3', tried_in: { target: 'a', round: 2, slot: 1, statement_digest: 'abc', outcome: 'cand_a_r2_s1_s3 failed' } }, '\nThe symmetric group.\n\n## Resolution\n\nTried in search round 2 for a (slot 1): cand_a_r2_s1_s3 failed\n'));
+    const invalid = p.validate();
+    assert.equal(invalid.status, 1);
+    assert.match(invalid.stdout, /ideas\/tried\.md: a test_case idea has status draft, archived, not resolved \(a search round that tries it does not use it up; run `research-maintenance migrate`\)/);
+    const applied = p.migrate('--apply');
+    assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+    assert.match(applied.stdout, /Reopened 2 idea\(s\)/);
+    const used = matter(p.read('ideas', 'used')).data;
+    assert.deepEqual([used.status, used.resolved_by], ['draft', undefined]);
+    for (const [id, by] of [['promoted', 'a'], ['answered', 'decision_1']]) assert.deepEqual([matter(p.read('ideas', id)).data.status, matter(p.read('ideas', id)).data.resolved_by], ['resolved', by]);
+    const tried = matter(p.read('ideas', 'tried'));
+    assert.deepEqual([tried.data.status, tried.data.resolved_by], ['draft', undefined]);
+    assert.deepEqual(tried.data.tried_in, [{ target: 'a', round: 2, slot: 1, statement_digest: 'abc', outcome: 'cand_a_r2_s1_s3 failed' }]);
+    assert.match(tried.content, /## Tried\n\n- Search round 2 for a \(slot 1\): cand_a_r2_s1_s3 failed/);
+    const valid = p.validate();
+    assert.equal(valid.status, 0, valid.stdout);
+    assert.match(p.migrate('--apply').stdout, /already uses the current schema/);
+  } finally { p.cleanup(); }
+});
+
 test('migration refuses plan ID collisions before changing files', () => {
   const p = project();
   try {

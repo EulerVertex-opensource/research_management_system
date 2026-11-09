@@ -313,6 +313,28 @@ test('with many main results the goal picker stays one compact control, and an a
   assert.doesNotMatch(goal, /aria-pressed="false"[^>]*>[^<]*<span[^>]*><\/span><span[^>]*>★/, 'no row of goal buttons');
 });
 
+test('an open observation plans for two results rely on is a housekeeping item; promoting skips approved results', () => {
+  const plan = (target, ideas) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/${target}.md)\n\n## Plan\n\n1. [ ] Step.\n\n## Verification\n\nDone.\n`, { type: 'plan', title: `plan ${target}`, status: 'pending', target_asset: target, inspired_by: ideas });
+  const files = memoryFiles({
+    'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft' }),
+    'research/assets/second.md': node('theorem', { title: 'Second' }),
+    'research/ideas/squares.md': matter.stringify('\nSquares are nonnegative.\n', { type: 'idea', title: 'Squares are nonnegative', status: 'draft', idea_kind: 'observation', related_assets: [] }),
+    'research/ideas/once.md': matter.stringify('\nUsed once.\n', { type: 'idea', title: 'Once', status: 'draft', idea_kind: 'observation', related_assets: [] }),
+    'research/plans/p_main.md': plan('main', ['squares', 'once']),
+    'research/plans/p_second.md': plan('second', ['squares']),
+  });
+  const payload = buildGraphPayload({ nodes: researchNodes(files), project, projectApproved: true, state: undefined, manuscript: undefined, sectionsDir: 'sections', now: 'now' });
+  const items = payload.attention.filter((item) => item.category === 'promote');
+  assert.deepEqual(items.map((item) => item.key), ['promote:squares']);
+  const [item] = items;
+  assert.equal(item.priority, 4);
+  assert.match(item.title, /Plans for 2 results rely on the observation “Squares are nonnegative”/);
+  const prompt = item.buttons[0].action.prompt;
+  assert.match(prompt, /idea promote squares --id <lemma_id> --statement "\.\.\." --into main\./);
+  assert.match(prompt, /Second is approved: do not add the dependency there/);
+  assert.deepEqual(item.buttons[1].action, { action: 'openNode', id: 'squares' });
+});
+
 test('a result cited from a paper is marked as cited, with where it comes from', () => {
   const files = memoryFiles({
     'research/assets/main.md': node('theorem', { title: 'Main', status: 'draft', deps: ['quoted'] }),

@@ -13,6 +13,8 @@ const COLORS: Record<ResearchStatus, string> = {
   succeeded: COLOR.approved,
   abandoned: COLOR.inactive,
   resolved: COLOR.link,
+  refuted: COLOR.error,
+  obstructed: COLOR.waiting,
 };
 
 interface Props {

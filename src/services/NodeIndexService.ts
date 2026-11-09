@@ -6,8 +6,9 @@ import { FileService } from './FileService';
 import { resolveIdeaType } from './ProofIdeas';
 import { computeAssetOrder } from './AssetOrder';
 import { proofDigest } from './ResearchLoopModel';
-import { ASSET_TYPES, DefinitionKind, NodeKind, definitionConcept, definitionKindOf, definitionTitle, nodeKindOf, statusesFor } from '../domain/nodeKinds';
+import { ASSET_TYPES, DefinitionKind, NodeKind, WARNING_SECTION, definitionConcept, definitionKindOf, definitionTitle, nodeKindOf, statusesFor } from '../domain/nodeKinds';
 import { nodeProblems, planProblems, stripForeignFields } from '../domain/schema';
+import { hasSectionContent } from '../domain/sections';
 import { nodeTemplate } from '../domain/templates';
 import { libraryFolders, libraryProblems, locateNodeFile } from '../domain/registry';
 import { layoutReport } from '../domain/layout';
@@ -182,7 +183,9 @@ export class NodeIndexService {
     const raw = await this.fileService.readFile(node.filePath);
     const parsed = parseMarkdown(raw);
 
-    if (!statusesFor(node.type).includes(status)) throw new Error(`Invalid status ${status} for ${node.type}.`);
+    if (!statusesFor(node.type, node.idea_kind).includes(status)) throw new Error(`Invalid status ${status} for ${node.type === 'idea' ? `a ${node.idea_kind ?? 'approach'} idea` : node.type}.`);
+    const warning = node.type === 'idea' ? WARNING_SECTION[status] : undefined;
+    if (warning && !hasSectionContent(parsed.content, warning)) throw new Error(`Write ## ${warning} first: why, so similar results are warned off it.`);
     if (node.type === 'plan') {
       const problem = planProblems(id, { ...parsed.data, type: 'plan', status }, parsed.content)[0];
       if (problem) throw new Error(problem);

@@ -73,8 +73,12 @@ const USAGE = `Usage: research-loop <command> [options]
   remark edit <remarkId> [--title "..."] [--body "..."] [--anchor "..."] --from teaching|loop|other   (the loop edits only its own remarks)
   remark archive <remarkId> --from teaching|loop|other
   remark list [--target ID] [--all] [--json]
-  idea resolve <ideaId> --by <decision, plan, or asset ID> [--note "..."]
-  idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."
+  idea resolve <ideaId> --by <decision or asset ID> [--note "..."]   (answered, or became an asset; a plan that uses an idea never resolves it)
+  idea convert <ideaId> --asset ID --goal "..." --steps "line per step" --verification "..."   (the idea stays open for other results)
+  idea promote <ideaId> --id <lemma_id> --statement "..." [--type lemma|proposition] [--title "..."] [--into ASSET]... [--uses DEFINITION]...   (an observation plans keep relying on becomes a draft lemma those results depend on; never into an approved result)
+  idea refute <ideaId> --reason "..."   (an observation found false)
+  idea obstruct <ideaId> --reason "..."   (an approach shown not to work in general; one result's failure is a failed plan)
+  idea usage   (where plans used each idea, and observations to promote)
   conjecture list [--json]   (conjectures ranked against the goals, best first)
   conjecture request <ideaId|conjecture>   (the researcher asks: make this conjecture idea precise, or search this conjecture, whatever the settings allow)
   conjecture promote <id> --as lemma|theorem|proposition   (stage draft_project only: make a conjecture a goal; list it under required_results next)
@@ -775,7 +779,26 @@ async function main(): Promise<void> {
         out(json ? { resolved: third } : `Resolved idea ${third}.`);
         return;
       }
-      throw new Error('idea add|convert|resolve');
+      if (sub === 'promote') {
+        const result = await core.promoteIdea(text(third, 'ideaId'), {
+          id: text(args.flags.id, 'id'), statement: text(args.flags.statement, 'statement'),
+          title: typeof args.flags.title === 'string' ? args.flags.title : undefined, type: typeof args.flags.type === 'string' ? args.flags.type : undefined,
+          into: args.lists.into ?? [], usesDefinitions: args.lists.uses ?? [],
+        });
+        out(json ? result : `Promoted ${third} to the draft ${result.assetId}${result.into.length ? `, now a dependency of ${result.into.join(', ')}` : ''}. The loop proves it like any other draft result.`);
+        return;
+      }
+      if (sub === 'refute' || sub === 'obstruct') {
+        const status = sub === 'refute' ? 'refuted' : 'obstructed';
+        await core.markIdea(text(third, 'ideaId'), status, text(args.flags.reason, 'reason'));
+        out(json ? { [status]: third } : `Marked idea ${third} ${status}; similar results will see the reason.`);
+        return;
+      }
+      if (sub === 'usage') {
+        out(await core.ideaUsageReport());
+        return;
+      }
+      throw new Error('idea add|convert|resolve|promote|refute|obstruct|usage');
     }
     case 'remark': {
       const from = (): RemarkFrom => {

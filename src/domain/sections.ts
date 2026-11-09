@@ -38,6 +38,16 @@ export function hasSectionContent(body: string, heading: string): boolean {
   return Boolean(sectionContent(body, heading));
 }
 
+/** Add a line at the end of `## heading`, creating the section at the end of the body when it is missing. */
+export function appendToSection(body: string, heading: string, line: string): string {
+  const match = new RegExp(`^## ${escapeRegExp(heading)}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^## |$(?![\\s\\S]))`, 'm').exec(body);
+  if (!match) return `${body.trimEnd()}\n\n## ${heading}\n\n${line}\n`;
+  const end = match.index + match[0].length;
+  const section = `${match[0].trimEnd()}\n${line}\n`;
+  const rest = body.slice(end);
+  return `${body.slice(0, match.index)}${section}${rest ? `\n${rest}` : ''}`;
+}
+
 /** Level-2 headings in order of appearance. */
 export function sectionHeadings(body: string): string[] {
   return [...body.matchAll(/^## (.+?)[ \t]*$/gm)].map((match) => match[1]);
