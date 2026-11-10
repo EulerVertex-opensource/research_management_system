@@ -177,3 +177,16 @@ test('dashboard preview hides YAML frontmatter but keeps later horizontal rules'
   assert.match(html, /<hr\/>/);
   assert.match(html, /After a rule\./);
 });
+
+test('a link already in the text needs the relationship a plain mention would', () => {
+  const p = project();
+  try {
+    p.write('assets', 'lemma', '001. Bound Lemma', 'Lemma statement.');
+    p.write('assets', 'theorem', '002. Main Theorem', 'By [Lemma 2.1](./lemma.md#statement), we have the bound. See also [outside](https://example.org/lemma.md).');
+    const missing = p.run('--preview');
+    assert.match(missing.stdout, /REVIEW research\/assets\/theorem\.md:\d+: missing-relationship: \[Lemma 2\.1\]\(\.\/lemma\.md#statement\) -> asset\/lemma/);
+    assert.doesNotMatch(missing.stdout, /example\.org/);
+    p.write('assets', 'theorem', '002. Main Theorem', 'By [Lemma 2.1](./lemma.md#statement), we have the bound.', ['lemma']);
+    assert.doesNotMatch(p.run('--preview').stdout, /missing-relationship/);
+  } finally { p.cleanup(); }
+});

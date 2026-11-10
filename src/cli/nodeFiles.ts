@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { ProjectPaths, ResearchAssistantConfig, SyncConfig } from '../models/types';
 import { LoopFiles, isLoopStatePath } from '../services/ResearchLoopModel';
+import { assertWritableInside, isInside } from '../services/PathBoundary';
 import { PROJECT_CONFIG_PATH, defaultLatexCommand, normalizeConfig, normalizeSyncConfig, pathsFromConfigText } from '../services/ProjectPathsCore';
 
 /** Node `fs` implementation of the small file interface used by the research loop. */
@@ -12,14 +13,21 @@ export class NodeLoopFiles implements LoopFiles {
 
   private resolve(relativePath: string): string {
     const full = path.resolve(this.root, relativePath);
-    if (full !== this.root && !full.startsWith(this.root + path.sep)) throw new Error(`Path leaves the project: ${relativePath}`);
+    if (!isInside(this.root, full)) throw new Error(`Path leaves the project: ${relativePath}`);
+    return full;
+  }
+
+  /** A path to write or delete: also its real location, symbolic links followed, stays in the project. */
+  private async resolveWritable(relativePath: string): Promise<string> {
+    const full = this.resolve(relativePath);
+    await assertWritableInside(this.root, full, relativePath);
     return full;
   }
 
   async readFile(relativePath: string): Promise<string> { return fs.readFile(this.resolve(relativePath), 'utf8'); }
 
   async writeFile(relativePath: string, content: string): Promise<void> {
-    const full = this.resolve(relativePath);
+    const full = await this.resolveWritable(relativePath);
     await fs.mkdir(path.dirname(full), { recursive: true });
     if (!isLoopStatePath(relativePath)) { await fs.writeFile(full, content, 'utf8'); return; }
     // A reader in another process sees the old file or the new one, never a truncated one.
@@ -34,18 +42,18 @@ export class NodeLoopFiles implements LoopFiles {
   }
 
   async appendFile(relativePath: string, content: string): Promise<void> {
-    const full = this.resolve(relativePath);
+    const full = await this.resolveWritable(relativePath);
     await fs.mkdir(path.dirname(full), { recursive: true });
     await fs.appendFile(full, content, 'utf8');
   }
 
   async deleteFile(relativePath: string): Promise<void> {
-    await fs.rm(this.resolve(relativePath), { force: true });
+    await fs.rm(await this.resolveWritable(relativePath), { force: true });
   }
 
   async deleteEmptyDir(relativeDir: string): Promise<void> {
     // rmdir refuses a folder that still holds anything, which is the point.
-    await fs.rmdir(this.resolve(relativeDir)).catch(() => undefined);
+    await fs.rmdir(await this.resolveWritable(relativeDir)).catch(() => undefined);
   }
 
   async exists(relativePath: string): Promise<boolean> {

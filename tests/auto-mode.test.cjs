@@ -509,3 +509,18 @@ test('a definition held because one it builds on changed is checked again, and t
   assert.ok(f.core.current.approvalQueue.some((item) => item.target === 'base'), 'the changed definition itself waits for the researcher');
   assert.equal(JSON.parse(f.map.get('.research-assistant-loop/auto-holds.json'))['definition:natural'], undefined);
 });
+
+test('auto mode does not approve a proof that rests on a definition nobody approved; it follows once the definition is approved', async () => {
+  const f = fixture();
+  f.map.set(SETTINGS, auto({ definitions: false }, { rigor: { agreeDefinitions: 'off', verifyProofs: 'off', verifyExtracted: 'off' } }));
+  await driveToFalsify(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
+  const result = await prove(f);
+  assert.doesNotMatch(result.message, /approved automatically/);
+  assert.equal(status(f, 'research/assets/main_theorem.md'), 'draft');
+  assert.equal(record(f, 'main_theorem'), undefined);
+  assert.equal((await f.core.next()).stage, 'waiting');
+  const request = f.core.current.approvalQueue.find((item) => item.kind === 'definition' && item.target === 'natural');
+  await f.core.resolveApproval(request.id, 'approved', '', 'test');
+  assert.equal(status(f, 'research/assets/main_theorem.md'), 'approved');
+  assert.equal(record(f, 'main_theorem').source, 'auto');
+});

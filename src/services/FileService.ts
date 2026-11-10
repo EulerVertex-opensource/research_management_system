@@ -7,6 +7,7 @@ import { ProjectPaths, ResearchAssistantConfig } from '../models/types';
 import { AGENT_PROVIDERS, PROVIDER_IDS } from './AgentProviders';
 import { migrateApprovals } from './ApprovalStore';
 import { isLoopStatePath, sharedFolders } from './ResearchLoopModel';
+import { assertWritableInside } from './PathBoundary';
 import { PROJECT_TEMPLATE } from '../domain/project';
 import { generatedAgentIgnores } from './AgentIntegrationCore';
 import { ASSET_TYPE_LIST } from '../domain/nodeKinds';
@@ -38,6 +39,14 @@ export class FileService {
     return vscode.Uri.joinPath(this.workspaceRoot, ...segments);
   }
 
+  /** A path to write or delete: it must stay in the workspace, also once `..` and symbolic links are resolved. */
+  private async writable(relativePath: string): Promise<vscode.Uri> {
+    const uri = this.resolve(relativePath);
+    if (uri.scheme === 'file' && this.workspaceRoot.scheme === 'file') await assertWritableInside(this.workspaceRoot.fsPath, uri.fsPath, relativePath);
+    else if (!(uri.path === this.workspaceRoot.path || uri.path.startsWith(this.workspaceRoot.path.replace(/\/$/, '') + '/'))) throw new Error(`Path leaves the project: ${relativePath}`);
+    return uri;
+  }
+
   async readFile(relativePath: string): Promise<string> {
     const uri = this.resolve(relativePath);
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -45,7 +54,7 @@ export class FileService {
   }
 
   async writeFile(relativePath: string, content: string): Promise<void> {
-    const uri = this.resolve(relativePath);
+    const uri = await this.writable(relativePath);
     await this.ensureParentDirectory(relativePath);
     if (!isLoopStatePath(relativePath)) { await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8')); return; }
     // The MCP bridges and the CLI read loop state concurrently: replace it whole, never truncate it in place.
@@ -59,7 +68,7 @@ export class FileService {
 
   /** Append in one write; vscode.workspace.fs has no append, so local files use node's. */
   async appendFile(relativePath: string, content: string): Promise<void> {
-    const uri = this.resolve(relativePath);
+    const uri = await this.writable(relativePath);
     await this.ensureParentDirectory(relativePath);
     if (uri.scheme === 'file') { await fsp.appendFile(uri.fsPath, content, 'utf8'); return; }
     const old = await this.readFile(relativePath).catch(() => '');
@@ -67,7 +76,7 @@ export class FileService {
   }
 
   async writeBinary(relativePath: string, data: Uint8Array): Promise<void> {
-    const uri = this.resolve(relativePath);
+    const uri = await this.writable(relativePath);
     await this.ensureParentDirectory(relativePath);
     await vscode.workspace.fs.writeFile(uri, data);
   }
@@ -82,16 +91,17 @@ export class FileService {
   }
 
   async deleteFile(relativePath: string): Promise<void> {
+    const uri = await this.writable(relativePath);
     try {
-      await vscode.workspace.fs.delete(this.resolve(relativePath));
+      await vscode.workspace.fs.delete(uri);
     } catch {
       // already gone
     }
   }
 
   async deleteEmptyDir(relativeDir: string): Promise<void> {
+    const uri = await this.writable(relativeDir);
     try {
-      const uri = this.resolve(relativeDir);
       if (!(await vscode.workspace.fs.readDirectory(uri)).length) await vscode.workspace.fs.delete(uri);
     } catch {
       // missing, or not empty
@@ -99,8 +109,8 @@ export class FileService {
   }
 
   async renameFile(oldRelativePath: string, newRelativePath: string): Promise<void> {
-    const oldUri = this.resolve(oldRelativePath);
-    const newUri = this.resolve(newRelativePath);
+    const oldUri = await this.writable(oldRelativePath);
+    const newUri = await this.writable(newRelativePath);
     await vscode.workspace.fs.rename(oldUri, newUri, { overwrite: false });
   }
 

@@ -68,3 +68,23 @@ test('a burst of context bookkeeping does not crowd real events out of the Activ
   assert.equal(buildHistory(shown, (id) => id)[0].text, 'Started setting up the results to prove.');
   assert.equal(isTimelineEvent({ type: 'context_request' }), false);
 }));
+
+test('writes and deletions do not follow a symbolic link out of the project; reads still do', () => withRoot('loop-symlink-', async (root) => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'loop-outside-'));
+  try {
+    fs.writeFileSync(path.join(outside, 'paper.md'), 'outside');
+    fs.mkdirSync(path.join(root, 'research'), { recursive: true });
+    fs.symlinkSync(outside, path.join(root, 'research', 'linked'));
+    const files = new NodeLoopFiles(root);
+    await assert.rejects(files.writeFile('research/linked/escape.md', 'x'), /symbolic link/);
+    await assert.rejects(files.writeFile('research/linked/new/deeper.md', 'x'), /symbolic link/);
+    await assert.rejects(files.appendFile('research/linked/log.jsonl', 'x\n'), /symbolic link/);
+    await assert.rejects(files.deleteFile('research/linked/paper.md'), /symbolic link/);
+    await assert.rejects(files.writeFile('../escape.md', 'x'), /leaves the project/);
+    assert.deepEqual(fs.readdirSync(outside), ['paper.md']);
+    assert.equal(await files.readFile('research/linked/paper.md'), 'outside');
+    // Ordinary writes, into folders that do not exist yet, are unaffected.
+    await files.writeFile('research/assets/a/b.md', 'inside');
+    assert.equal(fs.readFileSync(path.join(root, 'research/assets/a/b.md'), 'utf8'), 'inside');
+  } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+}));

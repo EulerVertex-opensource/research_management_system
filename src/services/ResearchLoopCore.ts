@@ -192,7 +192,12 @@ export class ResearchLoopCore {
   async peek(): Promise<LoopState | undefined> {
     const raw = await this.files.readFile(STATE_PATH).catch(() => '');
     if (!raw.trim()) return undefined;
-    const parsed = JSON.parse(raw) as Partial<LoopState> & { version?: number };
+    // Unreadable is not the same as absent: reporting "no loop" here would let a start overwrite the run.
+    let parsed: Partial<LoopState> & { version?: number };
+    try { parsed = JSON.parse(raw) as Partial<LoopState> & { version?: number }; } catch (error) {
+      throw new Error(`${STATE_PATH} is not valid JSON (${error instanceof Error ? error.message : String(error)}). Restore it or move it aside; nothing was overwritten.`);
+    }
+    if (typeof parsed.version === 'number' && parsed.version > 2) throw new Error(`${STATE_PATH} was written by a newer Research Assistant (state version ${parsed.version}); update the extension. Nothing was overwritten.`);
     return parsed.version === 2 ? parsed as LoopState : undefined;
   }
 
@@ -235,8 +240,10 @@ export class ResearchLoopCore {
     if (stage !== 'verify_node') delete state.current.node;
     if (stage !== 'waiting') delete state.waitingOn;
     await this.takeSnapshot();
-    await this.save();
+    // The log line goes first and state.json last, so state.json is the commit point: when this throws, the
+    // stage on disk has not moved and the caller may retry (at worst the log shows the stage line twice).
     await this.event('stage', { stage, assetId: state.current.assetId, planId: state.current.planId });
+    await this.save();
   }
 
   // ---------- run control ----------
@@ -1049,11 +1056,16 @@ export class ResearchLoopCore {
     return this.dependenciesApproved(parsed.data);
   }
 
+  /** Every result in depends_on and every definition in uses_definitions is approved as it stands now. */
   private async dependenciesApproved(data: Record<string, any>): Promise<boolean> {
     const records = (await this.approvals()).records;
-    for (const dep of Array.isArray(data.depends_on) ? data.depends_on as string[] : []) {
-      const depRaw = await this.files.readFile(await this.nodeFile('asset', dep)).catch(() => '');
-      if (!depRaw || !isApproved(records, 'asset', dep, depRaw)) return false;
+    const refs: Array<[ResultKind, string]> = [
+      ...(Array.isArray(data.depends_on) ? data.depends_on as string[] : []).map((id): [ResultKind, string] => ['asset', id]),
+      ...(Array.isArray(data.uses_definitions) ? data.uses_definitions as string[] : []).map((id): [ResultKind, string] => ['definition', id]),
+    ];
+    for (const [kind, id] of refs) {
+      const raw = await this.files.readFile(await this.nodeFile(kind, id)).catch(() => '');
+      if (!raw || !isApproved(records, kind, id, raw)) return false;
     }
     return true;
   }
@@ -1762,9 +1774,21 @@ export class ResearchLoopCore {
       const raw = await this.files.readFile(file);
       const location = locateNodeFile(file, this.paths);
       const library = location?.origin === 'library' ? { origin: 'library' as const, collection: location.collection } : {};
-      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), file, raw, data: parsed.data, body: parsed.content, ...library }); } catch { /* skip unparsable */ }
+      try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), file, raw, data: parsed.data, body: parsed.content, ...library }); } catch { /* skipped here; next() stops while one exists (unparsableNodes) */ }
     }
     return nodes;
+  }
+
+  /** Asset, definition, and plan files that exist but do not parse, with the parser's message. */
+  private async unparsableNodes(): Promise<string[]> {
+    const folders = [...await nodeFolders(this.files, this.paths, 'asset'), ...await nodeFolders(this.files, this.paths, 'definition'), this.paths.plans];
+    const problems: string[] = [];
+    for (const folder of [...new Set(folders)]) for (const file of await this.files.listFiles(folder)) {
+      const raw = await this.files.readFile(file).catch(() => undefined);
+      if (raw === undefined) { problems.push(`${file}: cannot be read`); continue; }
+      try { parseMarkdown(raw); } catch (error) { problems.push(`${file}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`); }
+    }
+    return problems;
   }
 
   /** Project and library nodes of one kind, keyed by ID; a project node wins over a library node with the same ID. */
@@ -2805,6 +2829,9 @@ export class ResearchLoopCore {
       if (run.deciding) return this.result(await this.decisionInstruction(run.deciding));
     }
     if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
+    // Selection reads nodes leniently and skips a file it cannot parse; deciding on that view would treat an existing result as missing.
+    const unparsable = await this.unparsableNodes();
+    if (unparsable.length) return this.result(`These research files do not parse, so the loop cannot tell what they hold:\n${unparsable.map((problem) => `- ${problem}`).join('\n')}\nFix them (keep their IDs; run research-maintenance validate), then run next. Do not re-create them under new IDs.`);
     await this.refreshRetired();
     const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute', 'verify_proof'].includes(state.stage);
     // `falsify` is the stage name older loop versions saved; selection now runs an object search instead.
@@ -2894,14 +2921,15 @@ export class ResearchLoopCore {
   // ---------- context packs ----------
 
   private async contextSources(): Promise<ContextSources> {
-    const events = await this.recentEvents(400);
+    // Count reports only: a burst of context reads or search bookkeeping must not push an earlier report out of the window.
+    const reports = await this.recentEvents(400, (event) => event.type === 'report');
     return {
       project: await this.files.readFile(this.paths.projectMd).catch(() => ''), projectFile: this.paths.projectMd,
       paperIndex: await this.files.readFile(this.paths.paperIndex).catch(() => ''), paperIndexFile: this.paths.paperIndex,
       assets: await this.collectKind('asset'), definitions: await this.collectKind('definition'),
       plans: await this.collect(this.paths.plans), ideas: await this.collect(this.paths.ideas), checks: await this.collect(this.shared.checks), candidates: await this.collect(this.shared.candidates),
       style: await new Teaching(this.files, this.paths).styleText(),
-      reports: events.filter((event) => event.type === 'report').map((event) => event as ContextSources['reports'][number]),
+      reports: reports.map((event) => event as ContextSources['reports'][number]),
     };
   }
 
@@ -3012,7 +3040,7 @@ export class ResearchLoopCore {
     const manifest = JSON.parse(await this.files.readFile(CONTEXT_MANIFEST_PATH).catch(() => '{}')) as { tokens?: number; budget?: number; stageStartedAt?: string };
     if (!state || manifest.stageStartedAt !== state.current.stageStartedAt) return { requests: [], outside: [] };
     const since = state.current.stageStartedAt;
-    const events = (await this.recentEvents(400)).filter((event) => String(event.at ?? '') >= since);
+    const events = await this.recentEvents(400, (event) => String(event.at ?? '') >= since && (event.type === 'context_request' || event.type === 'context_outside_read'));
     const requests = events.filter((event) => event.type === 'context_request').map((event) => `${String(event.id)}${Array.isArray(event.sections) && event.sections.length ? `#${(event.sections as string[]).join(',')}` : ''}`);
     const outside = [...new Set(events.filter((event) => event.type === 'context_outside_read').map((event) => String(event.file)))];
     return { tokens: manifest.tokens, budget: manifest.budget, requests, outside };
@@ -3160,13 +3188,14 @@ export class ResearchLoopCore {
     return map;
   }
 
-  /** Files added or modified since the current stage started. */
-  async changedFiles(): Promise<{ added: string[]; modified: string[]; before: Record<string, string> }> {
+  /** Files added, modified, or removed since the current stage started (the loop's own writes and deletions excepted). */
+  async changedFiles(): Promise<{ added: string[]; modified: string[]; removed: string[]; before: Record<string, string> }> {
     const before = JSON.parse(await this.files.readFile(SNAPSHOT_PATH).catch(() => '{}')) as Record<string, string>;
     const after = await this.fingerprints();
     const added = Object.keys(after).filter((file) => !(file in before) && after[file] !== EMPTY_HASH).sort();
     const modified = Object.keys(after).filter((file) => file in before && before[file] !== after[file]).sort();
-    return { added, modified, before };
+    const removed = Object.keys(before).filter((file) => !(file in after) && before[file] !== EMPTY_HASH).sort();
+    return { added, modified, removed, before };
   }
 
   private folders() { return { assets: this.paths.assets, definitions: this.paths.definitions, ideas: this.paths.ideas, plans: this.paths.plans, library: this.paths.library, checks: this.shared.checks, candidates: this.shared.candidates, decisions: this.shared.decisions, handoffs: this.shared.handoffs }; }
@@ -3179,10 +3208,15 @@ export class ResearchLoopCore {
   /** Validate the files written during the current stage against that stage's rules. */
   private async validateStageFiles(): Promise<{ added: string[]; modified: string[]; problems: string[] }> {
     const state = this.require();
-    const { added, modified } = await this.changedFiles();
+    const { added, modified, removed } = await this.changedFiles();
     const problems: string[] = [];
     const stage = state.stage;
     const folders = this.folders();
+    // No stage deletes research files (ideas aside; library packages are removed by the researcher and checked against their lockfile).
+    for (const file of removed) {
+      if (path.posix.dirname(file) === folders.ideas || locateNodeFile(file, this.paths)?.origin === 'library') continue;
+      problems.push(`${file}: deleted during stage ${stage}. Restore it with git; a result that should go is retired or deprecated, never removed.`);
+    }
     const isIn = (file: string, folder: string) => path.posix.dirname(file) === folder;
     const allowedFolders = new Set<string>([folders.ideas]);
     if (stage === 'scaffold' || stage === 'sources' || stage === 'conjecture') { allowedFolders.add(folders.assets); allowedFolders.add(folders.definitions); }

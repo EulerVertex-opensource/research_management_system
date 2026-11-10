@@ -15,6 +15,7 @@ export interface InterlinkPlan { changes: InterlinkChange[]; issues: InterlinkIs
 interface AstNode {
   type: string;
   value?: string;
+  url?: string;
   children?: AstNode[];
   position?: { start: { offset?: number; line: number }; end: { offset?: number } };
 }
@@ -97,9 +98,21 @@ export function planResearchInterlinks(inputs: InterlinkInput[], assetFolder: st
     }
     const sortedTerms = [...terms.keys()].sort((a, b) => b.length - a.length || a.localeCompare(b));
     const edits: { start: number; end: number; replacement: string }[] = [];
+    // Links resolve against every node of a kind this source may rest on, library nodes it does not reference included.
+    const byFile = new Map((source.kind === 'definition' ? [...definitions.values()] : [...assets.values(), ...definitions.values()]).map((target) => [target.filePath, target]));
     const tree = parser.parse(source.body) as unknown as AstNode;
     const walk = (node: AstNode, blocked = false): void => {
       const excluded = blocked || BLOCKED.has(node.type);
+      // A link someone already wrote is a reference too: it needs the relationship a plain mention would.
+      if (node.type === 'link' && !blocked && node.url && !/^[a-z][a-z0-9+.-]*:/i.test(node.url) && !node.url.startsWith('#')) {
+        let file: string | undefined;
+        try { file = path.posix.normalize(path.posix.join(path.posix.dirname(source.filePath), decodeURI(node.url.split('#')[0]))); } catch { file = undefined; }
+        const target = file ? byFile.get(file) : undefined;
+        if (target && target.filePath !== source.filePath && !linked.has(`${target.kind}:${target.id}`)) {
+          const text = source.body.slice(node.position?.start.offset ?? 0, node.position?.end.offset ?? 0);
+          issues.push({ filePath: source.filePath, line: node.position?.start.line ?? 1, kind: 'missing-relationship', text: `${text} -> ${target.kind}/${target.id}` });
+        }
+      }
       if (node.type === 'text' && !excluded && node.position?.start.offset !== undefined && node.position.end.offset !== undefined) {
         const start = node.position.start.offset;
         const end = node.position.end.offset;

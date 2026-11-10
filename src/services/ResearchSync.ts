@@ -162,7 +162,7 @@ export class ResearchSync {
       upstreamMissing: !hasUpstream || undefined,
       fetchError,
       uncommitted: dirty.map((entry) => `${entry.code.trim() || '?'} ${entry.path}`),
-      unreportedStageEdits: stageEdits ? [...stageEdits.added, ...stageEdits.modified] : [],
+      unreportedStageEdits: stageEdits ? [...stageEdits.added, ...stageEdits.modified, ...stageEdits.removed] : [],
       phase: record.phase, conflicted: record.conflicted,
       prepared: record.prepared ? { at: record.prepared.at, head: record.prepared.head.slice(0, 8) } : undefined,
       lastPull: record.lastPull, lastPublish: record.lastPublish,
@@ -191,8 +191,8 @@ export class ResearchSync {
     if (record.phase === 'conflict') throw new Error(`A ${record.operation ?? 'pull'} stopped on conflicts in ${record.conflicted?.join(', ') ?? 'research files'}. Resolve them, then run \`${LOOP_COMMAND} sync pull --continue\`.`);
     const state = this.core.current;
     if (state && WORKING_STAGES.has(state.stage)) {
-      const { added, modified } = await this.core.changedFiles();
-      if (added.length || modified.length) throw new Error(`Stage ${state.stage} has unreported edits (${[...added, ...modified].join(', ')}). Report the stage first (${LOOP_COMMAND} report ...), or restore the files, then pull.`);
+      const { added, modified, removed } = await this.core.changedFiles();
+      if (added.length || modified.length || removed.length) throw new Error(`Stage ${state.stage} has unreported edits (${[...added, ...modified, ...removed.map((file) => `${file} (deleted)`)].join(', ')}). Report the stage first (${LOOP_COMMAND} report ...), or restore the files, then pull.`);
     }
     const dirty = await this.git.status(await this.syncPaths());
     const trackedElsewhere = (await this.git.status([], false)).filter((entry) => !dirty.some((item) => item.path === entry.path));
@@ -280,8 +280,8 @@ export class ResearchSync {
     if (record.phase === 'conflict') add('No unresolved sync conflict', [`Conflicts in ${record.conflicted?.join(', ')}; finish with sync pull --continue.`]);
     const state = this.core.current;
     if (state && WORKING_STAGES.has(state.stage)) {
-      const { added, modified } = await this.core.changedFiles();
-      add('Current stage reported', added.length || modified.length ? [`Stage ${state.stage} has unreported edits: ${[...added, ...modified].join(', ')}.`] : []);
+      const { added, modified, removed } = await this.core.changedFiles();
+      add('Current stage reported', added.length || modified.length || removed.length ? [`Stage ${state.stage} has unreported edits: ${[...added, ...modified, ...removed.map((file) => `${file} (deleted)`)].join(', ')}.`] : []);
     }
     add('Research files valid (format, dependencies, no cycles)', await this.core.validateAll());
     add('Approvals match current content', await this.core.approvalProblems());
