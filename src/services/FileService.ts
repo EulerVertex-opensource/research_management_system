@@ -75,6 +75,21 @@ export class FileService {
     await vscode.workspace.fs.writeFile(uri, Buffer.from(old + content, 'utf8'));
   }
 
+  /** Exclusive create for the state lock; on a non-local workspace, a best-effort check (the CLI cannot share it there anyway). */
+  async createExclusive(relativePath: string, content: string): Promise<boolean> {
+    const uri = await this.writable(relativePath);
+    await this.ensureParentDirectory(relativePath);
+    if (uri.scheme === 'file') {
+      try { await fsp.writeFile(uri.fsPath, content, { encoding: 'utf8', flag: 'wx' }); return true; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+        throw error;
+      }
+    }
+    if (await this.exists(relativePath)) return false;
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+    return true;
+  }
+
   async writeBinary(relativePath: string, data: Uint8Array): Promise<void> {
     const uri = await this.writable(relativePath);
     await this.ensureParentDirectory(relativePath);

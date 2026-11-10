@@ -265,11 +265,14 @@ export class LoopHost implements vscode.Disposable {
     } catch (error: unknown) { this.output.appendLine(`[loop] Bridge registry: ${String(error)}`); }
   }
 
-  /** Serialize operations: the CLI also writes state.json, so reload before every action. */
+  /**
+   * Serialize operations: queued here within this window, and through the state lock against the CLI,
+   * hooks, MCP servers, and other windows, with the state reloaded before every action.
+   */
   private async withCore<T>(action: (core: ResearchLoopCore) => Promise<T>): Promise<T> {
     if (!this.core) throw new Error('Initialize the Research Assistant project first.');
     const core = this.core;
-    const run = this.busy.then(async () => { await core.load(); return action(core); });
+    const run = this.busy.then(() => core.transaction('VS Code extension', () => action(core)));
     this.busy = run.catch(() => undefined);
     const result = await run;
     void this.refreshStatusBar();

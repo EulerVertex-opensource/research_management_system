@@ -47,6 +47,15 @@ export class NodeLoopFiles implements LoopFiles {
     await fs.appendFile(full, content, 'utf8');
   }
 
+  async createExclusive(relativePath: string, content: string): Promise<boolean> {
+    const full = await this.resolveWritable(relativePath);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    try { await fs.writeFile(full, content, { encoding: 'utf8', flag: 'wx' }); return true; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
+  }
+
   async deleteFile(relativePath: string): Promise<void> {
     await fs.rm(await this.resolveWritable(relativePath), { force: true });
   }

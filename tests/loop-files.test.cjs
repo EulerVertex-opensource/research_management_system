@@ -88,3 +88,74 @@ test('writes and deletions do not follow a symbolic link out of the project; rea
     assert.equal(fs.readFileSync(path.join(root, 'research/assets/a/b.md'), 'utf8'), 'inside');
   } finally { fs.rmSync(outside, { recursive: true, force: true }); }
 }));
+
+// The cross-process state lock (F05/F06): one writer of state.json at a time, whatever process it is.
+const { STATE_LOCK_PATH } = load('../src/services/StateLock.ts');
+const stateFile = '.research-assistant-loop/state.json';
+const lockFile = (root) => path.join(root, STATE_LOCK_PATH);
+const gate = () => { let open; const opened = new Promise((resolve) => { open = resolve; }); return { opened, open }; };
+
+async function startedRoot(root) {
+  fs.mkdirSync(path.join(root, 'research'), { recursive: true });
+  fs.writeFileSync(path.join(root, paths.projectMd), '# Project\n\n## Required Results\n');
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap: 5 });
+  await core.transaction('test start', () => core.start('claude', { goal: 'Prove it.' }));
+}
+
+test('two writers in different cores never overwrite each other: the second waits and builds on the first', () => withRoot('loop-lock-', async (root) => {
+  await startedRoot(root);
+  const a = new ResearchLoopCore(new NodeLoopFiles(root), paths);
+  const b = new ResearchLoopCore(new NodeLoopFiles(root), paths);
+  const held = gate();
+  const inside = gate();
+  // A takes the lock and works slowly; B (the dashboard pausing, say) arrives meanwhile.
+  const first = a.transaction('slow report', async () => { inside.open(); await held.opened; await a.setIterationCap(9); });
+  await inside.opened;
+  assert.ok(fs.existsSync(lockFile(root)));
+  let bDone = false;
+  const second = b.transaction('pause', async () => { await b.pause('Paused by the researcher.'); bDone = true; });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(bDone, false, 'B waits while A holds the lock');
+  held.open();
+  await Promise.all([first, second]);
+  const state = JSON.parse(fs.readFileSync(path.join(root, stateFile), 'utf8'));
+  assert.equal(state.autopilot.iterationCap, 9, "A's change survives");
+  assert.equal(state.status, 'paused', "B's change is there too");
+  assert.equal(fs.existsSync(lockFile(root)), false, 'the lock is released');
+}));
+
+test('two chats claiming the driver lock at once: exactly one wins', () => withRoot('loop-lock-claim-', async (root) => {
+  await startedRoot(root);
+  const cores = ['chat-a', 'chat-b'].map(() => new ResearchLoopCore(new NodeLoopFiles(root), paths));
+  const results = await Promise.all(cores.map((core, i) => core.transaction('hook', () => core.touch(['chat-a', 'chat-b'][i], false, false))));
+  const winner = JSON.parse(fs.readFileSync(path.join(root, stateFile), 'utf8')).lock.sessionId;
+  // The state starts without a lock, so the first claim succeeds; the second sees it fresh and is refused.
+  assert.deepEqual(results.filter(Boolean).length, 1, JSON.stringify(results));
+  assert.equal(winner, results[0] ? 'chat-a' : 'chat-b');
+}));
+
+test('a lock left by a dead process is broken; a live holder makes the waiter give up with its name', () => withRoot('loop-lock-stale-', async (root) => {
+  await startedRoot(root);
+  const holder = (pid, op) => JSON.stringify({ token: `t-${pid}`, pid, host: os.hostname(), op, at: new Date().toISOString(), refreshedAt: new Date().toISOString() });
+  fs.writeFileSync(lockFile(root), holder(2 ** 22 + 12345, 'crashed command'));
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { stateLock: { waitMs: 300 } });
+  await core.transaction('after a crash', () => core.setIterationCap(4));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, stateFile), 'utf8')).autopilot.iterationCap, 4);
+  fs.writeFileSync(lockFile(root), holder(process.pid, 'research-loop report'));
+  await assert.rejects(core.transaction('blocked', () => core.setIterationCap(5)), (error) => error.name === 'StateLockBusy' && /research-loop report \(process \d+/.test(error.message));
+  assert.match(fs.readFileSync(lockFile(root), 'utf8'), /research-loop report/, "the live holder's lock is left alone");
+}));
+
+test('under the lock, a save over a revision someone else wrote without the lock is refused', () => withRoot('loop-lock-revision-', async (root) => {
+  await startedRoot(root);
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths);
+  await assert.rejects(core.transaction('report', async () => {
+    // An older writer that skips the lock saves meanwhile.
+    const raw = JSON.parse(fs.readFileSync(path.join(root, stateFile), 'utf8'));
+    fs.writeFileSync(path.join(root, stateFile), JSON.stringify({ ...raw, revision: raw.revision + 1, status: 'paused' }));
+    await core.setIterationCap(8);
+  }), /changed by another writer.*Nothing was saved/);
+  const state = JSON.parse(fs.readFileSync(path.join(root, stateFile), 'utf8'));
+  assert.equal(state.status, 'paused', "the other writer's change is not overwritten");
+  assert.notEqual(state.autopilot.iterationCap, 8);
+}));

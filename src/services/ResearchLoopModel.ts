@@ -25,6 +25,12 @@ export type LoopStage =
  * a proof after these dependencies or definitions changed.
  */
 export interface NodeCheckTarget { id: string; mode: 'definition' | 'citation' | 'proof'; changed?: string[] }
+/**
+ * One thing a stage works from, frozen when the stage began: the statement or proof of a result, or a
+ * whole definition or cited result. A verdict covers exactly these versions; if one changes before
+ * the report, the work covered an earlier version and is redone.
+ */
+export interface FrozenInput { id: string; kind: 'asset' | 'definition'; file: string; part: 'statement' | 'proof' | 'node'; digest: string }
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 /** `package`: one review of an imported research package (target: its alias) that approves all of its results at once. */
@@ -92,6 +98,8 @@ export interface LoopFiles {
   writeFile(relativePath: string, content: string): Promise<void>;
   /** Append without reading the file back, so writers in other processes never lose lines. */
   appendFile?(relativePath: string, content: string): Promise<void>;
+  /** Create the file only if it does not exist yet, atomically across processes; false when it already exists. Backs the state lock. */
+  createExclusive?(relativePath: string, content: string): Promise<boolean>;
   exists(relativePath: string): Promise<boolean>;
   listFiles(relativeDir: string, extension?: string): Promise<string[]>;
   /** Immediate subfolders (paths relative to the project); used to discover library collections. */
@@ -143,6 +151,8 @@ export interface LoopState {
   status: LoopStatus;
   stage: LoopStage;
   resumeStage?: LoopStage;
+  /** Bumped on every save; a writer holding the state lock refuses to save over a revision it did not load. */
+  revision?: number;
   current: {
     assetId?: string; planId?: string; counterexampleId?: string;
     /** Stage `conjecture`: the conjecture idea being made precise. */
@@ -154,6 +164,8 @@ export interface LoopState {
     recheck?: string[];
     /** Stage `verify_node`: the definition, or the cited or library result, checked before auto mode approves it. */
     node?: NodeCheckTarget;
+    /** Stages that execute or check work: what they work from, as it was when the stage began. */
+    inputs?: FrozenInput[];
   };
   /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
   /** constructionProof: digest of the proof a verified search construction wrote into the asset; it vouches for that proof as a verified plan would. */

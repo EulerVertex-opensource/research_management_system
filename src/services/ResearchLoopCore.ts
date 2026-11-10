@@ -8,9 +8,10 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, ASSESSMENT_PATH, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, GoalAssessment, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
+  FrozenInput, LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
+import { STATE_LOCK_PATH, StateLockOptions, acquireStateLock } from './StateLock';
 import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES, REUSABLE_IDEA_KINDS, WARNING_SECTION, toIdeaKind } from '../domain/nodeKinds';
 import { ideaUsage, promotionCandidates, triedRecords, usageLine } from '../domain/ideaUsage';
 import { RankedConjecture, describeConjectures, rankConjectures } from '../domain/conjectures';
@@ -49,6 +50,8 @@ import { LIBRARY_PREFIX, LibraryHit, ResultKind, findNodeFile, isLibraryId, isLi
 export interface CoreOptions {
   now?: () => string;
   id?: () => string;
+  /** Wait and staleness of the cross-process state lock (tests shorten them). */
+  stateLock?: StateLockOptions;
   /** Overrides the loop settings' iteration cap for runs this core starts (CLI `--iteration-cap`). */
   iterationCap?: number;
   /** Git for base-commit tracking and provenance; without it the loop works as before. */
@@ -96,6 +99,8 @@ const EXTENSION_LISTED = 10;
 /** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
 const MAX_AUTO_PASSES = 16;
 const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
+/** Stages whose outcome rests on what they read: their inputs are frozen when they begin and compared at the report. */
+const FROZEN_STAGES = new Set<LoopStage>(['execute', 'verify_proof', 'verify_node', 'verify_counterexample', 'verify_construction']);
 
 /**
  * Pure research-loop engine. Files are the state; this class only reads and
@@ -113,6 +118,11 @@ export class ResearchLoopCore {
   private readonly contextBudgets: Partial<Record<LoopStage, number>> | undefined;
   /** Last loop settings read, for the synchronous status text. */
   private lastSettings: LoopSettings | undefined;
+  private readonly stateLock: StateLockOptions | undefined;
+  /** Nesting depth of `transaction` on this core: the lock is taken once, at the outermost. */
+  private lockDepth = 0;
+  /** The revision of state.json this core loaded (or last saved); a save under the lock must find it still on disk. */
+  private loadedRevision = 0;
 
   constructor(private readonly files: LoopFiles, private paths: ProjectPaths, options: CoreOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -122,6 +132,25 @@ export class ResearchLoopCore {
     this.identity = options.identity;
     this.extensionVersion = options.extensionVersion;
     this.contextBudgets = options.contextBudgets;
+    this.stateLock = options.stateLock;
+  }
+
+  /**
+   * Run `action` as the only writer of the loop state: take the cross-process state lock, load the
+   * state afresh, act, and release. Every entry point that changes state (the extension's queue, CLI
+   * commands and hooks, the MCP server) goes through here. Nested calls on one core reuse the lock.
+   */
+  async transaction<T>(op: string, action: () => Promise<T>): Promise<T> {
+    if (this.lockDepth > 0) return action();
+    const release = await acquireStateLock(this.files, op, this.stateLock);
+    this.lockDepth++;
+    try {
+      await this.load();
+      return await action();
+    } finally {
+      this.lockDepth--;
+      await release();
+    }
   }
 
   setPaths(paths: ProjectPaths): void { this.paths = paths; }
@@ -179,6 +208,7 @@ export class ResearchLoopCore {
 
   async load(): Promise<LoopState | undefined> {
     this.state = await this.peek();
+    this.loadedRevision = this.state?.revision ?? 0;
     // Status lines (the autonomous budget among them) are synchronous: give them the researcher's settings, not the defaults.
     await this.loopSettings().catch(() => undefined);
     return this.state;
@@ -203,8 +233,16 @@ export class ResearchLoopCore {
 
   private async save(): Promise<void> {
     if (!this.state) return;
+    if (this.lockDepth > 0) {
+      // Under the lock nobody else may have saved since this core loaded: a different revision means a writer that skips the lock.
+      let onDisk = 0;
+      try { onDisk = (JSON.parse(await this.files.readFile(STATE_PATH)) as { revision?: number }).revision ?? 0; } catch { onDisk = 0; }
+      if (onDisk !== this.loadedRevision) throw new Error(`${STATE_PATH} was changed by another writer while this operation held ${STATE_LOCK_PATH} (revision ${onDisk}, expected ${this.loadedRevision}); perhaps an older Research Assistant that does not take the lock. Nothing was saved; run the command again.`);
+    }
+    this.state.revision = this.loadedRevision + 1;
     this.state.updatedAt = this.now();
     await this.files.writeFile(STATE_PATH, JSON.stringify(this.state, null, 2) + '\n');
+    this.loadedRevision = this.state.revision;
   }
 
   private require(): LoopState {
@@ -231,6 +269,124 @@ export class ResearchLoopCore {
     return (keep ? events.filter(keep) : events).slice(-limit);
   }
 
+  // ---------- frozen stage inputs ----------
+
+  /** The digest of one part of a node file as it is now; '' when the file is missing or does not parse. */
+  private async inputDigest(file: string, part: FrozenInput['part'], kind: FrozenInput['kind']): Promise<string> {
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw.trim()) return '';
+    try { return part === 'statement' ? statementDigest(raw) : part === 'proof' ? proofDigest(raw) : researchDigest(raw, kind); } catch { return ''; }
+  }
+
+  /**
+   * What a stage works from, frozen as the stage begins: the result's own statement (and its proof,
+   * for a proof check), and the statements of the results and definitions it rests on; a checked
+   * definition or cited result as a whole. Undefined for a stage whose outcome rests on nothing frozen.
+   */
+  private async freezeInputs(stage: LoopStage, current: LoopState['current']): Promise<FrozenInput[] | undefined> {
+    if (!FROZEN_STAGES.has(stage)) return undefined;
+    const inputs: FrozenInput[] = [];
+    const add = async (kind: FrozenInput['kind'], id: string, part: FrozenInput['part']) => {
+      const file = (await findNodeFile(this.files, this.paths, kind, id)) ?? await this.nodeFile(kind, id);
+      inputs.push({ id, kind, file, part, digest: await this.inputDigest(file, part, kind) });
+    };
+    const result = async (id: string, parts: Array<'statement' | 'proof'>) => {
+      const file = (await findNodeFile(this.files, this.paths, 'asset', id)) ?? await this.nodeFile('asset', id);
+      let data: Record<string, any> = {};
+      try { data = parseMarkdown(await this.files.readFile(file)).data; } catch { /* missing or unparsable: frozen as '' below */ }
+      for (const part of parts) await add('asset', id, part);
+      for (const dep of Array.isArray(data.depends_on) ? data.depends_on : []) await add('asset', String(dep), 'statement');
+      for (const definition of Array.isArray(data.uses_definitions) ? data.uses_definitions : []) await add('definition', String(definition), 'statement');
+    };
+    if (stage === 'verify_node') {
+      const node = current.node;
+      if (!node) return undefined;
+      if (node.mode === 'proof') await result(node.id, ['statement', 'proof']);
+      else await add(node.mode === 'definition' ? 'definition' : 'asset', node.id, 'node');
+      return inputs;
+    }
+    if (!current.assetId) return undefined;
+    // Execution writes the proof itself, and its own statement is held fixed by the stage rules: it works from what the result rests on.
+    if (stage === 'execute') { await result(current.assetId, []); return inputs.filter((input) => input.id !== current.assetId); }
+    await result(current.assetId, stage === 'verify_proof' ? ['statement', 'proof'] : ['statement']);
+    return inputs;
+  }
+
+  /**
+   * What the current stage's target rests on that changed since the stage began. The target itself is
+   * left out: a change to the result under check is the stage rules' business (the checker may not edit
+   * it), and its frozen digests serve only to stamp the verdict on the version that was checked.
+   */
+  private async inputDrift(): Promise<FrozenInput[]> {
+    const state = this.state;
+    const inputs = state?.current.inputs;
+    if (!state || !inputs?.length || !FROZEN_STAGES.has(state.stage)) return [];
+    const target = state.stage === 'verify_node' ? state.current.node?.id : state.current.assetId;
+    const changed: FrozenInput[] = [];
+    for (const input of inputs) if (input.id !== target && await this.inputDigest(input.file, input.part, input.kind) !== input.digest) changed.push(input);
+    return changed;
+  }
+
+  /** The frozen statement digests of what `id` rests on, as a proof's dependency_digests; undefined when one was missing. */
+  private frozenDependencies(id: string): Record<string, string> | undefined {
+    const inputs = this.state?.current.inputs;
+    if (!inputs) return undefined;
+    const deps = inputs.filter((input) => input.id !== id && input.part === 'statement');
+    if (deps.some((input) => !input.digest)) return undefined;
+    return Object.fromEntries(deps.map((input) => [input.id, input.digest]));
+  }
+
+  /** The frozen digest of one part of the stage's own target, if the stage froze it. */
+  private frozenPart(id: string, part: FrozenInput['part']): string | undefined {
+    return this.state?.current.inputs?.find((input) => input.id === id && input.part === part)?.digest;
+  }
+
+  /**
+   * Something the stage worked from changed before its report (the researcher edited it, a sync
+   * brought it, another chat changed it). The work covered the earlier version only: an execution
+   * is set aside (not a failed approach) and the result is planned anew; a check's verdict is set
+   * aside and the check runs again on the current version. The change itself is never undone.
+   */
+  private async afterInputDrift(drift: FrozenInput[]): Promise<string> {
+    const state = this.require();
+    const stage = state.stage;
+    const assetId = state.current.assetId;
+    const names = [...new Set(drift.map((input) => input.id))];
+    const list = names.join(', ');
+    const notOurs = `This is someone else's change: do not revert ${names.length > 1 ? 'them' : 'it'}.`;
+    await this.event('inputs_changed', { stage, assetId, planId: state.current.planId, changed: drift.map((input) => `${input.id}#${input.part}`) });
+    if (stage === 'execute' && assetId) {
+      const planId = state.current.planId;
+      if (planId) {
+        const planFile = `${this.paths.plans}/${planId}.md`;
+        const raw = await this.files.readFile(planFile).catch(() => '');
+        if (raw) {
+          const plan = parseMarkdown(raw);
+          plan.data.status = 'abandoned';
+          const note = `Set aside: ${list} changed during execution, so this execution worked against an earlier version. Not counted as a failed approach.`;
+          await this.writeOwned(planFile, stringifyMarkdown(`${plan.content.trimEnd()}\n\n## ${sectionContent(plan.content, 'Failure') ? 'Superseded' : 'Failure'}\n\n${note}\n`, plan.data));
+        }
+      }
+      await this.setStage('plan', { planId: await this.pendingPlan(assetId), statementDigest: undefined });
+      return `${list} changed during execution, so this execution worked against an earlier version. ${planId ? `Plan ${planId} is set aside (not counted as a failed approach); ` : ''}${assetId} is planned anew against the current version, and any draft proof stays in it for reference. ${notOurs} Continue with next.`;
+    }
+    if (stage === 'verify_proof' && state.current.planId) await this.setAsideVerdict(state.current.planId);
+    if (stage === 'verify_counterexample' && state.current.counterexampleId) await this.setAsideVerdictIn(`${this.paths.assets}/${state.current.counterexampleId}.md`);
+    if (stage === 'verify_construction' && assetId && state.current.search?.candidateId) {
+      const candidate = (await this.searchProgressFor(assetId)).candidates.find((item) => item.id === state.current.search?.candidateId);
+      if (candidate) await this.setAsideVerdictIn(candidate.file);
+    }
+    await this.setStage(stage, {});
+    return `${list} changed during the check, so its verdict covers only the earlier version and is set aside. Check again against the current version: run next for the fresh context. ${notOurs}`;
+  }
+
+  /** A verdict written into a file (a candidate's or a counterexample's) stays under another heading, so it cannot pass for the next check's. */
+  private async setAsideVerdictIn(file: string): Promise<void> {
+    const raw = await this.files.readFile(file).catch(() => '');
+    if (!raw || !/^## Verdict[ \t]*$/m.test(raw)) return;
+    await this.writeOwned(file, raw.replace(/^## Verdict[ \t]*$/gm, '## Earlier verdict'));
+  }
+
   private async setStage(stage: LoopStage, patch: Partial<LoopState['current']> = {}): Promise<void> {
     const state = this.require();
     state.stage = stage;
@@ -239,6 +395,8 @@ export class ResearchLoopCore {
     if (stage !== 'verify_proof') delete state.current.recheck;
     if (stage !== 'verify_node') delete state.current.node;
     if (stage !== 'waiting') delete state.waitingOn;
+    const inputs = await this.freezeInputs(stage, state.current);
+    if (inputs) state.current.inputs = inputs; else delete state.current.inputs;
     await this.takeSnapshot();
     // The log line goes first and state.json last, so state.json is the commit point: when this throws, the
     // stage on disk has not moved and the caller may retry (at worst the log shows the stage line twice).
@@ -1884,9 +2042,10 @@ export class ResearchLoopCore {
   }
 
   /** Record an independent check's verdict on exactly this version as a shared decision. */
-  private async writeCheckVerdict(node: NodeCheckTarget, raw: string, verdict: 'confirmed' | 'rejected', summary: string, from: 'extraction' | 'auto' | 'recheck'): Promise<void> {
+  /** `checkedAgainst`: the dependency statements the check read, when the stage froze them; otherwise they are read now. */
+  private async writeCheckVerdict(node: NodeCheckTarget, raw: string, verdict: 'confirmed' | 'rejected', summary: string, from: 'extraction' | 'auto' | 'recheck', checkedAgainst?: Record<string, string>): Promise<void> {
     if (node.mode === 'proof') {
-      const deps = await this.dependencyDigests(parseMarkdown(raw).data);
+      const deps = checkedAgainst ?? await this.dependencyDigests(parseMarkdown(raw).data);
       await this.writeDecision('proof_check', node.id, summary, { reason: verdict, digest: proofDigest(raw), statementDigest: statementDigest(raw), dependencyDigests: deps ?? {} });
       await this.event('proof_checked', { assetId: node.id, verdict, from, ...(node.changed?.length ? { changed: node.changed } : {}) });
       return;
@@ -2010,8 +2169,14 @@ export class ResearchLoopCore {
     const raw = file ? await this.files.readFile(file).catch(() => '') : '';
     if (!raw) throw new Error(`${node.id} is gone; run ${LOOP_COMMAND} next.`);
     const state = this.require();
+    // The verdict covers the version frozen when the check began; one read now that differs is not what was checked.
+    const frozen = state.current.inputs ? state.current.inputs.filter((input) => input.id === node.id) : [];
+    for (const input of frozen) {
+      const now = input.part === 'statement' ? statementDigest(raw) : input.part === 'proof' ? proofDigest(raw) : researchDigest(raw, kind);
+      if (now !== input.digest) throw new Error(`${node.id} changed while the verdict was being recorded. Run ${LOOP_COMMAND} next.`);
+    }
     const extracted = Boolean(state.extractedChecks?.includes(node.id));
-    await this.writeCheckVerdict(node, raw, verdict, summary, node.changed?.length ? 'recheck' : extracted ? 'extraction' : 'auto');
+    await this.writeCheckVerdict(node, raw, verdict, summary, node.changed?.length ? 'recheck' : extracted ? 'extraction' : 'auto', state.current.inputs && node.mode === 'proof' ? this.frozenDependencies(node.id) ?? {} : undefined);
     if (extracted) { state.extractedChecks = state.extractedChecks!.filter((id) => id !== node.id); if (!state.extractedChecks.length) delete state.extractedChecks; await this.save(); }
     if (node.mode === 'proof' && node.changed?.length) return this.afterProofRecheck(node.id, node.changed, raw, verdict, summary);
     return this.afterCheckVerdict(node.id, verdict, summary, 'Continue with next.');
@@ -2832,6 +2997,9 @@ export class ResearchLoopCore {
     // Selection reads nodes leniently and skips a file it cannot parse; deciding on that view would treat an existing result as missing.
     const unparsable = await this.unparsableNodes();
     if (unparsable.length) return this.result(`These research files do not parse, so the loop cannot tell what they hold:\n${unparsable.map((problem) => `- ${problem}`).join('\n')}\nFix them (keep their IDs; run research-maintenance validate), then run next. Do not re-create them under new IDs.`);
+    // What the current stage works from changed since it began: its work would rest on an earlier version.
+    const drift = await this.inputDrift();
+    const driftNote = drift.length ? await this.afterInputDrift(drift) : undefined;
     await this.refreshRetired();
     const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute', 'verify_proof'].includes(state.stage);
     // `falsify` is the stage name older loop versions saved; selection now runs an object search instead.
@@ -2888,6 +3056,7 @@ export class ResearchLoopCore {
       if (selection.stage === 'ready' && run) await this.exploreConjecture(run, 'every goal is proved');
     }
     const result = this.result();
+    if (driftNote) result.instruction = `${driftNote.replace(/ (Continue with next\.|Check again against the current version: run next for the fresh context\.)/, '')}\n\n${result.instruction}`;
     if (state.stage === 'ready') {
       const manuscript = await this.manuscriptStatus();
       if (manuscript) result.instruction += `\n${manuscript}`;
@@ -3206,9 +3375,10 @@ export class ResearchLoopCore {
   }
 
   /** Validate the files written during the current stage against that stage's rules. */
-  private async validateStageFiles(): Promise<{ added: string[]; modified: string[]; problems: string[] }> {
+  private async validateStageFiles(ignore: Set<string> = new Set()): Promise<{ added: string[]; modified: string[]; problems: string[] }> {
     const state = this.require();
-    const { added, modified, removed } = await this.changedFiles();
+    const changes = await this.changedFiles();
+    const [added, modified, removed] = [changes.added, changes.modified, changes.removed].map((files) => files.filter((file) => !ignore.has(file)));
     const problems: string[] = [];
     const stage = state.stage;
     const folders = this.folders();
@@ -3399,7 +3569,7 @@ export class ResearchLoopCore {
     };
     const validated = async () => {
       const { added, modified, problems } = await this.validateStageFiles();
-      if (problems.length) throw new Error(`Stage ${stage} validation failed:\n- ${problems.join('\n- ')}\nFix the files (restore unintended changes with git) and report again.`);
+      if (problems.length) throw new Error(`Stage ${stage} validation failed:\n- ${problems.join('\n- ')}\nFix the files (restore your own unintended changes with git) and report again. A file listed here that you did not change was changed by someone else: do not revert it; ask the researcher (report question).`);
       if (state.lastSummary) state.lastSummary.files = [...added, ...modified];
       return { added, modified };
     };
@@ -3409,6 +3579,14 @@ export class ResearchLoopCore {
       if (run) return { stage: this.require().stage, message: await this.decideAlone(kind, report.question || report.summary) };
       await this.askQuestion(kind, report.question || report.summary);
       return { stage, message: `Question recorded for the researcher. Ask it in chat, then record the answer with: ${LOOP_COMMAND} question answer --text "..."` };
+    }
+    // Something this stage worked from changed since it began: the work covered an earlier version, and the change is not the agent's to undo.
+    const drift = await this.inputDrift();
+    if (drift.length) {
+      const { problems } = await this.validateStageFiles(new Set(drift.map((input) => input.file)));
+      if (problems.length) throw new Error(`Stage ${stage} validation failed:\n- ${problems.join('\n- ')}\nRestore your own unintended changes with git and report again. (Separately, ${[...new Set(drift.map((input) => input.id))].join(', ')} changed during the stage: that is someone else's change; do not revert it.)`);
+      const message = await this.afterInputDrift(drift);
+      return { stage: this.require().stage, message };
     }
     switch (stage) {
       case 'discuss_goals': {
@@ -3649,10 +3827,12 @@ export class ResearchLoopCore {
         if (report.outcome === 'confirmed') {
           if (!/^confirmed\b/i.test(verdict)) throw new Error(`## Verdict of ${planId} must begin with confirmed.`);
           const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
-          plan.data.verified_proof_digest = proofDigest(assetRaw);
-          // The check read the current statements of the dependencies and definitions: it vouches for the proof against those.
+          // The verdict covers the versions frozen when the check began (the drift check above found them unchanged), never what is read now.
+          const frozenProof = this.frozenPart(assetId, 'proof');
+          if (frozenProof && (proofDigest(assetRaw) !== frozenProof || statementDigest(assetRaw) !== this.frozenPart(assetId, 'statement'))) throw new Error(`${assetId} changed while the verdict was being recorded. Run ${LOOP_COMMAND} next.`);
+          plan.data.verified_proof_digest = frozenProof ?? proofDigest(assetRaw);
           const assetData = parseMarkdown(assetRaw).data;
-          const checkedAgainst = await this.dependencyDigests(assetData);
+          const checkedAgainst = state.current.inputs ? this.frozenDependencies(assetId) : await this.dependencyDigests(assetData);
           if (checkedAgainst) plan.data.dependency_digests = checkedAgainst;
           await this.writeOwned(planFile, stringifyMarkdown(plan.content, plan.data));
           const recheck = state.current.recheck;

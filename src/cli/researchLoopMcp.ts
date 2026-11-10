@@ -87,7 +87,11 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
   }
   const paths = await loadProjectPaths(root);
   const core = new ResearchLoopCore(files, paths);
-  await core.load();
+  return core.transaction(`MCP ${name}`, () => callCoreTool(core, paths, name, args));
+}
+
+/** The tools that work on the project files directly, under the state lock. */
+async function callCoreTool(core: ResearchLoopCore, paths: Awaited<ReturnType<typeof loadProjectPaths>>, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (name === 'add_remark') {
     if (args.origin !== 'researcher' && args.origin !== 'agent') throw new Error('origin must be researcher or agent: whose remark it is.');
     if (args.from !== 'teaching' && args.from !== 'loop') throw new Error('from must be teaching or loop.');

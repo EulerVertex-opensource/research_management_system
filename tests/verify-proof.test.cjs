@@ -223,3 +223,76 @@ test('a verification no longer counts once a definition the proof uses changed',
   assert.equal(next.stage, 'verify_proof', 'the check was made against the old definition');
   assert.deepEqual(f.core.current.current.recheck, ['natural']);
 });
+
+// Frozen stage inputs: a verdict covers exactly what the check read; an execution works from what the result rested on when it began.
+const digestOf = (raw) => load('../src/domain/digests.ts').statementDigest(raw);
+
+test('a definition that changes during the check voids the verdict: it is set aside and the check runs again on the current version', async () => {
+  const f = fixture(settings('agent', { rigor: { verifyProofs: 'agent', agreeDefinitions: 'off' } }));
+  await proveOnce(f, 'attempt_1', [], withDefinition);
+  assert.equal((await f.core.next()).stage, 'verify_proof');
+  writeVerdict(f, 'attempt_1', 'confirmed: every step follows.');
+  // The verifier read the old definition; the researcher sharpens it before the report.
+  f.map.set(DEFINITION, f.map.get(DEFINITION).replace('a non-negative integer', 'a positive integer'));
+  const voided = await f.core.report({ outcome: 'confirmed', summary: 'Checked' });
+  assert.match(voided.message, /natural changed during the check/);
+  assert.match(voided.message, /do not revert it/);
+  assert.equal(voided.stage, 'verify_proof');
+  assert.equal(planData(f, 'attempt_1').verified_proof_digest, undefined, 'nothing is stamped for the old check');
+  assert.match(f.map.get('research/plans/attempt_1.md'), /^## Earlier verdict/m);
+  assert.match(f.map.get(DEFINITION), /a positive integer/, 'the change stays');
+  assert.ok(!queued(f).includes('asset:main_theorem'));
+  // The check runs again and is stamped with the definition it read: the current one.
+  writeVerdict(f, 'attempt_1', 'confirmed: reflexivity holds for positive integers too.');
+  await f.core.report({ outcome: 'confirmed', summary: 'Checked again' });
+  assert.equal(planData(f, 'attempt_1').dependency_digests.natural, digestOf(f.map.get(DEFINITION)));
+  assert.ok(queued(f).includes('asset:main_theorem'));
+});
+
+test('next notices a definition that changed during the check and restarts the check with a note', async () => {
+  const f = fixture(settings('agent', { rigor: { verifyProofs: 'agent', agreeDefinitions: 'off' } }));
+  await proveOnce(f, 'attempt_1', [], withDefinition);
+  assert.equal((await f.core.next()).stage, 'verify_proof');
+  f.map.set(DEFINITION, f.map.get(DEFINITION).replace('a non-negative integer', 'a positive integer'));
+  const next = await f.core.next();
+  assert.equal(next.stage, 'verify_proof');
+  assert.match(next.instruction, /^natural changed during the check/);
+  assert.equal(f.core.current.current.inputs.find((input) => input.id === 'natural').digest, digestOf(f.map.get(DEFINITION)), 'refrozen on the current version');
+});
+
+test('a definition that changes during execution sets the plan aside, uncounted, and the result is planned anew; the change is kept', async () => {
+  const f = fixture(settings('agent', { rigor: { verifyProofs: 'agent', agreeDefinitions: 'off' } }));
+  await proveOnce(f, 'attempt_1', [], withDefinition);
+  await f.core.next();
+  writeVerdict(f, 'attempt_1', 'rejected: step 1 is circular.');
+  await f.core.report({ outcome: 'rejected', summary: 'Gap' });
+  assert.equal(f.core.current.stage, 'plan');
+  f.map.set('research/plans/attempt_2.md', plan('attempt_2', ['attempt_1']));
+  assert.equal((await f.core.report({ outcome: 'complete', summary: 'Planned', planId: 'attempt_2' })).stage, 'execute');
+  // Mid-execution, the researcher edits the definition the result uses; the agent then reports a proof.
+  f.map.set(DEFINITION, f.map.get(DEFINITION).replace('a non-negative integer', 'a positive integer'));
+  f.map.set(ASSET, f.map.get(ASSET).replace(/\n## Proof[\s\S]*$/, '') + '\n## Proof\n\nDraft written against the old definition.\n');
+  const done = matter(f.map.get('research/plans/attempt_2.md'));
+  f.map.set('research/plans/attempt_2.md', matter.stringify(done.content + '\n## Outcome\n\nProof incorporated.\n', { ...done.data, status: 'succeeded' }));
+  const result = await f.core.report({ outcome: 'proved', summary: 'Proved' });
+  assert.equal(result.stage, 'plan');
+  assert.match(result.message, /natural changed during execution/);
+  assert.match(result.message, /not counted as a failed approach/);
+  assert.match(result.message, /do not revert it/);
+  const aside = matter(f.map.get('research/plans/attempt_2.md'));
+  assert.equal(aside.data.status, 'abandoned');
+  assert.equal(aside.data.proof_digest, undefined, 'the set-aside plan vouches for no proof');
+  assert.match(f.map.get(DEFINITION), /a positive integer/);
+  assert.match(f.map.get(ASSET), /Draft written against the old definition/, 'the draft stays for reference');
+  assert.ok(!queued(f).includes('asset:main_theorem'));
+});
+
+test('the verifier still may not edit the proof under check: that is a rule violation, not a changed input', async () => {
+  const f = fixture(settings('agent'));
+  await proveOnce(f);
+  await f.core.next();
+  writeVerdict(f, 'attempt_1', 'confirmed: fine.');
+  f.map.set(ASSET, f.map.get(ASSET).replace('Equality is reflexive', 'Equality is plainly reflexive'));
+  await assert.rejects(f.core.report({ outcome: 'confirmed', summary: 'x' }), /not writable during stage verify_proof[\s\S]*do not revert it; ask the researcher/);
+  assert.equal(planData(f, 'attempt_1').verified_proof_digest, undefined);
+});

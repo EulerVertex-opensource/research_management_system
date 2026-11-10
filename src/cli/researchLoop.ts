@@ -17,6 +17,7 @@ import { PublishPreview, ResearchSync } from '../services/ResearchSync';
 import { NodeLoopFiles, findProjectRoot, loadProjectPaths, loadSyncConfig } from './nodeFiles';
 import { NodeGitRunner, openGit, runShell } from './nodeGit';
 import { applyInterlinks } from '../services/ResearchInterlinks';
+import { StateLockBusy, StateLockOptions } from '../services/StateLock';
 import { locateNodeFile } from '../domain/registry';
 import { toIdeaKind } from '../domain/nodeKinds';
 import { vocabularyReminder } from '../domain/researcherText';
@@ -142,10 +143,10 @@ function staleDriver(root: string): string | undefined {
   return `This research-loop driver (${process.argv[1]}) differs from the one the Research Assistant extension ships, so it will not change loop state. The researcher should run "Research Assistant: Refresh Project Setup" (or reload VS Code) to install the current driver; then continue.`;
 }
 
-async function openCore(root: string, iterationCap?: number, git?: LoopGit): Promise<ResearchLoopCore> {
+async function openCore(root: string, iterationCap?: number, git?: LoopGit, stateLock?: StateLockOptions): Promise<ResearchLoopCore> {
   const paths = await loadProjectPaths(root);
   // Identity, context budgets, and the loop policy are read from the project files on use.
-  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, extensionVersion: EXTENSION_VERSION });
+  const core = new ResearchLoopCore(new NodeLoopFiles(root), paths, { iterationCap, git, extensionVersion: EXTENSION_VERSION, stateLock });
   await core.load();
   return core;
 }
@@ -327,7 +328,20 @@ async function runHook(event: string, args: Args): Promise<void> {
     if (event !== 'PreToolUse') return;
   }
   let core: ResearchLoopCore;
-  try { core = await openCore(root); } catch { return; }
+  // A hook runs on every tool call: it waits less for the lock than a command does, and gives up quietly rather than stall the agent.
+  try { core = await openCore(root, undefined, undefined, { waitMs: HOOK_LOCK_WAIT_MS }); } catch { return; }
+  // Hooks change loop state too (the driver lock, autopilot counts, pauses): one writer at a time with every other process.
+  try {
+    await core.transaction(`hook ${event}`, () => runLockedHook(event, root, core, input, stale));
+  } catch (error) {
+    if (!(error instanceof StateLockBusy)) throw error;
+    process.stderr.write(`Research loop hook skipped: ${error.message}\n`);
+  }
+}
+
+const HOOK_LOCK_WAIT_MS = 10_000;
+
+async function runLockedHook(event: string, root: string, core: ResearchLoopCore, input: HookInput, stale: string | undefined): Promise<void> {
   const state = core.current;
   const session = input.session_id;
   let role: SessionRole | undefined;
@@ -606,6 +620,7 @@ async function main(): Promise<void> {
   // The agent drives the loop through these commands: each is a sign of life (status is also what a researcher runs in a terminal).
   const alive = () => (command !== 'status' && command !== 'teach' && command !== 'check' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
   await alive();
+  const run = async (): Promise<void> => {
   switch (command) {
     case 'status': {
       if (json) out(core.statusSummary());
@@ -957,7 +972,14 @@ async function main(): Promise<void> {
     default:
       throw new Error(`Unknown command ${command}\n${USAGE}`);
   }
+  };
+  // Commands that only read the loop state, or wait on the researcher at a terminal, do not hold the state lock.
+  if (UNLOCKED_COMMANDS.has(command)) return run();
+  await core.transaction(`research-loop ${command}`, run);
 }
+
+/** Read-only commands (and teach, which writes no loop state and may wait for the researcher's answer at a terminal). */
+const UNLOCKED_COMMANDS = new Set(['status', 'show', 'context', 'teach']);
 
 main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
