@@ -94,6 +94,22 @@ export function computeAttention(input: AttentionInput): AttentionItem[] {
       });
       continue;
     }
+    if (request.kind === 'routes') {
+      // Before routes to a main result are worked on: the researcher sees them side by side and keeps, drops, or adds routes.
+      const blocks = blocksOf(target);
+      items.push({
+        key: `approval:${request.id}`, priority: blocks.length ? 1 : 3, category: 'approval', routeMap: true,
+        title: approvalTitle('routes', title(target), node?.type ?? ''), reason: request.reason,
+        why: `The loop works on these routes side by side; whichever is complete first proves ${title(target)}. Drop a route you do not want, or add one of your own.`,
+        ifIgnored: `The routes to ${title(target)} wait; the loop goes on with other results.`,
+        target, blocks, sections: [], since: request.requestedAt,
+        buttons: [
+          { label: acceptLabel('routes', ''), action: { action: 'approve', requestId: request.id }, kind: 'primary' },
+          { label: 'Ask for other routes…', action: { action: 'requestChanges', requestId: request.id, text: '' }, needsText: 'What should the new routes do differently?' },
+        ],
+      });
+      continue;
+    }
     const library = node?.origin === 'library';
     if (request.kind === 'citation' || (request.kind === 'asset' && library)) {
       // Taken from the literature: the loop already builds on it; checking it is the last step before the project counts as done.

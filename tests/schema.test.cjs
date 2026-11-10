@@ -56,7 +56,7 @@ test('node schema rules are shared by the loop, the dashboard, and the CLI', () 
   assert.deepEqual(nodeProblems('plan', 'p', { ...plan, status: 'succeeded' }, `${steps}\n## Outcome\n\nIn t.\n`), []);
   assert.deepEqual(nodeProblems('plan', 'p', { ...plan, status: 'abandoned' }, 'Dropped.'), []);
   assert.match(nodeProblems('plan', 'p', { type: 'proof_record', title: 'P', target_asset: 't' }, 'x')[0], /legacy type; run `research-maintenance migrate`/);
-  assert.deepEqual([...statusesFor('plan')], ['pending', 'failed', 'succeeded', 'abandoned']);
+  assert.deepEqual([...statusesFor('plan')], ['pending', 'failed', 'succeeded', 'abandoned', 'superseded']);
   assert.equal(toIdeaKind(undefined, ['open-question']), 'question');
   assert.equal(toIdeaKind('risk'), 'risk');
   assert.equal(toIdeaKind('nonsense'), 'approach');
@@ -212,10 +212,10 @@ test('migrate --apply refuses uncommitted research changes in a git repository',
   } finally { p.cleanup(); }
 });
 
-test('bundled skills: fifteen skills, each referenced script is built and installed with its skill', () => {
+test('bundled skills: seventeen skills, each referenced script is built and installed with its skill', () => {
   const skillsRoot = path.resolve(__dirname, '../skills');
   const skills = fs.readdirSync(skillsRoot).filter((name) => fs.existsSync(path.join(skillsRoot, name, 'SKILL.md'))).sort();
-  assert.deepEqual(skills, ['check-notation', 'draft-latex', 'execute-proof', 'explore-research', 'extract-research-nodes', 'import-math-paper', 'plan-manuscript', 'plan-proof', 'research-loop', 'research-maintenance', 'revise-manuscript-prose', 'search-object', 'teach', 'verify-node', 'verify-proof']);
+  assert.deepEqual(skills, ['check-notation', 'draft-latex', 'execute-proof', 'explore-research', 'extract-research-nodes', 'import-math-paper', 'merge-routes', 'plan-manuscript', 'plan-proof', 'plan-routes', 'research-loop', 'research-maintenance', 'revise-manuscript-prose', 'search-object', 'teach', 'verify-node', 'verify-proof']);
   const vscode = { Uri: {}, workspace: {}, FileType: {} };
   const { SKILL_SCRIPTS, isBundledSkillManifest } = load('../src/services/SkillInstallerService.ts', { vscode });
   const { RETIRED_SKILLS } = load('../src/services/AgentProviders.ts');

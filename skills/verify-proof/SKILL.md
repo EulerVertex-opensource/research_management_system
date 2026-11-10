@@ -22,4 +22,8 @@ Write `## Verdict` at the end of the plan named in the instruction:
 
 Do not read remarks (`remark list`, the remarks folder): they are explanations nobody checked, and the hooks refuse it in this stage. After a `confirmed` verdict you may add one remark on the target when a step was harder than it looks, naming that step (`add_remark` with `origin: "agent", from: "loop"`).
 
+## A route's reduction (stage verify_reduction)
+
+The pack holds the target's statement, the route's `## Route` and `## Reduction`, and the statements of its lemmas and dependencies. Check, as above, that the reduction proves the exact statement of the target from those statements alone: a lemma is a black box, so a step that needs more than its statement says is a rejection, even if the lemma's eventual proof would give more. Write `## Reduction verdict` at the end of the route's plan (first line `confirmed` or `rejected`, alone; then your reasons), change nothing else, and report to match. A rejected reduction fails the route; the loop goes on with the others.
+
 Report `confirmed` or `rejected` to match the first line, or `question --question "..."` when the statement itself is ambiguous. Only the plan's `## Verdict` may change: leave the asset, the plan's status, and its frontmatter as they are. Never write `verified_proof_digest`; the loop records it.

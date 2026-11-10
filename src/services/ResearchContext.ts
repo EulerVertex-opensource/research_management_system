@@ -2,6 +2,7 @@ import { LoopStage } from './ResearchLoopModel';
 import { projectSection, requiredAssetIds, requiredResults } from '../domain/project';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 import { SearchMode, SearchSlot } from '../domain/search';
+import { RouteSlot, isRoutePlan, routeLemmas } from '../domain/routeSchema';
 import { searchFields, searchScore, searchSummary, searchWords } from '../domain/registry';
 import { PROMOTION_TARGETS, REUSABLE_IDEA_KINDS, WARNING_IDEA_STATUSES, WARNING_SECTION, toIdeaKind } from '../domain/nodeKinds';
 import { ideaUsage, usageLine } from '../domain/ideaUsage';
@@ -86,6 +87,8 @@ export interface ContextFocus {
   recheck?: string[];
   /** Stage `verify_node`: the definition, or the cited or library result, to check. */
   node?: { id: string; mode: 'definition' | 'citation' | 'proof'; changed?: string[] };
+  /** A round of routes: its number, this worker's slot (stage route), and the result every route of a fork starts from. */
+  route?: { round: number; slot?: RouteSlot; fork?: string };
 }
 
 export interface RenderedContext { text: string; tokens: number; included: ContextItem[]; omitted: ContextItem[]; files: string[] }
@@ -93,11 +96,13 @@ export interface RenderedContext { text: string; tokens: number; included: Conte
 export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
   search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000, verify_node: 12000, conjecture: 10000,
+  route: 16000, route_merge: 12000, review_routes: 4000, reduce: 30000, verify_reduction: 20000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
   scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep', verify_node: 'deep', conjecture: 'deep',
+  route: 'deep', route_merge: 'deep', reduce: 'deep', verify_reduction: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }
@@ -317,6 +322,58 @@ export function planContext(focus: ContextFocus, sources: ContextSources, budget
         add('papers', 'papers', sources.paperIndexFile, 'all', 2, 'indexed papers: read the cited location with show <paper_slug> --section ...');
       }
       excluded.push('remarks', 'plans and proofs of other results');
+      break;
+    }
+    case 'route': {
+      if (!target) break;
+      const slot = focus.route?.slot;
+      asset(target, 'statement', 0, 'the statement every route must reach (frozen)');
+      if (focus.route?.fork) asset(focus.route.fork, 'statement', 0, 'the proved result every route of this round starts from');
+      const idea = slot?.ideaId ? sources.ideas.get(slot.ideaId) : undefined;
+      if (idea) add('idea', idea.id, idea.file, 'all', 0, 'the researcher\'s route this slot works out');
+      for (const dep of deps(target)) asset(dep, 'statement', 1, 'dependency every route may use as a black box');
+      definitionsOf([target], 1, 2);
+      for (const plan of sources.plans.values()) {
+        if (plan.data.type !== 'plan' || plan.data.target_asset !== target) continue;
+        if (plan.data.status === 'failed') add('plan', plan.id, plan.file, ['Goal', 'Route', 'Failure'], 2, 'failed attempt: name it under ## Difference from failed plans');
+        else if (plan.data.status === 'pending' && isRoutePlan(plan.data)) add('plan', plan.id, plan.file, ['Route'], 2, 'an open route: plan a different one');
+      }
+      const analogues = libraryAnalogues(target, sources);
+      if (analogues.length) { seen.add('text:library_analogues'); items.push({ kind: 'text', id: 'library_analogues', view: 'all', priority: 2, reason: 'known results resembling the target', text: renderAnalogues(analogues) }); }
+      const guide = renderIdeaGuide(target, sources);
+      if (guide) { seen.add('text:idea_guide'); items.push({ kind: 'text', id: 'idea_guide', view: 'all', priority: 3, reason: 'ideas from similar results, dead ends, and observations to promote', text: guide }); }
+      add('index', 'index', undefined, 'all', 3, 'existing IDs: reuse a result as a lemma instead of stating it again');
+      if (slot) notes.push(`Your slot: ${slot.slot}, round ${focus.route?.round}, origin ${slot.origin}. Direction: ${slot.label}`);
+      excluded.push('proofs of dependencies', 'the other slots of this round');
+      break;
+    }
+    case 'route_merge':
+    case 'review_routes': {
+      if (!target) break;
+      asset(target, 'statement', 0, 'the result the routes reach');
+      const lemmas = new Set<string>();
+      for (const plan of sources.plans.values()) {
+        if (plan.data.type !== 'plan' || plan.data.target_asset !== target || plan.data.status !== 'pending' || !isRoutePlan(plan.data)) continue;
+        const current = plan.data.route_round === focus.route?.round;
+        add('plan', plan.id, plan.file, ['Route'], current ? 0 : 1, current ? 'a route of this round' : 'an earlier open route');
+        for (const lemma of routeLemmas(plan.data)) lemmas.add(lemma);
+      }
+      for (const lemma of lemmas) asset(lemma, 'statement', 1, 'a lemma of an open route');
+      if (focus.stage === 'route_merge') add('index', 'index', undefined, 'all', 2, 'results already in the project: a lemma that states one of them is merged into it');
+      excluded.push('proofs', 'reductions');
+      break;
+    }
+    case 'reduce':
+    case 'verify_reduction': {
+      if (!target) break;
+      const current = focus.planId ? sources.plans.get(focus.planId) : undefined;
+      asset(target, 'statement', 0, 'the statement the reduction proves (frozen)');
+      if (current) add('plan', current.id, current.file, focus.stage === 'reduce' ? 'all' : ['Route', 'Reduction'], 0, focus.stage === 'reduce' ? 'the route to reduce' : 'the reduction to check, as written');
+      for (const lemma of list(current?.data.route_lemmas)) asset(lemma, 'statement', 0, 'route lemma, used as a black box');
+      for (const dep of deps(target)) asset(dep, 'statement', 1, 'dependency, used as a black box');
+      definitionsOf([target], 1, 2);
+      if (focus.stage === 'reduce' && sources.style?.trim()) { seen.add('text:proof_style'); items.push({ kind: 'text', id: 'proof_style', view: 'all', priority: 1, reason: 'how the researchers want proofs written: follow it', text: sources.style.trim() }); }
+      excluded.push('proofs of the lemmas and dependencies', focus.stage === 'reduce' ? 'other routes' : 'the plan checklist and its reasoning (check the reduction as written)');
       break;
     }
     case 'verify_proof':

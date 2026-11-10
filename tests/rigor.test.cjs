@@ -12,13 +12,13 @@ function load(file) {
 }
 
 const { ResearchLoopCore } = load('../src/services/ResearchLoopCore.ts');
-const { normalizeLoopSettings, applyLoopPatch, validateSettingsPatch, rigorPreset, RIGOR_PRESETS, RIGOR_FIELDS, CHECK_KEYS, AWAY_KEYS, involvement, withInvolvement, DEFAULT_LOOP_SETTINGS } = load('../src/domain/loopSettings.ts');
+const { normalizeLoopSettings, applyLoopPatch, validateSettingsPatch, rigorPreset, RIGOR_PRESETS, RIGOR_FIELDS, CHECK_KEYS, AWAY_KEYS, ROUTE_KEYS, involvement, withInvolvement, DEFAULT_LOOP_SETTINGS } = load('../src/domain/loopSettings.ts');
 const { RIGOR_KEYS, RIGOR_OPTIONS } = load('../src/models/settings.ts');
 
 const paths = { config: '.research-assistant.json', mainTex: 'main.tex', bibliography: 'references.bib', macroFiles: [], notations: null, sections: 'sections', researchRoot: 'research', projectMd: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', library: 'research/library', writingRoot: 'research/writing', writingOutline: 'research/writing/outline.md', writingSections: 'research/writing/sections', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' };
 const project = '---\ntype: project\nschema_version: 2\nrequired_results:\n  - id: main_theorem\n---\n\n# Project\n\n## Main Problem\n\nProve A.\n\n## Scope and Assumptions\n\nNatural numbers.\n\n## Intended Contribution\n\nFind a proof.\n';
 const SETTINGS = '.research-assistant-loop/settings.json';
-const settings = (rigor = {}, extra = {}) => JSON.stringify({ version: 1, rigor: { verifyExtracted: 'off', ...rigor }, ...extra });
+const settings = (rigor = {}, extra = {}) => JSON.stringify({ version: 1, routeWidth: 0, rigor: { verifyExtracted: 'off', ...rigor }, ...extra });
 
 const asset = (id, extra = {}, status = 'draft', proof = '') => matter.stringify(`\n## Statement\n\nFor every natural number n, ${id} holds.\n${proof}`, { type: extra.type ?? 'theorem', title: id, status, source: { kind: 'original' }, depends_on: [], uses_definitions: [], tags: [], ...extra });
 const definition = (title, text, extra = {}, status = 'draft') => matter.stringify(`\n${text}\n`, { type: 'definition', title: `Definition (${title})`, status, depends_on: [], ...extra });
@@ -67,7 +67,9 @@ test('how thorough: Careful by default, Fast as a preset over the checks, every 
   assert.equal(rigorPreset({ ...DEFAULT_LOOP_SETTINGS.rigor, refuteSearch: 'off' }), 'custom');
   // What happens when the researcher does not respond is set apart from the checks, so it never changes the preset.
   assert.equal(rigorPreset({ ...DEFAULT_LOOP_SETTINGS.rigor, whenStuck: 'retry', unansweredQuestions: 'default' }), 'careful');
-  assert.deepEqual([...CHECK_KEYS, ...AWAY_KEYS].sort(), [...RIGOR_KEYS].sort());
+  assert.deepEqual([...CHECK_KEYS, ...AWAY_KEYS, ...ROUTE_KEYS].sort(), [...RIGOR_KEYS].sort());
+  // How routes are planned is its own group too, so it never changes the preset either.
+  assert.equal(rigorPreset({ ...DEFAULT_LOOP_SETTINGS.rigor, reviewRoutes: 'off', lemmaRoutes: 'on' }), 'careful');
   for (const key of RIGOR_KEYS) {
     assert.deepEqual(Object.keys(RIGOR_FIELDS[key].options).sort(), [...RIGOR_OPTIONS[key]].sort(), key);
     assert.ok(RIGOR_FIELDS[key].label && RIGOR_FIELDS[key].hint, key);

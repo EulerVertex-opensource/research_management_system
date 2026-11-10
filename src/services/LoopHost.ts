@@ -516,12 +516,13 @@ export class LoopHost implements vscode.Disposable {
       case 'goals': return 'No goal given. Continue only if project.md already has a Main Problem; otherwise wait.';
       case 'blocked': return 'The loop acted on the researcher’s setting: the asset is set aside, or a new approach of your own is recorded for it. Do not park it yourself; run research-loop next.';
       case 'counterexample_review': return 'No comment; the counterexample stays queued for the researcher.';
+      case 'routes': return 'No routes from the researcher: plan the round with your own directions; run research-loop next.';
       default: return 'Proceed with the default you stated; the open question was recorded as an idea.';
     }
   }
 
   private async showQuestion(prompt: string, kind: QuestionKind, options?: string[]): Promise<{ decision: 'answer' | 'skip' | 'pause'; text: string } | undefined> {
-    const label = kind === 'goals' ? 'Your research goal' : kind === 'blocked' ? 'A result is stuck' : kind === 'counterexample_review' ? 'A possible counterexample' : 'The agent asks';
+    const label = kind === 'goals' ? 'Your research goal' : kind === 'blocked' ? 'A result is stuck' : kind === 'counterexample_review' ? 'A possible counterexample' : kind === 'routes' ? 'Routes to a result' : 'The agent asks';
     const decide = 'Let the agent decide';
     if (options?.length) {
       const picked = await vscode.window.showQuickPick([...options, '$(edit) Other…', `$(debug-continue) ${decide}`, '$(debug-pause) Pause the loop'], { title: `Research Assistant · ${label}`, placeHolder: prompt, ignoreFocusOut: true });

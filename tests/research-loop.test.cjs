@@ -40,7 +40,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 // These tests drive a proof straight to approval; the independent check has its own tests (verify-proof.test.cjs).
-const NO_PROOF_CHECK = JSON.stringify({ version: 1, rigor: { verifyProofs: 'off', verifyExtracted: 'off' } });
+const NO_PROOF_CHECK = JSON.stringify({ version: 1, routeWidth: 0, rigor: { verifyProofs: 'off', verifyExtracted: 'off' } });
 
 function fixture(initial = {}) {
   const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', '.research-assistant-loop/settings.json': NO_PROOF_CHECK, ...initial });
@@ -576,7 +576,7 @@ test('CLI extend reopens an approved project for a new goal', () => {
   const p = tempProject();
   try {
     p.write('research/project.md', project);
-    p.write('research/approvals.json', JSON.stringify({ version: 1, records: [{ kind: 'project', target: 'project', digest: researchDigest(project, 'project'), approvedAt: 'now' }] }));
+    p.write('research/approvals.json', JSON.stringify({ version: 1, routeWidth: 0, records: [{ kind: 'project', target: 'project', digest: researchDigest(project, 'project'), approvedAt: 'now' }] }));
     const extended = p.run(['extend', '--goal', 'New conjecture', '--provider', 'codex']);
     assert.equal(extended.status, 0, extended.stderr);
     assert.match(extended.stdout, /draft_project/);

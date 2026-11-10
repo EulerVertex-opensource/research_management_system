@@ -122,6 +122,8 @@ export interface AttentionItem {
   sections: string[];
   since?: string;
   buttons: AttentionButton[];
+  /** A route map review: the detail shows the routes to `target` side by side. */
+  routeMap?: boolean;
 }
 
 export type CoverageState = 'current' | 'stale' | 'invalid' | 'planned' | 'dependency';
@@ -213,6 +215,28 @@ export interface AgentCheckedView { definitions: string[]; citations: string[]; 
 /** One line of the Activity timeline. */
 export interface HistoryEntry { at: string; text: string; tone: LoopTone; target?: string }
 
+/**
+ * One route to a result (a plan with route_lemmas), for the Routes view, the result card, and the
+ * route map review. `left`: how much is still to prove through it (its proof number), null when it
+ * cannot prove its target any more.
+ */
+export interface RouteView {
+  planId: string;
+  title: string;
+  target: string;
+  origin: 'researcher' | 'agent' | 'fork';
+  forkedFrom?: string;
+  state: 'live' | 'reduced' | 'suspended' | 'dead' | 'failed' | 'won' | 'superseded' | 'abandoned' | 'frozen';
+  reduction: 'none' | 'written' | 'verified' | 'failed';
+  lemmas: string[];
+  settledLemmas: number;
+  left: number | null;
+  round?: number;
+  death?: { kind: 'refuted' | 'inactive' | 'cycle'; lemma: string };
+  suspendedBy?: string[];
+  supersededBy?: string;
+}
+
 export interface GraphPayload {
   generatedAt: string;
   required: string[];
@@ -234,4 +258,6 @@ export interface GraphPayload {
   history: HistoryEntry[];
   /** Verified results, and how many of them are new to the researcher or changed since they studied them. */
   study?: { behind: number; total: number };
+  /** Every route to every result (parallel routes), oldest first. */
+  routes?: RouteView[];
 }

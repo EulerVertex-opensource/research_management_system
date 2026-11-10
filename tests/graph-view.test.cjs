@@ -597,3 +597,52 @@ test('the Remarks view lists remarks with whose they are and where they stand, a
   const create = renderToStaticMarkup(React.createElement(RemarkCreate, { targets: [{ id: 'main', title: 'Main theorem' }], initialTarget: 'main', onCreate: noop, onCancel: noop }));
   assert.match(create, /<option value="main" selected="">Main theorem<\/option>/);
 });
+
+test('routes: the payload carries each route with its state and work left; the Routes view, the card, and the route map review show them', async () => {
+  const { reductionDigest } = load('../src/domain/routes.ts');
+  const routeBody = (lemmas, reduction = '') => `\n## Goal\n\nTarget: [second](../assets/second.md)\n\n## Route\n\n${lemmas.map((id) => `- ${id}: a step.`).join('\n')}\n\n## Plan\n\n1. [ ] Combine.\n\n## Verification\n\nDone.\n${reduction ? `\n## Reduction\n\n${reduction}\n` : ''}`;
+  const reduced = routeBody(['helper'], 'Helper gives it.');
+  const digest = reductionDigest(matter(matter.stringify(reduced, {})).content);
+  const files = memoryFiles({
+    'research/project.md': project,
+    'research/approvals/project.json': JSON.stringify({ kind: 'project', target: 'project', digest: researchDigest(project, 'project'), approvedAt: 'then' }),
+    'research/assets/helper.md': node('lemma', { title: 'Helper' }),
+    'research/assets/side.md': node('lemma', { title: 'Side', status: 'draft' }),
+    'research/assets/main.md': node('theorem', { title: 'Main' }),
+    'research/assets/second.md': node('theorem', { title: 'Second', status: 'draft' }),
+    'research/plans/route_a.md': matter.stringify(reduced, { type: 'plan', title: 'A', status: 'pending', target_asset: 'second', route_lemmas: ['helper'], route_title: 'via the helper', origin: 'agent', route_round: 1, reduction_digest: digest, reduction_verified_digest: digest }),
+    'research/plans/route_b.md': matter.stringify(routeBody(['side', 'helper']), { type: 'plan', title: 'B', status: 'pending', target_asset: 'second', route_lemmas: ['side', 'helper'], route_title: 'via the side lemma', origin: 'researcher', route_round: 1 }),
+    'research/plans/route_c.md': matter.stringify(routeBody([]), { type: 'plan', title: 'C', status: 'failed', target_asset: 'second', route_lemmas: [], route_title: 'a direct try', origin: 'agent', route_round: 1 }),
+  });
+  const state = { status: 'running', stage: 'review_routes', current: { assetId: 'second', stageStartedAt: 'now' }, parked: {}, approvalQueue: [{ id: 'r1', kind: 'routes', target: 'second', digest: 'x', reason: 'Two routes; both need the helper.', requestedAt: 'now' }], answers: [], progress: {}, autopilot: { iterationCap: 5, sessions: {} } };
+  const payload = await collectGraphPayload(files, paths, researchNodes(files), state, []);
+  const byPlan = Object.fromEntries(payload.routes.map((route) => [route.planId, route]));
+  assert.deepEqual([byPlan.route_a.state, byPlan.route_a.reduction, byPlan.route_a.left, byPlan.route_a.settledLemmas], ['reduced', 'verified', 0, 1]);
+  assert.deepEqual([byPlan.route_b.state, byPlan.route_b.origin, byPlan.route_b.left, byPlan.route_b.settledLemmas], ['live', 'researcher', 2, 1]);
+  assert.equal(byPlan.route_c.state, 'failed');
+  assert.equal(byPlan.route_c.left, null);
+  // The review waits in Needs you as a route map, with the routes side by side.
+  const item = payload.attention.find((entry) => entry.routeMap);
+  assert.equal(item.title, 'Review the routes to Second');
+  assert.equal(item.buttons[0].label, 'Work on these routes');
+  const noop = () => undefined;
+  const needs = renderToStaticMarkup(React.createElement(NeedsYouPage, { payload, selectedKey: item.key, onSelect: noop, onAction: noop, onNavigate: noop, onShowInResults: noop, onOpenPaper: noop }));
+  assert.match(needs, /The routes · 2 · 1 lemma shared/);
+  assert.match(needs, /via the helper/);
+  assert.match(needs, /Helper · shared/);
+  assert.doesNotMatch(needs, /a direct try/, 'a failed route is not under review');
+  assert.match(needs, /Add a route of mine/);
+  // The Routes mode, drawn and listed.
+  const drawn = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'graph', mode: 'routes', goal: 'second' }, onOptions: noop, onSelect: noop, onNavigate: noop, onAction: noop }));
+  assert.match(drawn, /Routes to Second/);
+  assert.match(drawn, /2 open routes · one is complete/);
+  assert.match(drawn, /<polygon/);
+  assert.match(drawn, /Not drawn: |via the side lemma/);
+  const listed = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'list', mode: 'routes', goal: 'second' }, onOptions: noop, onSelect: noop, onNavigate: noop, onAction: noop }));
+  assert.match(listed, /Needs only its lemmas/);
+  assert.match(listed, /1 route no longer open/);
+  // The card of the result shows its routes and a way to see them side by side.
+  const card = renderToStaticMarkup(React.createElement(ProgressView, { payload, options: { ...DEFAULT_OPTIONS, display: 'list', mode: 'goal', goal: 'second' }, onOptions: noop, selectedId: 'second', onSelect: noop, onNavigate: noop, onAction: noop }));
+  assert.match(card, /See them side by side/);
+  assert.doesNotMatch(card, /Proof attempts:/, 'routes replace the attempt count');
+});

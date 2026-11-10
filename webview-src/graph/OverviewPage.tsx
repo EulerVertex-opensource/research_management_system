@@ -7,6 +7,7 @@ import { COLOR, SECTION_STATE_COLOR, SECTION_STATE_LABEL, TONE_COLOR, tint } fro
 import { MarkdownPreview } from '../components/MarkdownPreview';
 import { AgentConstellation } from '../components/AgentConstellation';
 import { useTechnical } from '../technical';
+import { routesSummary, routesTo } from './RoutesView';
 
 /**
  * The Overview: four short blocks that say what is happening and whether the
@@ -268,6 +269,7 @@ function Progress({ payload, onAction, onShowInResults, onOpenPaper }: Pick<Prop
             style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 140px 150px', gap: 12, alignItems: 'center', padding: '6px 10px', borderRadius: 6, border: `1px ${node.progress === 'done' ? 'solid' : 'dashed'} ${tint(tone, 50)}`, background: tint(tone, node.progress === 'done' ? 8 : 5), color: 'var(--vscode-foreground)', cursor: 'pointer', textAlign: 'left', fontSize: 13 }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {node.title}
+              {node.progress !== 'done' && routesTo(payload, node.id).length > 0 && <span style={{ marginLeft: 8, fontSize: 11, color: COLOR.muted }}>{routesSummary(routesTo(payload, node.id))}</span>}
               {node.agentGoal && <span title="The agent added this goal while working on its own; yours are kept." style={{ marginLeft: 8, fontSize: 11, color: COLOR.muted, border: `1px solid ${COLOR.border}`, borderRadius: 3, padding: '0 4px' }}>added by the agent</span>}
             </span>
             <span aria-hidden="true" style={{ height: 6, borderRadius: 3, background: tint(COLOR.muted, 25), overflow: 'hidden' }}>

@@ -98,8 +98,11 @@ export function ideaStatusesFor(kind: unknown): readonly IdeaStatus[] {
   return IDEA_STATUSES_BY_KIND[toIdeaKind(kind)];
 }
 
-/** A plan is one proof attempt for one target asset; `succeeded` replaces the legacy proof_record type. */
-export const PLAN_STATUS_LIST = ['pending', 'failed', 'succeeded', 'abandoned'] as const;
+/**
+ * A plan is one proof attempt for one target asset; `succeeded` replaces the legacy proof_record type.
+ * `superseded`: a route (a plan with route_lemmas) another route to the same result won over.
+ */
+export const PLAN_STATUS_LIST = ['pending', 'failed', 'succeeded', 'abandoned', 'superseded'] as const;
 export type PlanStatus = (typeof PLAN_STATUS_LIST)[number];
 
 export type ResearchStatus = NodeStatus | IdeaStatus | PlanStatus;

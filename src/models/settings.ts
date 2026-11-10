@@ -9,8 +9,8 @@
  * `conjectureIdeas` is not an approval but a permission: when nothing else is actionable, the agent
  * turns conjecture ideas into conjectures and searches them for counterexamples on its own.
  */
-export type AutoApproveRule = 'proofs' | 'supporting' | 'citations' | 'definitions' | 'conjectures' | 'conjectureIdeas' | 'counterexamples' | 'specifications' | 'project';
-export const AUTO_APPROVE_RULES: readonly AutoApproveRule[] = ['proofs', 'supporting', 'citations', 'definitions', 'conjectures', 'conjectureIdeas', 'counterexamples', 'specifications', 'project'];
+export type AutoApproveRule = 'proofs' | 'supporting' | 'citations' | 'definitions' | 'conjectures' | 'conjectureIdeas' | 'counterexamples' | 'specifications' | 'routes' | 'project';
+export const AUTO_APPROVE_RULES: readonly AutoApproveRule[] = ['proofs', 'supporting', 'citations', 'definitions', 'conjectures', 'conjectureIdeas', 'counterexamples', 'specifications', 'routes', 'project'];
 
 export type AutoApprovePolicy = { enabled: boolean } & Record<AutoApproveRule, boolean>;
 
@@ -26,6 +26,7 @@ export const LOOP_NUMBER_KEYS = [
   'candidatesPerWorker', 'boardObstructions', 'boardNearMisses', 'requestedSearchRounds',
   'autonomyBudget', 'autonomyHours', 'autonomyRevisions', 'autonomyConjectures',
   'studyAhead',
+  'routeWidth', 'maxLiveRoutes', 'routeRounds',
 ] as const;
 export type LoopNumberKey = typeof LOOP_NUMBER_KEYS[number];
 
@@ -52,6 +53,10 @@ export const RIGOR_OPTIONS = {
   whenStuck: ['park', 'retry'],
   /** A question nobody answers: the loop waits, or the agent goes on with its stated default after the timeout. */
   unansweredQuestions: ['wait', 'default'],
+  /** A main result's route map (its parallel routes, after merging): the researcher reviews it before the routes are worked on, or not. */
+  reviewRoutes: ['main', 'off'],
+  /** A lemma inside a route that is stuck: ask the researcher (as before), or first try a round of routes for it. */
+  lemmaRoutes: ['off', 'on'],
 } as const;
 export type RigorKey = keyof typeof RIGOR_OPTIONS;
 export const RIGOR_KEYS = Object.keys(RIGOR_OPTIONS) as RigorKey[];

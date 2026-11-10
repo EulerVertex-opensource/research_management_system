@@ -6,6 +6,7 @@ import { GraphCanvas } from './GraphCanvas';
 import { buttonStyle } from './AttentionList';
 import { ResultCard } from './ResultCard';
 import { ResultList } from './ResultList';
+import { RouteLegend, RouteList, RouteMap, routedResults, routesSummary, routesTo } from './RoutesView';
 import { CITED_COLOR, COLOR, DEFINITION_COLOR, PROGRESS_STYLE, SECTION_STATE_COLOR, SECTION_STATE_LABEL, nodeStyle, tint } from './colors';
 
 interface Props {
@@ -34,6 +35,7 @@ const MODES: { id: GraphMode; label: string; hint: string }[] = [
   { id: 'goal', label: 'Still to do', hint: 'What one main result still needs; finished branches are folded' },
   { id: 'needs', label: 'Held up', hint: 'Results that are stuck or wait for you, and the main results they hold up' },
   { id: 'all', label: 'Everything', hint: 'Every result, with search and filters' },
+  { id: 'routes', label: 'Routes', hint: 'The routes to one result, side by side: the first one complete proves it' },
 ];
 
 const DISPLAYS: { id: ViewOptions['display']; label: string; hint: string }[] = [
@@ -78,7 +80,10 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
   const unfinished = goals.filter((id) => payload.nodes.find((node) => node.id === id)?.progress !== 'done');
   // With every main result done, one folded tree says little: start from everything instead.
   const chosen: GraphMode = options.mode ?? (unfinished.length ? 'goal' : 'all');
+  const routed = routedResults(payload);
   const mode: GraphMode = chosen === 'goal' && !goals.length ? 'all' : chosen;
+  // The routes view shows one result with routes: the one asked for, else the loop's current one, else the first.
+  const routeTarget = options.goal && routed.includes(options.goal) ? options.goal : payload.loop?.assetId && routed.includes(payload.loop.assetId) ? payload.loop.assetId : routed[0];
   const goal = options.goal && goals.includes(options.goal) ? options.goal : defaultGoal(payload);
   const list = options.display === 'list';
   const trace = options.trace && payload.nodes.some((node) => node.id === options.trace!.id) ? options.trace : undefined;
@@ -88,6 +93,7 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
     if (trace) return { ...traceGraph(payload, trace.id, trace.direction), overCap: false, hidden: 0, reduced: 0 };
     if (mode === 'goal' && goal) return { ...goalGraph(payload, goal), overCap: false, hidden: 0, reduced: 0 };
     if (mode === 'needs') return { ...needsGraph(payload), overCap: false, hidden: 0, reduced: 0 };
+    if (mode === 'routes') return { nodes: [], edges: [], folds: [], overCap: false, hidden: 0, reduced: 0 };
     // A list stays readable with many results; only the graph has a size cap.
     return { ...visibleGraph(payload, { ...options, focus: undefined }, ignoreCap || list), folds: [] };
   }, [payload, mode, goal, options, ignoreCap, list, trace]);
@@ -116,6 +122,7 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
   const caption = trace ? ''
     : mode === 'goal' && goal ? `What ${payload.nodes.find((node) => node.id === goal)?.title ?? goal} still needs, ${list ? 'prerequisites first' : 'prerequisites above'}. Finished branches are folded.`
     : mode === 'needs' ? 'Results that are stuck or wait for you, and the main results they hold up.'
+    : mode === 'routes' ? (routeTarget ? `${routesSummary(routesTo(payload, routeTarget))}. Each route proves the result from its lemmas; the first one complete wins.` : '')
     : `${focused.nodes.length} shown · ${focused.hidden} hidden by the filters.`;
 
   return (
@@ -138,6 +145,14 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
                 })}
               </select>
               <span style={{ color: COLOR.muted, whiteSpace: 'nowrap' }}>{goals.length - unfinished.length} of {goals.length} done</span>
+            </label>
+          )}
+          {!trace && mode === 'routes' && routed.length > 0 && (
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, minWidth: 0 }}>
+              <span style={{ color: COLOR.muted, whiteSpace: 'nowrap' }}>Routes to</span>
+              <select value={routeTarget} onChange={(event) => set({ goal: event.target.value })} style={{ ...inputStyle, maxWidth: 420, minWidth: 0 }}>
+                {routed.map((id) => <option key={id} value={id}>{payload.required.includes(id) ? '★ ' : ''}{payload.nodes.find((item) => item.id === id)?.title ?? id} ({routesSummary(routesTo(payload, id))})</option>)}
+              </select>
             </label>
           )}
           {!trace && mode === 'all' && <>
@@ -171,7 +186,13 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
       {caption && <div style={{ padding: '5px 14px 0', fontSize: 11.5, color: COLOR.muted }}>{caption} Click a result to see it on the right.</div>}
       <div style={{ flex: 1, minHeight: 260, display: 'flex' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          {focused.overCap ? (
+          {mode === 'routes' && !trace ? (
+            routeTarget
+              ? (list
+                ? <RouteList payload={payload} target={routeTarget} onSelect={(id) => onSelect(id === selectedId ? undefined : id)} onAction={onAction} />
+                : <RouteMap payload={payload} target={routeTarget} selectedId={selectedId} onSelect={onSelect} />)
+              : <div style={{ padding: 24, opacity: 0.7, fontSize: 13 }}>No result has routes yet. With routes on (Settings → Parallel routes), a main result not yet attempted gets several routes planned side by side.</div>
+          ) : focused.overCap ? (
             <div style={{ padding: 24, fontSize: 13 }}>
               More than {MAX_VISIBLE} results match. Narrow it with the search or a state filter, or switch to the list.
               <div style={{ marginTop: 10 }}><button style={buttonStyle('secondary')} onClick={() => setIgnoreCap(true)}>Draw them anyway</button></div>
@@ -191,12 +212,13 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
         {selected && (
           <aside aria-label="Selected result" style={{ width: 360, flexShrink: 0, borderLeft: `1px solid ${COLOR.border}`, background: COLOR.sunken, overflow: 'auto', padding: 10, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <ResultCard node={selected} payload={payload} expanded onToggle={() => undefined} onAction={onAction} onDetails={onNavigate}
-              onTrace={(direction) => set({ trace: { id: selected.id, direction } })} onClose={() => onSelect(undefined)} />
+              onTrace={(direction) => set({ trace: { id: selected.id, direction } })} onClose={() => onSelect(undefined)}
+              onShowRoutes={mode === 'routes' && routeTarget === selected.id ? undefined : (id) => set({ mode: 'routes', goal: id, trace: undefined })} />
             {impact && trace?.id === selected.id && <PaperPassages impact={impact} onAction={onAction} />}
           </aside>
         )}
       </div>
-      {!list && <Legend />}
+      {!list && (mode === 'routes' && !trace ? <RouteLegend /> : <Legend />)}
     </div>
   );
 }

@@ -60,6 +60,11 @@ const USAGE = `Usage: research-loop <command> [options]
   report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--asset ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm]
   search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
+  route status <result> [--json]   (the routes to a result: state, reduction, lemmas settled, work left)
+  route request <result> [--note "..."]   (only when the researcher asks: a round of routes to a result)
+  route fork <proved result> --toward <result> [--note "..."]   (only when the researcher asks: routes that start from a proved result)
+  route drop <route plan> --reason "..."   (only when the researcher asks: drop one route)
+  route merge <dup> --into <keep> | route imply <stronger> <weaker> [--note "..."] | route distinct <a> <b> --note "..."   (stage route_merge only)
   teach list [--json]   (verified results, those new to the researcher first, each after what it rests on)
   teach pack <id>   (the material for teaching one verified result)
   teach mark <id> --level black_box|idea|full|none [--note "..."] --interactive   (the researcher, in their own terminal)
@@ -945,6 +950,17 @@ async function main(): Promise<void> {
         return;
       }
       throw new Error('search status|request <asset>');
+    }
+    case 'route': {
+      const note = typeof args.flags.note === 'string' ? args.flags.note : undefined;
+      if (sub === 'status') { const status = await core.routeStatus(text(third, 'result')); out(json ? status : status.text); return; }
+      if (sub === 'request') { out(await core.requestRoutes(text(third, 'result'), undefined, note)); await core.touch(session); return; }
+      if (sub === 'fork') { out(await core.requestRoutes(text(args.flags.toward, 'toward'), text(third, 'proved result'), note)); await core.touch(session); return; }
+      if (sub === 'drop') { out(await core.dropRoute(text(third, 'route'), text(args.flags.reason, 'reason'))); await core.touch(session); return; }
+      if (sub === 'merge') { out(await core.mergeRouteLemma(text(third, 'dup'), text(args.flags.into, 'into'))); await core.touch(session); return; }
+      if (sub === 'imply') { out(await core.implyRouteLemma(text(third, 'stronger'), text(args.positional[3], 'weaker'), note)); await core.touch(session); return; }
+      if (sub === 'distinct') { out(await core.distinctRouteLemmas(text(third, 'a'), text(args.positional[3], 'b'), text(args.flags.note, 'note'))); await core.touch(session); return; }
+      throw new Error('route status|request|fork|drop|merge|imply|distinct');
     }
     case 'teach': {
       const teaching = new Teaching(new NodeLoopFiles(root), await loadProjectPaths(root));

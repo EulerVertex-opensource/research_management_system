@@ -16,4 +16,13 @@ Input: the context pack from `research-loop next` (the plan, the frozen target s
 - Unclear statement or missing definition: report `question --question "..."`.
 - Long proof: if about 30 tool calls in the proof is not complete, stop at a clean point. Write every finished step out in full under `## Progress` in the plan (which checklist items it settles, and the argument itself), and reply `partial: <what remains>`. A fresh worker continues from there with a small context. When you continue a partial execution, read the plan's `## Progress` first (`show <plan id> --section Progress`) and build on it; do not redo it. When the proof is complete, put the whole of it under `## Proof` and delete `## Progress`.
 
-A failed plan says nothing about the truth of the statement. Only the plan file and the target's `## Proof` may change. Never set `status: approved`.
+## A route's reduction (stage reduce)
+
+A route (a plan with `route_lemmas`) proves its target from its lemmas. The reduction is that argument, written before the lemmas are proved: each lemma, and each dependency, is used as a black box by its statement in the pack, whether or not it is proved yet.
+
+- Follow the route's `## Plan` checklist and write the complete argument under `## Reduction` in the route's plan file, not in the asset: several routes to one result are reduced side by side, and the loop moves the winning one into the asset's `## Proof` itself.
+- Success: the plan stays `pending`; report `proved`. The loop records the reduction; an independent check may follow.
+- Obstruction (the lemmas, as stated, do not give the target): set the plan `status: failed`, write `## Failure` with the step and what a lemma would have to say instead, and report `failed`. The other routes go on.
+- Change neither the target nor any lemma, and never write `reduction_digest` or another field the loop stamps.
+
+A failed plan says nothing about the truth of the statement. Only the plan file and the target's `## Proof` may change (for a reduction, only the route's plan file). Never set `status: approved`.

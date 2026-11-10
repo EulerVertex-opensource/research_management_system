@@ -3,6 +3,7 @@ import {
   PLAN_STATUS_LIST, PlanStatus, SOURCE_KIND_LIST, SourceKind, WARNING_SECTION, ideaStatusesFor,
 } from './nodeKinds';
 import { CHECKLIST_STEP, hasSection, hasSectionContent } from './sections';
+import { routePlanProblems } from './routeSchema';
 
 /**
  * What a valid research node holds, per kind. Files are loose YAML, so these
@@ -47,14 +48,14 @@ export type NodeData = ResultNodeData | DefinitionNodeData | IdeaNodeData | Plan
  * Relation fields each kind may carry. Only forward relations are stored;
  * reverse ones (used in, plans of, refuted by) are derived by `reverseRelations`.
  */
-export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'adapts', 'refutes', 'derived_from', 'serves'] as const;
+export const RELATION_FIELDS = ['depends_on', 'uses_definitions', 'related_assets', 'target_asset', 'inspired_by', 'adapts', 'refutes', 'derived_from', 'serves', 'route_lemmas', 'forked_from'] as const;
 /** Relations that hold one node ID rather than a list. */
-const SINGLE_RELATIONS = new Set(['target_asset', 'refutes', 'derived_from']);
+const SINGLE_RELATIONS = new Set(['target_asset', 'refutes', 'derived_from', 'forked_from']);
 export const NODE_RELATIONS: Record<NodeKind, readonly string[]> = {
   asset: ['depends_on', 'uses_definitions', 'refutes', 'derived_from', 'serves'],
   definition: ['depends_on', 'derived_from'],
   idea: ['related_assets'],
-  plan: ['target_asset', 'inspired_by', 'adapts'],
+  plan: ['target_asset', 'inspired_by', 'adapts', 'route_lemmas', 'forked_from'],
 };
 /** Fields older schemas stored that v2 derives or dropped. */
 export const RETIRED_FIELDS = ['used_in', 'kind'] as const;
@@ -132,13 +133,18 @@ export function conjectureProblems(id: string, data: Record<string, any>, conten
 }
 
 export function planProblems(id: string, data: Record<string, any>, content: string): string[] {
+  const base = basePlanProblems(id, data, content);
+  return data.type === 'plan' && (PLAN_STATUS_LIST as readonly string[]).includes(data.status) ? [...base, ...routePlanProblems(id, data, content)] : base;
+}
+
+function basePlanProblems(id: string, data: Record<string, any>, content: string): string[] {
   if (data.type === 'proof_record') return [`${id}: proof_record is a legacy type; run \`research-maintenance migrate\` to turn it into a plan with status succeeded.`];
   if (data.type !== 'plan') return [`${id}: plan folder files must have type plan.`];
   if (!(PLAN_STATUS_LIST as readonly string[]).includes(data.status) || typeof data.target_asset !== 'string') {
     return [`${id}: invalid proof plan (needs status ${PLAN_STATUS_LIST.join('|')} and target_asset).`];
   }
   if (data.status === 'succeeded') return hasSectionContent(content, 'Outcome') ? [] : [`${id}: a succeeded plan needs ## Outcome naming where the proof lives.`];
-  if (data.status === 'abandoned') return [];
+  if (data.status === 'abandoned' || data.status === 'superseded') return [];
   if (!hasSection(content, 'Goal') || !hasSection(content, 'Plan') || !hasSection(content, 'Verification') || !CHECKLIST_STEP.test(content)) {
     return [`${id}: invalid proof plan (needs Goal, Plan checklist, Verification).`];
   }

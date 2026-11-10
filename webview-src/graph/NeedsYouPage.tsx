@@ -3,10 +3,11 @@ import type { AttentionItem, AttentionPriority, GraphAction, GraphNodeView, Grap
 import { isPrerequisiteEdge } from '../../src/models/graph';
 import { URGENCY_HINT, URGENCY_LABEL, kindLabel, plural } from '../../src/domain/copy';
 import { MarkdownPreview } from '../components/MarkdownPreview';
-import { ActionRow, GROUP_COLOR, when } from './AttentionList';
+import { ActionRow, GROUP_COLOR, buttonStyle, when } from './AttentionList';
 import { waitingItems } from './graphModel';
 import { COLOR, nodeStyle, tint } from './colors';
 import { useTechnical } from '../technical';
+import { RouteRow, addRoutePrompt, dropPrompt, isOpen, routesTo, sharedLemmas } from './RoutesView';
 
 /**
  * Needs you: everything that waits for the researcher, in urgency groups on
@@ -52,6 +53,7 @@ function Detail({ item, node, payload, onAction, onNavigate, onShowInResults, on
         <h2 style={{ margin: 0, fontSize: 17, fontWeight: 600, lineHeight: 1.35 }}>{item.title}</h2>
       </header>
       {item.reason && <section><div style={label}>What is going on</div><div className="compact-md"><MarkdownPreview content={item.reason} style={{ fontSize: 13, lineHeight: 1.6 }} /></div></section>}
+      {item.routeMap && item.target && <RouteMapReview target={item.target} payload={payload} onAction={onAction} onShowInResults={onShowInResults} />}
       {item.why && <section><div style={label}>Why it matters</div><div style={{ fontSize: 13 }}>{item.why}</div></section>}
       {item.ifIgnored && <section><div style={label}>If you do nothing</div><div style={{ fontSize: 13 }}>{item.ifIgnored}</div></section>}
       <div>
@@ -82,6 +84,23 @@ function Detail({ item, node, payload, onAction, onNavigate, onShowInResults, on
         </section>
       )}
     </article>
+  );
+}
+
+/** A route map under review: the open routes side by side, each with a way to drop it, and a way to add one. */
+function RouteMapReview({ target, payload, onAction, onShowInResults }: { target: string; payload: GraphPayload; onAction: (action: GraphAction) => void; onShowInResults: (id: string) => void }) {
+  const routes = routesTo(payload, target).filter(isOpen);
+  const title = payload.nodes.find((node) => node.id === target)?.title ?? target;
+  const shared = sharedLemmas(routes);
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={label}>The routes · {routes.length}{shared.size ? ` · ${shared.size} lemma${shared.size === 1 ? '' : 's'} shared` : ''}</div>
+      {routes.map((route) => (
+        <RouteRow key={route.planId} route={route} payload={payload} shared={shared} onSelect={onShowInResults}
+          actions={<button style={{ ...buttonStyle('secondary'), padding: '0 8px' }} title="Copies an instruction and opens the agent chat" onClick={() => onAction({ action: 'agent', prompt: dropPrompt(route, title) })}>Drop ↗</button>} />
+      ))}
+      <div><button style={buttonStyle('secondary')} title="Copies an instruction and opens the agent chat" onClick={() => onAction({ action: 'agent', prompt: addRoutePrompt(target, title) })}>Add a route of mine ↗</button></div>
+    </section>
   );
 }
 

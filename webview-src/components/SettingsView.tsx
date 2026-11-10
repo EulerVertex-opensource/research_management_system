@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_APPROVE_RULES, LOOP_NUMBER_KEYS } from '../../src/models/settings';
 import type { AutoApproveRule, AutoPullMode, LoopNumberKey, ProviderSetting, RigorKey, RigorPolicy, SettingsErrors, SettingsPatch, SettingsPayload } from '../../src/models/settings';
-import { AWAY_KEYS, CHECK_KEYS, Involvement, LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, involvement, rigorPreset, validateSettingsPatch, withInvolvement } from '../../src/domain/loopSettings';
+import { AWAY_KEYS, CHECK_KEYS, ROUTE_KEYS, Involvement, LOOP_FIELD_GROUPS, LOOP_NUMBER_FIELDS, LoopFieldGroup, RIGOR_FIELDS, RIGOR_PRESETS, involvement, rigorPreset, validateSettingsPatch, withInvolvement } from '../../src/domain/loopSettings';
 import { COLOR } from '../graph/colors';
 import type { CitationView } from '../../src/models/packages';
 
@@ -30,6 +30,7 @@ const RULE_TEXT: Record<AutoApproveRule, { label: string; hint: string; warning?
   conjectureIdeas: { label: 'Turn ideas into conjectures', hint: 'when nothing else is actionable, the agent makes conjecture ideas precise and searches them for counterexamples (spends tokens)' },
   counterexamples: { label: 'Counterexamples', hint: 'verified counterexamples', warning: 'Confirming a counterexample deprecates the result it refutes.' },
   specifications: { label: 'Construction specifications', hint: 'the required properties P1…Pn a construction search looks for', warning: 'The loop will search against a specification you have not reviewed.' },
+  routes: { label: 'Route maps', hint: 'the routes planned to a main result, once merged', warning: 'The loop will work on routes you have not seen.' },
   project: { label: 'Project goals', hint: 'project.md and its required results', warning: 'The loop will pursue goals you have not reviewed.' },
 };
 const RULES = AUTO_APPROVE_RULES.map((id) => ({ id, ...RULE_TEXT[id] }));
@@ -231,6 +232,7 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
           {FIELD_GROUPS.map((group) => (
             <React.Fragment key={group}>
               {LOOP_FIELD_GROUPS[group] && <Divider label={LOOP_FIELD_GROUPS[group]} />}
+              {group === 'routes' && ROUTE_KEYS.map((key) => rigorField(key, Number(loop.routeWidth) === 0))}
               {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === group).map((key) => numberField(key))}
             </React.Fragment>
           ))}

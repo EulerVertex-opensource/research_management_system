@@ -1,12 +1,13 @@
 import React from 'react';
 import type { GraphAction, GraphNodeView, GraphPayload } from '../../src/models/graph';
 import { isPrerequisiteEdge } from '../../src/models/graph';
-import { KEEP_TRYING_HINT, keepTryingLabel, kindLabel } from '../../src/domain/copy';
+import { KEEP_TRYING_HINT, isProvable as isProvableType, keepTryingLabel, kindLabel } from '../../src/domain/copy';
 import { MarkdownPreview } from '../components/MarkdownPreview';
 import { ActionRow, buttonStyle } from './AttentionList';
 import { useTechnical } from '../technical';
 import { COLOR, CITED_COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
 import { LEVEL_HINT, LEVEL_LABEL, STATE_LABEL, UNDERSTANDING_LEVELS } from '../../src/domain/understandingLevels';
+import { RouteRow, isOpen, routesSummary, routesTo, sharedLemmas } from './RoutesView';
 
 /**
  * One result as a box: its state, title and one line of detail; opened, it
@@ -31,6 +32,8 @@ interface Props {
   onTrace?: (direction: 'up' | 'down') => void;
   /** The graph's floating card: no collapsed state, a close button instead. */
   onClose?: () => void;
+  /** Show the routes to this result in the Results view's Routes mode. */
+  onShowRoutes?: (id: string) => void;
   innerRef?: React.Ref<HTMLElement>;
 }
 
@@ -78,7 +81,8 @@ export function boxStyle(color: string = COLOR.border, selected = false): React.
   };
 }
 
-export function ResultCard({ node, payload, expanded, onToggle, onAction, onDetails, elsewhere, onTrace, onClose, innerRef, selected = false }: Props) {
+export function ResultCard({ node, payload, expanded, onToggle, onAction, onDetails, elsewhere, onTrace, onClose, onShowRoutes, innerRef, selected = false }: Props) {
+  const routes = routesTo(payload, node.id);
   const style = nodeStyle(node);
   const byId = new Map(payload.nodes.map((item) => [item.id, item]));
   const prerequisites = payload.edges.filter((edge) => edge.from === node.id && isPrerequisiteEdge(edge)).map((edge) => byId.get(edge.to)).filter((item): item is GraphNodeView => Boolean(item));
@@ -130,11 +134,22 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
           <div style={{ color: COLOR.muted, display: 'flex', flexWrap: 'wrap', gap: '2px 16px' }}>
             <span>{holds.length ? `Holds up ${holds.length === 1 ? 'the main result' : `${holds.length} main results`}: ${holds.slice(0, 3).join(', ')}${holds.length > 3 ? ` and ${holds.length - 3} more` : ''}` : required ? 'A main result' : 'No main result rests on it'}</span>
             <span>{prerequisites.length ? `Prerequisites: ${prerequisites.filter((entry) => entry.progress === 'done').length} of ${prerequisites.length} done` : 'No prerequisites'}</span>
-            {node.counts.plans > 0 && <span>Proof attempts: {node.counts.plans} ({node.counts.failedPlans} failed)</span>}
+            {node.counts.plans > 0 && !routes.length && <span>Proof attempts: {node.counts.plans} ({node.counts.failedPlans} failed)</span>}
             {node.counts.remarks > 0 && <span title="Explanations from the teaching chat or the loop; Open shows them">Remarks: {node.counts.remarks}</span>}
             {node.sections.length > 0 && <span>In the paper: {node.sections.join(', ')}</span>}
             {technical && <span style={{ fontFamily: 'var(--vscode-editor-font-family, monospace)' }}>{node.filePath}</span>}
           </div>
+          {routes.length > 0 && (
+            <section style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <b>Routes</b><span style={{ color: COLOR.muted }}>{routesSummary(routes)}</span>
+                {onShowRoutes && <button style={{ ...buttonStyle('secondary'), marginLeft: 'auto', padding: '0 8px' }} onClick={() => onShowRoutes(node.id)}>See them side by side</button>}
+              </div>
+              {routes.filter((route) => isOpen(route) || route.state === 'won').slice(0, 4).map((route) => (
+                <RouteRow key={route.planId} route={route} payload={payload} shared={sharedLemmas(routes.filter(isOpen))} onSelect={onDetails} />
+              ))}
+            </section>
+          )}
           {item && <ActionRow buttons={item.buttons.filter((button) => button.action.action !== 'openNode')} onAction={onAction} onNavigate={onDetails} />}
           <UnderstandingRow node={node} onAction={onAction} />
           {onTrace && (
@@ -149,6 +164,12 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
             {loopRunning && node.kind === 'asset' && !item && (parked
               ? <button style={buttonStyle('secondary')} title={KEEP_TRYING_HINT} onClick={() => onAction({ action: 'unpark', assetId: node.id })}>{keepTryingLabel('')}</button>
               : node.status === 'draft' && <button style={buttonStyle('secondary')} onClick={() => onAction({ action: 'park', assetId: node.id })} title="The loop skips it until you bring it back">Set aside</button>)}
+            {loopRunning && node.status === 'approved' && node.kind === 'asset' && isProvableType(node.type) && payload.required.some((id) => payload.nodes.find((entry) => entry.id === id)?.progress !== 'done') && (
+              <button style={buttonStyle('secondary')} title="Plan routes that start from this result toward an unfinished result; copies an instruction and opens the agent chat"
+                onClick={() => onAction({ action: 'agent', prompt: `Plan routes that start from ${node.title} (${node.id}): run research-loop route fork ${node.id} --toward <result> for the unfinished result it can help most (ask me if it is not clear which), then continue the loop.` })}>
+                Fork a route from here ↗
+              </button>
+            )}
             {node.status === 'draft' && node.kind === 'asset' && !parked && (
               <button style={buttonStyle('secondary')} title="Copies an instruction and opens the agent chat"
                 onClick={() => onAction({ action: 'agent', prompt: `Work on ${node.id} next in the research loop: search it for a counterexample if it has not been checked, otherwise plan and prove it. Read only its context; do not change its statement without asking me.` })}>

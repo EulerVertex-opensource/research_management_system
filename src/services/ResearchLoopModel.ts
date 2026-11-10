@@ -7,6 +7,7 @@ import { nodeProblems } from '../domain/schema';
 import { LIBRARY_PREFIX, isLibraryId, locateNodeFile } from '../domain/registry';
 import { hasSection, sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 import { SearchMode, SearchSlot, candidateProblems, roundProblems } from '../domain/search';
+import type { RouteRound } from '../domain/routeSchema';
 
 /**
  * Pure types and helpers for the chat-driven research loop. Shared by the
@@ -17,7 +18,10 @@ export type AgentProvider = 'claude' | 'codex';
 export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
-  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'verify_node' | 'conjecture' | 'waiting' | 'ready';
+  | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'verify_node' | 'conjecture' | 'waiting' | 'ready'
+  | 'route' | 'route_merge' | 'review_routes' | 'reduce' | 'verify_reduction';
+/** Stages of one round of routes to a result; the round in `current.route` lives through all of them. */
+export const ROUTE_STAGES: ReadonlySet<LoopStage> = new Set<LoopStage>(['route', 'route_merge', 'review_routes']);
 /** What `verify_node` checks: a definition, or a result taken from a source (a citation or a library result). */
 /**
  * What an independent check reads: a definition, a result against its cited source, or a proof as
@@ -31,10 +35,12 @@ export interface NodeCheckTarget { id: string; mode: 'definition' | 'citation' |
  * the report, the work covered an earlier version and is redone.
  */
 export interface FrozenInput { id: string; kind: 'asset' | 'definition'; file: string; part: 'statement' | 'proof' | 'node'; digest: string }
-export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review';
+/** `routes`: before a round of routes, the researcher's own routes to the result, if they have any. */
+export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review' | 'routes';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
 /** `package`: one review of an imported research package (target: its alias) that approves all of its results at once. */
-export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification' | 'package';
+/** `routes`: a result's route map (its open routes and their lemmas, after merging), target the result. */
+export type ApprovalKind = 'project' | 'asset' | 'definition' | 'citation' | 'counterexample' | 'specification' | 'package' | 'routes';
 export type ReportOutcome = 'complete' | 'none' | 'candidate' | 'confirmed' | 'rejected' | 'proved' | 'failed' | 'question' | 'searched' | 'summarized';
 export const REPORT_OUTCOMES: readonly ReportOutcome[] = ['complete', 'none', 'candidate', 'confirmed', 'rejected', 'proved', 'failed', 'question', 'searched', 'summarized'];
 /** Stages of one object search; the search round in `current.search` lives through all of them. */
@@ -162,6 +168,8 @@ export interface LoopState {
     search?: { mode: SearchMode; round: number; slots: SearchSlot[]; candidateId?: string; properties?: string[]; requested?: boolean };
     /** Stage `verify_proof` as a re-check: the dependencies and definitions that changed since the proof was written or last checked. */
     recheck?: string[];
+    /** A round of routes to a result (stages route, route_merge, review_routes). */
+    route?: RouteRound;
     /** Stage `verify_node`: the definition, or the cited or library result, checked before auto mode approves it. */
     node?: NodeCheckTarget;
     /** Stages that execute or check work: what they work from, as it was when the stage began. */
@@ -212,8 +220,9 @@ export interface ApprovalRecord {
    * `remark`: the researcher agreed a remark may appear in the paper; it covers the remark's text, not any result.
    * `package`: the researcher accepted an imported package (target: its alias); `digest` is the package digest and
    * `nodes` holds each result's digests, so every result it covers counts as approved while its content matches.
+   * `routes`: the researcher agreed a result's route map; `digest` is its routeMapDigest.
    */
-  kind: 'project' | 'asset' | 'definition' | 'specification' | 'remark' | 'package'; target: string; digest: string; approvedAt: string; source?: string;
+  kind: 'project' | 'asset' | 'definition' | 'specification' | 'remark' | 'package' | 'routes'; target: string; digest: string; approvedAt: string; source?: string;
   statement?: string; performed_by?: string; base_commit?: string; extension_version?: string;
   /** Only on a package record. */
   package?: string; version?: string; nodes?: Record<string, PackageApprovalNode>;
@@ -238,12 +247,12 @@ export interface ResearchFolders { assets: string; definitions: string; ideas: s
 export { researchDigest, statementDigest, proofDigest } from '../domain/digests';
 
 /** A specification approval covers the statement only, so writing the construction found later keeps it. */
-export function approvalDigest(raw: string, kind: ApprovalRecord['kind']): string {
+export function approvalDigest(raw: string, kind: Exclude<ApprovalRecord['kind'], 'routes'>): string {
   // A package record is not compared against one file's digest; its results carry their own (see isApproved).
   return kind === 'specification' ? statementDigest(raw) : researchDigest(raw, kind === 'remark' || kind === 'package' ? 'asset' : kind);
 }
 
-export function isApproved(records: ApprovalRecord[], kind: ApprovalRecord['kind'], target: string, raw: string): boolean {
+export function isApproved(records: ApprovalRecord[], kind: Exclude<ApprovalRecord['kind'], 'routes'>, target: string, raw: string): boolean {
   const digest = approvalDigest(raw, kind);
   if (records.some((record) => record.kind === kind && record.target === target && record.digest === digest)) return true;
   // A result of an imported package is also approved by the package's one record.

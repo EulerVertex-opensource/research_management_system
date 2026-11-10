@@ -1,5 +1,7 @@
 import { ProjectPaths, ResearchNode } from '../models/types';
-import { CoverageCell, CoverageRow, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView, isPrerequisiteEdge } from '../models/graph';
+import { CoverageCell, CoverageRow, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, RouteView, SectionView, isPrerequisiteEdge } from '../models/graph';
+import { ProofNumbers, applyBeam, isRoutePlan, routeInfo } from '../domain/routes';
+import { readLoopSettings } from './LoopSettingsStore';
 import { buildGraph, nodeKey } from '../domain/graph';
 import { nodeKindOf } from '../domain/nodeKinds';
 import { requiredAssetIds } from '../domain/project';
@@ -40,6 +42,8 @@ export interface GraphInputs {
   recheck?: Record<string, string>;
   /** Active remarks per target ID. */
   remarks?: Record<string, number>;
+  /** Routes worked on at once per result (the researcher's setting); the rest show as waiting their turn. */
+  maxLiveRoutes?: number;
 }
 
 const RESEARCH_KINDS = new Set(['asset', 'definition']);
@@ -153,7 +157,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     if (cited && status === 'draft') return result('waiting', 'Not checked', cited.kind === 'library' ? 'Known result · check before you finish' : `${citationText(cited)} · check before you finish`);
     if (flags.includes('awaiting_approval')) {
       const kind = approvalKinds.get(node.id);
-      const detail = kind === 'definition' ? 'Definition written' : node.type === 'conjecture' ? 'Conjecture stated' : kind === 'citation' ? 'Quoted from a paper' : kind === 'specification' ? 'Properties written'
+      const detail = kind === 'definition' ? 'Definition written' : node.type === 'conjecture' ? 'Conjecture stated' : kind === 'citation' ? 'Quoted from a paper' : kind === 'specification' ? 'Properties written' : kind === 'routes' ? 'Routes planned'
         : node.origin ? 'Known result to accept' : isProvable(node.type) ? 'Proof written' : 'Waiting for you';
       return result('needs_you', needsLabel(kind), detail);
     }
@@ -263,6 +267,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     }
   }
   const history = buildHistory(input.events ?? [], (id) => byId.get(id)?.title ?? id, (id) => byId.get(id)?.type ?? '');
+  const routes = routeViews(plans, nodes, (id) => (refutedBy.get(id) ?? []).some((example) => example.status === 'approved'), (id) => Boolean(state?.parked[id]), input.maxLiveRoutes ?? 3);
 
   return {
     generatedAt: input.now,
@@ -272,7 +277,29 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     ...(state ? { loop: { status: state.status, stage: state.stage, ...(state.current.assetId ? { assetId: state.current.assetId } : {}) } } : {}),
     ...(manuscript ? { manuscriptState: manuscript.impact.state } : {}),
     nodes, edges, attention, sections, coverage, health, history,
+    ...(routes.length ? { routes } : {}),
   };
+}
+
+/** Routes as the loop sees them, from the plans and the results' progress (settled = done). */
+function routeViews(plans: ResearchNode[], nodes: GraphNodeView[], refuted: (id: string) => boolean, parked: (id: string) => boolean, maxLive: number): RouteView[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const settled = (id: string) => byId.get(id)?.progress === 'done';
+  const retired = (id: string) => !byId.has(id) || ['deprecated', 'archived'].includes(byId.get(id)!.status);
+  const routePlans = plans.filter((plan) => isRoutePlan(plan as unknown as Record<string, any>));
+  const raw = routePlans.map((plan) => routeInfo({ id: plan.id, data: plan as unknown as Record<string, any>, content: plan.body }, (id) => ({ settled: settled(id), refuted: refuted(id), inactive: retired(id), parked: parked(id) })));
+  const graphOf = (routes: typeof raw) => ({
+    settled, dead: (id: string) => retired(id) || refuted(id), deps: () => [] as string[],
+    routes: (id: string) => routes.filter((route) => route.target === id), leafCost: () => 1,
+  });
+  const numbers = new ProofNumbers(graphOf(raw));
+  const beamed = applyBeam(raw, maxLive, (route) => numbers.ofRoute(route));
+  const final = new ProofNumbers(graphOf(beamed));
+  return beamed.map((route, index) => {
+    const left = final.ofRoute(route);
+    const round = Number((routePlans[index] as unknown as Record<string, unknown>).route_round);
+    return { ...route, left: Number.isFinite(left) ? left : null, ...(Number.isInteger(round) ? { round } : {}) };
+  });
 }
 
 const STATEMENT_LIMIT = 4000;
@@ -306,6 +333,7 @@ export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths,
   return buildGraphPayload({
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
     state, agent, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck, remarks,
+    maxLiveRoutes: (await readLoopSettings(files)).settings.maxLiveRoutes,
   });
 }
 

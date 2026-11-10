@@ -39,7 +39,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 function fixture(extra = {}, clock) {
-  const settings = { version: 1, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, maxFailedPlans: 1, ...extra };
+  const settings = { version: 1, routeWidth: 0, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, maxFailedPlans: 1, ...extra };
   const files = memoryFiles({ 'research/project.md': '# Project\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify(settings) });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, iterationCap: 5, ...(clock ? { now: () => clock.now } : {}) });
   return { files, core, map: files.map };
@@ -241,7 +241,7 @@ test('a question asked before autonomous mode was turned on is settled the auton
   f.map.set(paths.projectMd, project);
   await f.core.report({ outcome: 'complete', summary: 'Drafted' });
   await f.core.askQuestion('discussion', 'Use the strong form? By default, yes.');
-  f.map.set(SETTINGS, JSON.stringify({ version: 1, autonomy: { enabled: true } }));
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, autonomy: { enabled: true } }));
   await f.core.next();
   assert.equal(f.core.current.pendingQuestion, undefined);
   assert.ok(f.core.current.autonomy, 'the run starts');
@@ -462,7 +462,7 @@ test('autonomous mode checks a library result against its source before using it
   assert.deepEqual((await f.core.autonomySummary()).agentChecked, { definitions: [], citations: ['lib_known'], rechecked: [], proofs: [] });
   await f.core.report({ outcome: 'none', summary: 'No approach in sight.' });
   await f.core.park('main_theorem', 'agent_gave_up', 'Nothing in sight.');
-  f.map.set(SETTINGS, JSON.stringify({ version: 1, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, autonomyRevisions: 0 }));
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, autonomyRevisions: 0 }));
   const handed = await f.core.next();
   assert.match(handed.instruction, /approved on an independent agent's check alone/);
   const handoff = [...f.map.entries()].find(([file]) => file.startsWith('research/handoffs/'))[1];

@@ -84,7 +84,7 @@ export function NodeListItem({ node, selected, onSelect, order, meta, innerRef }
   );
 }
 
-const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'abandoned', 'approved', 'draft', 'refuted', 'obstructed', 'resolved', 'deprecated', 'archived'];
+const STATUS_ORDER: ResearchStatus[] = ['pending', 'failed', 'succeeded', 'superseded', 'abandoned', 'approved', 'draft', 'refuted', 'obstructed', 'resolved', 'deprecated', 'archived'];
 
 export function NodeList({ nodes, selectedId, onSelect, filterType, definitionPath = 'research/definitions' }: Props) {
   const [search, setSearch] = useState('');

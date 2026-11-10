@@ -50,6 +50,8 @@ function team() {
     const read = (relative) => fs.readFileSync(path.join(dir, relative), 'utf8');
     const run = (args) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, encoding: 'utf8' });
     const commit = (message) => { git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', message); };
+    // These tests follow one proof attempt after another; parallel routes have their own tests.
+    write('.research-assistant-loop/settings.json', JSON.stringify({ version: 1, routeWidth: 0 }));
     return { dir, write, read, run, commit, git: (...args) => git(dir, ...args), state: () => JSON.parse(read('.research-assistant-loop/state.json')) };
   };
   const alice = clone('alice');

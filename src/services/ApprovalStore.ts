@@ -18,7 +18,7 @@ export function legacyApprovalsPath(researchRoot: string): string {
 
 export function approvalRecordPath(researchRoot: string, kind: ApprovalRecord['kind'], target: string): string {
   const folder = sharedFolders(researchRoot).approvals;
-  return kind === 'project' ? `${folder}/project.json` : `${folder}/${kind === 'asset' ? 'assets' : kind === 'specification' ? 'specifications' : kind === 'remark' ? 'remarks' : kind === 'package' ? 'packages' : 'definitions'}/${target}.json`;
+  return kind === 'project' ? `${folder}/project.json` : `${folder}/${kind === 'asset' ? 'assets' : kind === 'specification' ? 'specifications' : kind === 'remark' ? 'remarks' : kind === 'package' ? 'packages' : kind === 'routes' ? 'routes' : 'definitions'}/${target}.json`;
 }
 
 /** Every file that holds approval records, legacy file included. */
@@ -26,7 +26,7 @@ export async function approvalFiles(files: LoopFiles, researchRoot: string): Pro
   const folder = sharedFolders(researchRoot).approvals;
   const found: string[] = [];
   for (const file of [legacyApprovalsPath(researchRoot), `${folder}/project.json`]) if (await files.exists(file)) found.push(file);
-  for (const sub of ['assets', 'definitions', 'specifications', 'remarks', 'packages']) found.push(...await files.listFiles(`${folder}/${sub}`, '.json'));
+  for (const sub of ['assets', 'definitions', 'specifications', 'remarks', 'packages', 'routes']) found.push(...await files.listFiles(`${folder}/${sub}`, '.json'));
   return found;
 }
 

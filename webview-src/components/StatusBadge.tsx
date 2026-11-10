@@ -12,6 +12,7 @@ const COLORS: Record<ResearchStatus, string> = {
   failed: COLOR.error,
   succeeded: COLOR.approved,
   abandoned: COLOR.inactive,
+  superseded: COLOR.inactive,
   resolved: COLOR.link,
   refuted: COLOR.error,
   obstructed: COLOR.waiting,

@@ -38,6 +38,10 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
       if (stage === 'search') return entry(`Started a search round on ${name}.`);
       if (stage === 'verify_counterexample') return entry(`Started checking a possible counterexample to ${name}.`);
       if (stage === 'verify_construction') return entry(`Started checking a candidate for ${name}.`);
+      if (stage === 'route') return entry(`Started planning routes to ${name}.`);
+      if (stage === 'route_merge') return entry(`Started merging the routes to ${name}.`);
+      if (stage === 'reduce') return entry(`Started writing how a route reaches ${name} from its lemmas.`);
+      if (stage === 'verify_reduction') return entry(`Started checking how a route reaches ${name} from its lemmas.`);
       if (stage === 'scaffold') return entry('Started setting up the results to prove.');
       if (stage === 'draft_project') return entry('Started writing up the goals.');
       return undefined;
@@ -98,6 +102,16 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
       const into = Array.isArray(event.into) ? event.into.map(String) : [];
       return { text: `An idea plans kept relying on became the draft lemma ${title(id)}${into.length ? `, which ${into.map(title).join(', ')} now ${into.length === 1 ? 'depends' : 'depend'} on` : ''}.`, tone: 'info', target: id };
     }
+    case 'routes_proposed': return entry(`Planned ${plural(Array.isArray(event.routes) ? event.routes.length : 0, 'route')} to ${name}.`, 'info');
+    case 'route_lemmas_merged': return { text: `Two routes need the same lemma: ${title(text(event.dup))} is ${title(text(event.keep))}.`, tone: 'info', target: text(event.keep) };
+    case 'route_implied': return { text: `${title(text(event.strong))} implies ${title(text(event.weak))}, so proving it also serves the routes that need ${title(text(event.weak))}.`, tone: 'info', target: text(event.weak) };
+    case 'route_reduced': return entry(`A route to ${name} now needs only its lemmas: the step from them to ${name} is written.`);
+    case 'route_reduction_verified': return entry(`An independent check confirmed how a route reaches ${name} from its lemmas.`, 'success');
+    case 'route_failed': return entry(`A route to ${name} failed${text(event.reason) === 'reduction_rejected' ? ': an independent check rejected its step from the lemmas' : ''}; the other routes go on.`, 'warning');
+    case 'route_won': return entry(`${name} is proved through one of its routes${Array.isArray(event.superseded) && event.superseded.length ? `; ${plural(event.superseded.length, 'other route')} set aside` : ''}.`, 'success');
+    case 'route_dropped': return entry(`A route to ${name} was dropped.`, 'info');
+    case 'route_abandoned': return entry(`A route to ${name} was abandoned: it would make ${name} rest on itself.`, 'warning');
+    case 'routes_exhausted': return entry(`Every route to ${name} so far failed; the agent asks you for a direction.`, 'warning');
     case 'idea_refuted': return entry('An observation was found false; similar results are warned off it.', 'warning');
     case 'idea_obstructed': return entry('An approach was shown not to work in general; similar results are warned off it.', 'warning');
     case 'idea_saved': {

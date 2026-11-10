@@ -22,7 +22,7 @@ const asset = (extra = {}) => matter.stringify('\n## Statement\n\nFor every natu
 const plan = (id, failed = []) => matter.stringify(`\n## Goal\n\nTarget: [asset](../assets/main_theorem.md)\n\nProve reflexivity.\n\n## Plan\n\n1. [ ] Apply equality reflexivity.\n\n## Verification\n\nCheck the equality.\n${failed.length ? `\n## Difference from failed plans\n\nUnlike ${failed.join(', ')}, it states each step.\n` : ''}`, { type: 'plan', title: id, status: 'pending', target_asset: 'main_theorem', inspired_by: [], tags: [] });
 const SETTINGS = '.research-assistant-loop/settings.json';
 const ASSET = 'research/assets/main_theorem.md';
-const settings = (verifyProofs, extra = {}) => JSON.stringify({ version: 1, rigor: { verifyProofs }, ...extra });
+const settings = (verifyProofs, extra = {}) => JSON.stringify({ version: 1, routeWidth: 0, rigor: { verifyProofs }, ...extra });
 
 function memoryFiles(initial = {}) {
   const map = new Map(Object.entries(initial));

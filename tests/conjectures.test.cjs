@@ -39,7 +39,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 function fixture(settings) {
-  const files = memoryFiles({ 'research/project.md': '# Project\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, ...settings }) });
+  const files = memoryFiles({ 'research/project.md': '# Project\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, routeWidth: 0, ...settings }) });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}` });
   return { files, core, map: files.map };
 }

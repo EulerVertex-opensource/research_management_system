@@ -8,7 +8,7 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, ASSESSMENT_PATH, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, GoalAssessment, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  FrozenInput, LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
+  FrozenInput, LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, ROUTE_STAGES, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { STATE_LOCK_PATH, StateLockOptions, acquireStateLock } from './StateLock';
@@ -27,6 +27,8 @@ import { projectSection, requiredAssetIds } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
 import { appendToSection, hasSection, sectionContent, statementPart, stripManagedBlocks, verdictOutcome } from '../domain/sections';
 import { ProofRevision, REVISIONS_DIR, withProof } from '../domain/revisions';
+import { ProofGraph, ProofNumbers, ROUTE_DIRECTIONS, RouteInfo, applyBeam, isActiveRoute, isOpenRoute, isRoutePlan, mostProvingStep, reductionDigest, routeInfo, routeLemmas, routeMapCovered, routeMapDigest, routeMapEntries, splitRoutes } from '../domain/routes';
+import type { RouteOrigin, RouteRound, RouteSlot } from '../domain/routeSchema';
 import { understandingParts } from '../domain/understanding';
 import { layoutReport } from '../domain/layout';
 import { appendProjectRevision, approvalFiles, isApprovalPath, legacyApprovalsPath, readApprovals, writeApprovals } from './ApprovalStore';
@@ -73,6 +75,8 @@ type Selection =
   | { stage: 'search'; assetId: string; mode: SearchMode }
   | { stage: 'conjecture'; ideaId: string }
   | { stage: 'verify_node'; node: NodeCheckTarget }
+  | { stage: 'route'; assetId: string; fork?: string }
+  | { stage: 'reduce' | 'verify_reduction'; assetId: string; planId: string }
   | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
 type Finish = (message: string, next: LoopStage, patch?: Partial<LoopState['current']>) => Promise<{ stage: LoopStage; message: string }>;
 type SearchRound = NonNullable<LoopState['current']['search']>;
@@ -102,7 +106,7 @@ const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
 /** A save of an idea identical to one saved this recently is taken as a retry of that save. */
 const IDEA_RETRY_WINDOW_MS = 10 * 60 * 1000;
 /** Stages whose outcome rests on what they read: their inputs are frozen when they begin and compared at the report. */
-const FROZEN_STAGES = new Set<LoopStage>(['execute', 'verify_proof', 'verify_node', 'verify_counterexample', 'verify_construction']);
+const FROZEN_STAGES = new Set<LoopStage>(['execute', 'verify_proof', 'verify_node', 'verify_counterexample', 'verify_construction', 'reduce', 'verify_reduction']);
 
 /**
  * Pure research-loop engine. Files are the state; this class only reads and
@@ -308,6 +312,14 @@ export class ResearchLoopCore {
       return inputs;
     }
     if (!current.assetId) return undefined;
+    // A route's reduction rests on its target's statement and dependencies and on each route lemma's statement.
+    if ((stage === 'reduce' || stage === 'verify_reduction') && current.planId) {
+      await result(current.assetId, ['statement']);
+      let lemmas: string[] = [];
+      try { lemmas = routeLemmas(parseMarkdown(await this.files.readFile(`${this.paths.plans}/${current.planId}.md`)).data); } catch { /* missing plan: the stage is recomputed */ }
+      for (const lemma of lemmas) if (!inputs.some((input) => input.id === lemma && input.part === 'statement')) await add('asset', lemma, 'statement');
+      return inputs;
+    }
     // Execution writes the proof itself, and its own statement is held fixed by the stage rules: it works from what the result rests on.
     if (stage === 'execute') { await result(current.assetId, []); return inputs.filter((input) => input.id !== current.assetId); }
     await result(current.assetId, stage === 'verify_proof' ? ['statement', 'proof'] : ['statement']);
@@ -376,6 +388,11 @@ export class ResearchLoopCore {
       await this.setStage('plan', { planId: await this.pendingPlan(assetId), statementDigest: undefined });
       return `${list} changed during execution, so this execution worked against an earlier version. ${planId ? `Plan ${planId} is set aside (not counted as a failed approach); ` : ''}${assetId} is planned anew against the current version, and any draft proof stays in it for reference. ${notOurs} Continue with next.`;
     }
+    if (stage === 'reduce') {
+      await this.setStage('select', { assetId: undefined, planId: undefined });
+      return `${list} changed while the reduction was being written, so it would rest on an earlier version. Nothing is recorded; the loop chooses again: run next. ${notOurs}`;
+    }
+    if (stage === 'verify_reduction' && state.current.planId) await this.setAsideVerdictIn(`${this.paths.plans}/${state.current.planId}.md`, 'Reduction verdict');
     if (stage === 'verify_proof' && state.current.planId) await this.setAsideVerdict(state.current.planId);
     if (stage === 'verify_counterexample' && state.current.counterexampleId) await this.setAsideVerdictIn(`${this.paths.assets}/${state.current.counterexampleId}.md`);
     if (stage === 'verify_construction' && assetId && state.current.search?.candidateId) {
@@ -387,10 +404,11 @@ export class ResearchLoopCore {
   }
 
   /** A verdict written into a file (a candidate's or a counterexample's) stays under another heading, so it cannot pass for the next check's. */
-  private async setAsideVerdictIn(file: string): Promise<void> {
+  private async setAsideVerdictIn(file: string, heading = 'Verdict'): Promise<void> {
     const raw = await this.files.readFile(file).catch(() => '');
-    if (!raw || !/^## Verdict[ \t]*$/m.test(raw)) return;
-    await this.writeOwned(file, raw.replace(/^## Verdict[ \t]*$/gm, '## Earlier verdict'));
+    const pattern = new RegExp(`^## ${heading}[ \\t]*$`, 'gm');
+    if (!raw || !new RegExp(pattern.source, 'm').test(raw)) return;
+    await this.writeOwned(file, raw.replace(pattern, `## Earlier ${heading.toLowerCase()}`));
   }
 
   private async setStage(stage: LoopStage, patch: Partial<LoopState['current']> = {}): Promise<void> {
@@ -398,6 +416,7 @@ export class ResearchLoopCore {
     state.stage = stage;
     state.current = { ...state.current, ...patch, stageStartedAt: this.now(), baseCommit: await this.git?.head() };
     if (!SEARCH_STAGES.has(stage)) delete state.current.search;
+    if (!ROUTE_STAGES.has(stage)) delete state.current.route;
     if (stage !== 'verify_proof') delete state.current.recheck;
     if (stage !== 'verify_node') delete state.current.node;
     if (stage !== 'waiting') delete state.waitingOn;
@@ -579,7 +598,7 @@ export class ResearchLoopCore {
     await this.refreshSnapshot(touched);
   }
 
-  private async record(kind: ApprovalRecord['kind'], target: string, raw: string, source: string): Promise<void> {
+  private async record(kind: Exclude<ApprovalRecord['kind'], 'routes'>, target: string, raw: string, source: string): Promise<void> {
     const file = await this.approvals();
     const previous = file.records.find((entry) => entry.kind === kind && entry.target === target);
     file.records = file.records.filter((entry) => !(entry.kind === kind && entry.target === target));
@@ -939,7 +958,7 @@ export class ResearchLoopCore {
         await this.writeDecision('direction', assetId, text, { failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
         delete state.parked[assetId];
         // A direction also restarts a construction search's round and candidate limits.
-        if (await this.isConstructionSearch(assetId)) await this.setStage('select', { assetId: undefined });
+        if (await this.isConstructionSearch(assetId) || await this.willRoute(assetId)) await this.setStage('select', { assetId: undefined });
         else await this.setStage('plan', { assetId, planId: undefined });
       } else {
         const construct = await this.isConstructionSearch(assetId);
@@ -949,7 +968,7 @@ export class ResearchLoopCore {
           await this.writeDecision('direction', assetId, 'No direction from the researcher. Try one genuinely different approach of your own, unlike every failed one; if it fails too, the result is set aside.', { reason: 'agent_retry', failedPlansAtDirection: await this.failedPlans(assetId), searchRound });
           delete state.parked[assetId];
           await this.event('agent_retry', { assetId });
-          if (construct) await this.setStage('select', { assetId: undefined });
+          if (construct || await this.willRoute(assetId)) await this.setStage('select', { assetId: undefined });
           else await this.setStage('plan', { assetId, planId: undefined });
           return;
         }
@@ -957,6 +976,11 @@ export class ResearchLoopCore {
         else await this.park(assetId, 'three_failures', 'no new direction from the researcher');
         await this.setStage('select');
       }
+    } else if (question.kind === 'routes' && assetId) {
+      // Each route the researcher names becomes one of their approach ideas; a round gives each its own slot.
+      if (decision === 'answer') for (const part of splitRoutes(text)) await this.saveIdea(`Route to ${assetId}: ${part.length > 60 ? `${part.slice(0, 57)}...` : part}`, part, [assetId], 'researcher', ['route'], 'approach');
+      if (state.researcherInput?.kind === 'routes') state.researcherInput = undefined;
+      await this.save();
     } else if (question.kind === 'counterexample_review') {
       if (decision === 'answer' && text.trim()) await this.saveIdea(`Counterexample review for ${assetId ?? 'project'}`, text, assetId ? [assetId] : [], 'researcher', [], 'observation');
       await this.save();
@@ -1012,6 +1036,8 @@ export class ResearchLoopCore {
     let digest: string;
     if (kind === 'package') {
       digest = (await this.packageLock(target).catch(() => undefined))?.digest ?? '';
+    } else if (kind === 'routes') {
+      digest = await this.routeMapDigestFor(target);
     } else {
       const raw = kind === 'project' ? await this.files.readFile(this.paths.projectMd).catch(() => '') : await this.files.readFile(await this.nodeFile(kind === 'definition' ? 'definition' : 'asset', target)).catch(() => '');
       digest = raw ? approvalDigest(raw, kind === 'project' ? 'project' : kind === 'definition' ? 'definition' : kind === 'specification' ? 'specification' : 'asset') : '';
@@ -1052,6 +1078,7 @@ export class ResearchLoopCore {
     }
     if (request.kind === 'project') await this.setStage('draft_project');
     else if (request.kind === 'counterexample') await this.rejectCounterexample(request.target, text, source);
+    else if (request.kind === 'routes') { if (state.researcherInput?.kind === `changes:routes:${request.target}`) state.researcherInput = undefined; await this.rejectRouteMap(request.target, text); }
     else {
       state.progress[request.target] = { ...state.progress[request.target], changesRequested: text.trim() || 'Revise the proof.' };
       await this.clearPark(request.target, 'changes requested');
@@ -1066,6 +1093,7 @@ export class ResearchLoopCore {
     else if (request.kind === 'counterexample') await this.confirmCounterexample(request.target, source);
     else if (request.kind === 'specification') await this.approve('specification', request.target, source);
     else if (request.kind === 'package') await this.approvePackage(request.target, source);
+    else if (request.kind === 'routes') await this.approveRouteMap(request.target, source);
     else await this.approve('asset', request.target, source);
   }
 
@@ -1083,6 +1111,7 @@ export class ResearchLoopCore {
   private async isCurrentlyApproved(kind: ApprovalKind, target: string): Promise<boolean> {
     if (kind === 'project') return this.isProjectApproved();
     if (kind === 'package') return (await this.packageStatus(target)).approved;
+    if (kind === 'routes') return this.routeMapApproved(target);
     if (kind === 'specification') {
       const raw = await this.files.readFile(`${this.paths.assets}/${target}.md`).catch(() => '');
       return Boolean(raw) && isApproved((await this.approvals()).records, 'specification', target, raw);
@@ -1141,6 +1170,11 @@ export class ResearchLoopCore {
       if (!policy.citations) return undefined;
       const lock = await this.packageLock(request.target).catch(() => undefined);
       return lock && lock.digest === request.digest && !(await this.packageProblemsFor(request.target)).length ? 'citations' : undefined;
+    }
+    if (request.kind === 'routes') {
+      // Judged from the routes as they stand: only the map version the request names.
+      if (!policy.routes) return undefined;
+      return request.digest === await this.routeMapDigestFor(request.target) ? 'routes' : undefined;
     }
     if (request.kind === 'specification') {
       if (!policy.specifications) return undefined;
@@ -1327,6 +1361,11 @@ export class ResearchLoopCore {
   // ---------- shared records ----------
 
   private async writeDecision(kind: DecisionKind, target: string, text: string, extra: DecisionExtra = {}): Promise<string> {
+    // A direction also restarts the count of rounds of routes, as it does for failed plans and search rounds.
+    if (kind === 'direction' && extra.routeRound === undefined) {
+      const last = await this.lastRouteRound(target);
+      if (last) extra = { ...extra, routeRound: last };
+    }
     const provenance = await this.provenance();
     const id = decisionId(kind, target, provenance, this.shortId());
     await this.writeOwned(`${this.shared.decisions}/${id}.md`, decisionMarkdown(kind, target, text, provenance, extra));
@@ -1619,7 +1658,8 @@ export class ResearchLoopCore {
       this.dropConjectureRequest(assetId);
       return finish(`No counterexample found for the conjecture ${assetId} in ${search.round} round(s); its statement goes to the researcher to agree on. Continue with next.`, 'select', { assetId: undefined, counterexampleId: undefined });
     }
-    return finish(`No counterexample found for ${assetId} in ${search.round} round(s). Next: plan.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
+    const [nextStage, patch] = await this.afterSurvived(assetId);
+    return finish(`No counterexample found for ${assetId} in ${search.round} round(s). Next: ${nextStage === 'plan' ? 'plan' : 'its routes; continue with next'}.`, nextStage, patch);
   }
 
   private async isConjecture(assetId: string): Promise<boolean> {
@@ -2449,6 +2489,13 @@ export class ResearchLoopCore {
     const failures = await this.failuresSinceDirection(assetId);
     const limit = (await this.allotment(assetId)) ?? (await this.loopSettings()).maxFailedPlans;
     if (failures >= limit) {
+      const settings = await this.loopSettings();
+      const main = requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => '')).includes(assetId);
+      if (settings.rigor.lemmaRoutes === 'on' && settings.routeWidth > 0 && !main && !(await this.isRouted(assetId))) {
+        // The researcher's setting: a stuck lemma first gets a round of routes, then the blocked question.
+        await this.writeDecision('route_request', assetId, `${failures} proof attempts failed for ${assetId}; plan several routes to it before asking the researcher.`, { reason: 'stuck', routeRound: 0 });
+        return finish(`${what} (${failures}/${limit}). Next: several routes to ${assetId} side by side.`, 'select', { assetId: undefined, planId: undefined });
+      }
       await this.setStage('plan', { planId: undefined });
       if (autonomous) return { stage: 'plan', message: await this.decideStuck(assetId, `${failures} approaches failed for ${assetId} since the last direction (its allotment was ${limit}).`) };
       await this.askQuestion('blocked', `${assetId} has ${failures} documented failed approaches since the last direction. Give a new direction, or skip to park it and move on.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
@@ -2484,8 +2531,9 @@ export class ResearchLoopCore {
     return { stage: 'plan', message: `No new approach for ${assetId}. Ask the researcher with ask_researcher(kind: "blocked"); if nobody answers, the loop acts on the researcher's setting (sets it aside, or records one new approach for you); do not park it yourself.` };
   }
 
+  /** The pending classic plan for an asset; routes (plans with route_lemmas) are worked on by the route scheduler instead. */
   private async pendingPlan(assetId: string): Promise<string | undefined> {
-    return (await this.plans()).find((plan) => plan.data.type === 'plan' && plan.data.target_asset === assetId && plan.data.status === 'pending')?.id;
+    return (await this.plans()).find((plan) => plan.data.type === 'plan' && plan.data.target_asset === assetId && plan.data.status === 'pending' && !isRoutePlan(plan.data))?.id;
   }
 
   /** Select the next stage; auto approvals granted on the way are followed by a fresh selection over the updated files. */
@@ -2505,7 +2553,7 @@ export class ResearchLoopCore {
 
   /** A queued definition or citation that auto mode would approve once checked goes first: proof work may rest on it. */
   private async withNodeCheck(selection: Selection): Promise<Selection> {
-    if (!['plan', 'search', 'conjecture', 'waiting'].includes(selection.stage)) return selection;
+    if (!['plan', 'search', 'conjecture', 'waiting', 'route', 'reduce'].includes(selection.stage)) return selection;
     const node = await this.nodeToCheck();
     return node ? { stage: 'verify_node', node } : selection;
   }
@@ -2536,11 +2584,15 @@ export class ResearchLoopCore {
       return { stage: 'draft_project', note: state.researcherInput.text };
     }
     // The researcher's focus is visited first, so its results are selected before the rest.
-    const { order, missing, cycle } = assetClosure([...(state.focus ?? []).filter((id) => required.includes(id)), ...required], assets);
+    const roots = [...(state.focus ?? []).filter((id) => required.includes(id)), ...required];
+    const base = assetClosure(roots, assets);
+    // Lemmas of open routes are in scope too, but only the route scheduler works on them.
+    const { order, missing, cycle } = await this.routeClosure(roots, base, assets);
+    const routeOnly = new Set(order.filter((id) => !base.order.includes(id)));
     if (cycle) return { stage: 'waiting', reason: `Dependency cycle at ${cycle}; fix depends_on before continuing.`, waitingOn: [{ kind: 'cycle', target: cycle }] };
     if (missing.length) return { stage: 'scaffold', missing, incomplete: [] };
     // A goal never rests on a conjecture: the loop does not prove conjectures, so it must be promoted first.
-    const conjecturesInGoals = order.filter((id) => assets.get(id)!.data.type === CONJECTURE_TYPE);
+    const conjecturesInGoals = base.order.filter((id) => assets.get(id)!.data.type === CONJECTURE_TYPE);
     if (conjecturesInGoals.length) {
       state.researcherInput = { kind: 'project', text: `The goals rest on the conjecture(s) ${conjecturesInGoals.join(', ')}, which the loop does not prove. For each, either make it a goal (${LOOP_COMMAND} conjecture promote <id> --as lemma|theorem|proposition, and list it under required_results) or change the goals so that they do not depend on it (a new asset ID for a revised statement).`, at: this.now() };
       return { stage: 'draft_project', note: state.researcherInput.text };
@@ -2570,7 +2622,22 @@ export class ResearchLoopCore {
     const checks = await this.checks();
     const decisions = await this.decisions();
     const settled = new Set<string>();
-    let candidate: { stage: 'plan'; assetId: string } | { stage: 'search'; assetId: string; mode: SearchMode } | { stage: 'verify_proof'; assetId: string; planId: string; recheck?: string[] } | { stage: 'verify_node'; node: NodeCheckTarget } | undefined;
+    // What each result needs next, in the order met; the first in topological order is chosen below.
+    const work = new Map<string, Selection>();
+    const offer = (id: string, selection: Selection) => { if (!work.has(id)) work.set(id, selection); };
+    // Results worked on through routes (parallel routes), not by one plan after another.
+    const routed = new Set<string>();
+    const settings = await this.loopSettings();
+    const allPlans = await this.plans();
+    const isRoutedNow = async (id: string) => {
+      const mine = allPlans.filter((plan) => plan.data.target_asset === id && isRoutePlan(plan.data));
+      if (mine.some((plan) => plan.data.status === 'pending')) return true;
+      if (settings.routeWidth === 0) return false;
+      if (mine.length) return true;
+      if (this.routeRequest(id, await this.lastRouteRound(id, mine), decisions)) return true;
+      // A main result not yet attempted starts with a round of routes; one already attempted the classic way stays so.
+      return required.includes(id) && !allPlans.some((plan) => plan.data.target_asset === id);
+    };
     const flags = await this.recheckFlags();
     const agentRechecks = await this.agentMayRecheck();
     for (const id of order) {
@@ -2582,8 +2649,8 @@ export class ResearchLoopCore {
         if (flags[id] && agentRechecks) {
           const check = await this.proofToCheck(id, asset.raw);
           const checked = check ? undefined : await this.checkedProofRecheck(id, asset.raw);
-          if (check) { if (!candidate) candidate = { stage: 'verify_proof', assetId: id, planId: check.planId, recheck: check.changed.length ? check.changed : [flags[id]] }; }
-          else if (checked) { if (!candidate) candidate = { stage: 'verify_node', node: { ...checked, changed: checked.changed?.length ? checked.changed : [flags[id]] } }; }
+          if (check) offer(id, { stage: 'verify_proof', assetId: id, planId: check.planId, recheck: check.changed.length ? check.changed : [flags[id]] });
+          else if (checked) offer(id, { stage: 'verify_node', node: { ...checked, changed: checked.changed?.length ? checked.changed : [flags[id]] } });
           else if (await this.recheckSettled(id, asset.raw)) await this.clearRecheckByAgent(id);
         }
         continue;
@@ -2626,10 +2693,10 @@ export class ResearchLoopCore {
         // A proof the loop wrote is checked independently before it goes to approval, when the researcher asked for that,
         // and again when something it rests on changed since.
         const check = await this.proofToCheck(id, asset.raw);
-        if (check) { if (!candidate) candidate = { stage: 'verify_proof', assetId: id, planId: check.planId, ...(check.changed.length ? { recheck: check.changed } : {}) }; continue; }
+        if (check) { offer(id, { stage: 'verify_proof', assetId: id, planId: check.planId, ...(check.changed.length ? { recheck: check.changed } : {}) }); continue; }
         // A proof checked independently as written (the researcher's manuscript, say) is checked again once something it rests on changed.
         const checked = await this.checkedProofRecheck(id, asset.raw);
-        if (checked) { if (!candidate) candidate = { stage: 'verify_node', node: checked }; continue; }
+        if (checked) { offer(id, { stage: 'verify_node', node: checked }); continue; }
         await this.enqueueApproval('asset', id, 'Proof is written; review and approve or request changes.');
         settled.add(id); continue;
       }
@@ -2639,17 +2706,32 @@ export class ResearchLoopCore {
       if (isConstructionSpec(asset.raw)) {
         // What to search for is the researcher's call: no search tokens before the specification is approved.
         if (!isApproved(approvals, 'specification', id, asset.raw)) await this.enqueueApproval('specification', id, 'Approve the required properties (P1, P2, …) before the construction search starts.');
-        else if (!candidate) candidate = { stage: 'search', assetId: id, mode: 'construct' };
+        else offer(id, { stage: 'search', assetId: id, mode: 'construct' });
         continue;
       }
-      if (!candidate) {
-        // The researcher's setting may skip the counterexample search (for every result, or for all but the main ones); a requested search always runs.
-        const skipSearch = rigor.refuteSearch === 'off' || (rigor.refuteSearch === 'main' && !required.includes(id));
-        const requested = await this.searchRequest(id, decisions);
-        candidate = (this.isFalsified(id, asset.raw, checks) || skipSearch) && !requested ? { stage: 'plan', assetId: id } : { stage: 'search', assetId: id, mode: 'refute' };
-      }
+      // The researcher's setting may skip the counterexample search (for every result, or for all but the main ones); a requested search always runs.
+      const skipSearch = rigor.refuteSearch === 'off' || (rigor.refuteSearch === 'main' && !required.includes(id));
+      const requested = await this.searchRequest(id, decisions);
+      if (!((this.isFalsified(id, asset.raw, checks) || skipSearch) && !requested)) offer(id, { stage: 'search', assetId: id, mode: 'refute' });
+      else if (await isRoutedNow(id)) routed.add(id);
+      else offer(id, { stage: 'plan', assetId: id });
     }
-    if (candidate && candidate.stage !== 'verify_proof' && candidate.stage !== 'verify_node') {
+    let candidate: Selection | undefined;
+    const routing = routed.size ? { ...(await this.routeGraph({ assets, settled, examples, maxLive: settings.maxLiveRoutes })), work, routed, required, decisions, settings } : undefined;
+    for (const id of order) {
+      if (routing && routed.has(id) && !routeOnly.has(id)) {
+        const selection = await this.routeSelection(id, routing);
+        if (selection === 'reselect') return this.selectOnce();
+        if (selection) { candidate = selection; break; }
+        continue;
+      }
+      const offered = work.get(id);
+      // A lemma reached only through routes is the scheduler's, except a check of its proof, which never hurts.
+      if (!offered || (routeOnly.has(id) && offered.stage !== 'verify_proof' && offered.stage !== 'verify_node')) continue;
+      candidate = offered;
+      break;
+    }
+    if (candidate && candidate.stage !== 'verify_proof' && candidate.stage !== 'verify_node' && candidate.stage !== 'verify_reduction') {
       // The researcher asked the loop not to get further ahead of them: no new proof work while too many verified results wait to be studied.
       const behind = await this.studyBacklog();
       if (behind) return { stage: 'waiting', reason: `${behind.count} verified result(s) wait for the researcher to study them (their limit is ${behind.limit}); the loop starts no new proof until they catch up with the teach skill`, waitingOn: [{ kind: 'study', target: String(behind.count), detail: String(behind.limit) }] };
@@ -2681,6 +2763,448 @@ export class ResearchLoopCore {
       ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
     ];
     return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
+  }
+
+  // ---------- parallel routes ----------
+
+  private async routePlans(): Promise<AssetInfo[]> { return (await this.plans()).filter((plan) => isRoutePlan(plan.data)); }
+
+  /**
+   * The goals' closure widened by the lemmas of open routes to results not yet approved (and what
+   * those rest on), so they get their statements, definitions, and counterexample search like any
+   * result. Only the goals' own closure can be missing a node or close a dependency cycle: a route
+   * whose lemma is gone is dead, not a reason to scaffold.
+   */
+  private async routeClosure(roots: string[], base: ReturnType<typeof assetClosure>, assets: Map<string, AssetInfo>): Promise<ReturnType<typeof assetClosure>> {
+    const open = (await this.routePlans()).filter((plan) => plan.data.status === 'pending');
+    if (!open.length) return base;
+    const extra: string[] = [];
+    let closure = base;
+    for (;;) {
+      const inScope = new Set(closure.order);
+      const lemmas = [...new Set(open.filter((plan) => inScope.has(String(plan.data.target_asset)) && assets.get(String(plan.data.target_asset))?.data.status !== 'approved').flatMap((plan) => routeLemmas(plan.data)))]
+        .filter((id) => !inScope.has(id) && !extra.includes(id) && assets.has(id));
+      if (!lemmas.length) return { order: closure.order, missing: base.missing, ...(base.cycle ? { cycle: base.cycle } : {}) };
+      extra.push(...lemmas);
+      closure = assetClosure([...roots, ...extra], assets);
+    }
+  }
+
+  /**
+   * Whether a result is worked on through routes rather than by one plan after another (the same
+   * rule as selection): it has an open route; or routes are on and it has routes, a pending request
+   * for a round, or it is a main result not yet attempted.
+   */
+  private async willRoute(id: string): Promise<boolean> {
+    const plans = (await this.plans()).filter((plan) => plan.data.target_asset === id);
+    const mine = plans.filter((plan) => isRoutePlan(plan.data));
+    if (mine.some((plan) => plan.data.status === 'pending')) return true;
+    if ((await this.loopSettings()).routeWidth === 0) return false;
+    if (mine.length || this.routeRequest(id, await this.lastRouteRound(id, mine), await this.decisions())) return true;
+    return requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => '')).includes(id) && !plans.length;
+  }
+
+  /** The stage after a result survived its counterexample search: its routes (through selection), or a plan. */
+  private async afterSurvived(assetId: string): Promise<[LoopStage, Partial<LoopState['current']>]> {
+    return await this.willRoute(assetId) ? ['select', { assetId: undefined, counterexampleId: undefined, planId: undefined }] : ['plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) }];
+  }
+
+  /** Whether a result has routes, whatever their state. */
+  private async isRouted(assetId: string): Promise<boolean> { return (await this.routePlans()).some((plan) => plan.data.target_asset === assetId); }
+
+  /** The latest round of routes to a result; 0 before the first. */
+  private async lastRouteRound(target: string, plans?: AssetInfo[]): Promise<number> {
+    const rounds = (plans ?? await this.routePlans()).filter((plan) => plan.data.target_asset === target && Number.isInteger(plan.data.route_round)).map((plan) => Number(plan.data.route_round));
+    return rounds.length ? Math.max(...rounds) : 0;
+  }
+
+  /** The researcher's request for a round of routes that has not run yet (a fork names where it starts). */
+  private routeRequest(target: string, last: number, decisions: DecisionInfo[]): DecisionInfo | undefined {
+    const request = sortDecisions(decisions).filter((item) => item.kind === 'route_request' && item.target === target).pop();
+    return request && (request.routeRound ?? 0) >= last ? request : undefined;
+  }
+
+  /** A reduction counts only for the statements it was written against: a changed lemma or target statement voids it. */
+  private currentReductionPlan(plan: AssetInfo, assets: Map<string, AssetInfo>): { id: string; data: Record<string, any>; content: string } {
+    const inputs = plan.data.reduction_inputs;
+    const stale = Boolean(inputs) && typeof inputs === 'object' && Object.entries(inputs as Record<string, unknown>).some(([id, digest]) => { const node = assets.get(id); return !node || statementDigest(node.raw) !== digest; });
+    return { id: plan.id, data: stale ? { ...plan.data, reduction_digest: undefined, reduction_verified_digest: undefined } : plan.data, content: plan.body };
+  }
+
+  /**
+   * Every route with its state (its lemmas as settled as the selection found them, refuted by a
+   * confirmed counterexample, retired, or set aside), at most `maxLive` active per result, the
+   * cheapest first, and the AND-OR graph the scheduler reads.
+   */
+  private async routeGraph(input: { assets: Map<string, AssetInfo>; settled: Set<string>; examples: AssetInfo[]; maxLive: number }): Promise<{ routes: RouteInfo[]; graph: ProofGraph }> {
+    const state = this.require();
+    const { assets, settled, examples } = input;
+    const refuted = (id: string) => examples.some((example) => example.data.refutes === id && example.data.status === 'approved');
+    const retired = (id: string) => !assets.has(id) || ['deprecated', 'archived'].includes(assets.get(id)!.data.status);
+    const plans = await this.plans();
+    const failed = (id: string) => plans.filter((plan) => plan.data.target_asset === id && plan.data.status === 'failed').length;
+    const raw = plans.filter((plan) => isRoutePlan(plan.data))
+      .map((plan) => routeInfo(this.currentReductionPlan(plan, assets), (id) => ({ settled: settled.has(id), refuted: refuted(id), inactive: retired(id), parked: Boolean(state.parked[id]) })));
+    const graphOf = (routes: RouteInfo[]): ProofGraph => ({
+      settled: (id) => settled.has(id),
+      dead: (id) => retired(id) || refuted(id),
+      deps: (id) => (Array.isArray(assets.get(id)?.data.depends_on) ? (assets.get(id)!.data.depends_on as unknown[]).map(String) : []).filter((dep) => !settled.has(dep)),
+      routes: (id) => routes.filter((route) => route.target === id),
+      leafCost: (id) => 1 + 0.5 * failed(id),
+    });
+    const numbers = new ProofNumbers(graphOf(raw));
+    const routes = applyBeam(raw, input.maxLive, (route) => numbers.ofRoute(route));
+    return { routes, graph: graphOf(routes) };
+  }
+
+  /**
+   * The next step for a result worked on through routes: the most-proving step of its route tree.
+   * `reselect`: a complete route was committed (or a reduction stamped) on the way, so the caller
+   * selects again over the changed files. A main result's routes wait while the researcher reviews
+   * its route map; a result with no route left gets a new round, or, past the round limit, a
+   * direction from the researcher (in autonomous mode, the agent's own decision).
+   */
+  private async routeSelection(id: string, ctx: {
+    routes: RouteInfo[]; graph: ProofGraph; work: Map<string, Selection>; routed: Set<string>; required: string[]; decisions: DecisionInfo[]; settings: LoopSettings;
+  }): Promise<Selection | 'reselect' | undefined> {
+    const { settings } = ctx;
+    if (settings.rigor.reviewRoutes === 'main' && ctx.required.includes(id) && ctx.routes.some((route) => route.target === id && isActiveRoute(route)) && !(await this.routeMapApproved(id))) {
+      await this.enqueueApproval('routes', id, `Review the routes to ${id} before they are worked on: drop a route, add one of your own, or approve the map.`);
+      return undefined;
+    }
+    const plans = await this.routePlans();
+    const rounds = new Map<string, 'round' | 'stuck' | 'waiting'>();
+    for (const node of ctx.routed) {
+      const mine = ctx.routes.filter((route) => route.target === node);
+      if (mine.some(isActiveRoute)) continue;
+      if (mine.some((route) => route.state === 'suspended')) { rounds.set(node, 'waiting'); continue; }
+      const last = await this.lastRouteRound(node, plans);
+      const used = Math.max(0, last - (latestDirection(ctx.decisions, node)?.routeRound ?? 0));
+      rounds.set(node, this.routeRequest(node, last, ctx.decisions) || used < settings.routeRounds ? 'round' : 'stuck');
+    }
+    const actionable = (node: string) => ctx.work.has(node) || (ctx.routed.has(node) && rounds.has(node) && rounds.get(node) !== 'waiting');
+    const step = mostProvingStep(id, ctx.graph, actionable);
+    if (!step) return undefined;
+    switch (step.kind) {
+      case 'asset': {
+        if (!ctx.routed.has(step.id)) return ctx.work.get(step.id);
+        if (rounds.get(step.id) === 'round') {
+          const last = await this.lastRouteRound(step.id, plans);
+          const fork = this.routeRequest(step.id, last, ctx.decisions)?.fork;
+          return { stage: 'route', assetId: step.id, ...(fork ? { fork } : {}) };
+        }
+        await this.routesStuck(step.id, `Every route to ${step.id} so far failed or was ruled out, and its rounds of routes are used up.`);
+        return undefined;
+      }
+      case 'reduce': return { stage: 'reduce', assetId: step.target, planId: step.planId };
+      case 'verify_reduction': {
+        if (settings.rigor.verifyProofs === 'agent') return { stage: 'verify_reduction', assetId: step.target, planId: step.planId };
+        // The researcher turned the independent check off since the reduction was written: it stands as written.
+        const file = `${this.paths.plans}/${step.planId}.md`;
+        const plan = parseMarkdown(await this.files.readFile(file));
+        plan.data.reduction_verified_digest = plan.data.reduction_digest;
+        await this.writeOwned(file, stringifyMarkdown(plan.content, plan.data));
+        return 'reselect';
+      }
+      case 'commit':
+        await this.commitRoute(step.planId);
+        return 'reselect';
+    }
+  }
+
+  /** No route to a result is left and its rounds are used up: the researcher gives a direction (in autonomous mode, the agent decides). */
+  private async routesStuck(assetId: string, what: string): Promise<void> {
+    const state = this.require();
+    const run = await this.autonomy();
+    if (run) { if (!run.deciding) await this.decideStuck(assetId, what); return; }
+    if (state.pendingQuestion) return;
+    await this.event('routes_exhausted', { assetId });
+    await this.askQuestion('blocked', `${what} Give a new direction for new routes, or skip to set it aside.`, { assetId, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
+  }
+
+  /**
+   * Commit a complete route: its reduction becomes the result's proof and its lemmas join the
+   * result's depends_on; the plan succeeds (stamped as a proof the loop wrote, verified when the
+   * reduction was checked independently) and the result's other open routes are superseded. A route
+   * whose lemmas already rest on the result would close a cycle: it is abandoned instead.
+   */
+  private async commitRoute(planId: string): Promise<string | undefined> {
+    const planFile = `${this.paths.plans}/${planId}.md`;
+    const plan = parseMarkdown(await this.files.readFile(planFile));
+    const target = String(plan.data.target_asset);
+    const assetFile = `${this.paths.assets}/${target}.md`;
+    const asset = parseMarkdown(await this.files.readFile(assetFile));
+    if (proofText(asset.content)) return undefined;
+    const lemmas = routeLemmas(plan.data);
+    if (assetClosure(lemmas, await this.collectKind('asset')).order.includes(target)) {
+      plan.data.status = 'abandoned';
+      await this.writeOwned(planFile, stringifyMarkdown(`${plan.content.trimEnd()}\n\n## Abandoned\n\nCommitting this route would make ${target} rest on itself: one of its lemmas already depends on it.\n`, plan.data));
+      await this.event('route_abandoned', { target, planId, reason: 'cycle' });
+      return undefined;
+    }
+    const deps = Array.isArray(asset.data.depends_on) ? asset.data.depends_on.map(String) : [];
+    asset.data.depends_on = [...new Set([...deps, ...lemmas])];
+    const committed = stringifyMarkdown(withProof(asset.content, sectionContent(plan.content, 'Reduction')), asset.data);
+    await this.writeOwned(assetFile, committed);
+    plan.data.status = 'succeeded';
+    plan.data.proof_digest = proofDigest(committed);
+    plan.data.statement_digest = statementDigest(committed);
+    plan.data.dependency_digests = await this.dependencyDigests(asset.data) ?? {};
+    if (plan.data.reduction_checked === true) plan.data.verified_proof_digest = plan.data.proof_digest;
+    else delete plan.data.verified_proof_digest;
+    const outcome = `The reduction is now the proof of ${target} (under ## Proof)${lemmas.length ? `; it rests on ${lemmas.join(', ')}, now in its depends_on` : ''}.`;
+    await this.writeOwned(planFile, stringifyMarkdown(`${plan.content.trimEnd()}\n\n## Outcome\n\n${outcome}\n`, plan.data));
+    const superseded: string[] = [];
+    for (const other of await this.routePlans()) {
+      if (other.id === planId || other.data.target_asset !== target || other.data.status !== 'pending') continue;
+      const parsed = parseMarkdown(other.raw);
+      parsed.data.status = 'superseded';
+      parsed.data.superseded_by = planId;
+      await this.writeOwned(other.file, stringifyMarkdown(parsed.content, parsed.data));
+      superseded.push(other.id);
+    }
+    // The route map is settled with the route chosen: nothing of it waits for review any more.
+    const state = this.require();
+    state.approvalQueue = state.approvalQueue.filter((item) => !(item.kind === 'routes' && item.target === target));
+    await this.save();
+    await this.event('route_won', { target, planId, superseded });
+    return target;
+  }
+
+  /** The researcher's routes, the latest direction, and directions of the agent's own, up to the researcher's number of routes per round. */
+  private async routeSlots(round: RouteRound): Promise<RouteSlot[]> {
+    const settings = await this.loopSettings();
+    const width = Math.max(1, settings.routeWidth);
+    const slots: RouteSlot[] = [];
+    const push = (direction: string, label: string, origin: RouteOrigin, ideaId?: string) => slots.push({ slot: slots.length + 1, direction, label, origin, ...(ideaId ? { ideaId } : {}) });
+    const agentDirection = (index: number) => ROUTE_DIRECTIONS[((round.round - 1) * width + index) % ROUTE_DIRECTIONS.length];
+    if (round.fork) {
+      for (let index = 0; index < width; index++) { const direction = agentDirection(index); push(`fork_${direction.id}`, `Start from ${round.fork}: ${direction.label.charAt(0).toLowerCase()}${direction.label.slice(1)}`, 'fork'); }
+      return slots;
+    }
+    const used = new Set((await this.routePlans()).flatMap((plan) => Array.isArray(plan.data.inspired_by) ? plan.data.inspired_by.map(String) : []));
+    for (const idea of (await this.collect(this.paths.ideas)).values()) {
+      const related = Array.isArray(idea.data.related_assets) ? idea.data.related_assets.map(String) : [];
+      if (idea.data.status !== 'draft' || toIdeaKind(idea.data.idea_kind) !== 'approach' || idea.data.origin !== 'researcher' || !related.includes(round.target) || used.has(idea.id)) continue;
+      push(idea.id, String(idea.data.title ?? idea.id), 'researcher', idea.id);
+    }
+    const direction = latestDirection(await this.decisions(), round.target);
+    if (direction?.text && (direction.routeRound ?? 0) >= round.round - 1) push('direction', direction.text.split('\n')[0], direction.reason === 'autonomous' || direction.reason === 'agent_retry' ? 'agent' : 'researcher');
+    for (let index = 0; slots.length < width; index++) { const next = agentDirection(index); push(next.id, next.label, 'agent'); }
+    return slots;
+  }
+
+  /**
+   * Before a round of routes: ask the researcher for routes of their own (not in autonomous mode or
+   * for a fork), then assign the round's slots. Returns a message when the stage waits on that.
+   */
+  private async prepareRouteRound(): Promise<string | undefined> {
+    const state = this.require();
+    const round = state.current.route;
+    if (!round) { await this.setStage('select', { assetId: undefined }); return `Run: ${LOOP_COMMAND} next`; }
+    if (round.slots.length) return undefined;
+    if (!round.asked) {
+      round.asked = true;
+      if (!(await this.autonomy()) && !round.fork) {
+        const width = (await this.loopSettings()).routeWidth;
+        await this.askQuestion('routes', `Before routes to ${round.target} are planned: do you have routes in mind? Write each as a line or separate them with ";" (for example "first prove the energy bound, then the decay; via compactness"). Let the agent decide, and it plans ${width} route(s) of its own; your routes come first, and the agent adds its own up to ${width}.`, { assetId: round.target, timeoutSec: (await this.loopSettings()).questionTimeoutSeconds });
+        return `The researcher is asked for routes of their own to ${round.target} (a popup in VS Code). Wait for the answer, then run ${LOOP_COMMAND} next. Without the extension, ask in chat and record the answer with ${LOOP_COMMAND} question answer --text "...", or ${LOOP_COMMAND} question skip.`;
+      }
+    }
+    round.slots = await this.routeSlots(round);
+    await this.save();
+    await this.event('route_round', { target: round.target, round: round.round, slots: round.slots.map((slot) => `${slot.slot}:${slot.origin}:${slot.direction}`) });
+    return undefined;
+  }
+
+  private async routeMapInputs(target: string): Promise<{ goal: string; routes: Array<{ id: string; data: Record<string, any>; content: string }>; lemmaRaw: (id: string) => string | undefined }> {
+    const goal = await this.files.readFile(`${this.paths.assets}/${target}.md`).catch(() => '');
+    const routes = (await this.routePlans()).filter((plan) => plan.data.target_asset === target).map((plan) => ({ id: plan.id, data: plan.data, content: plan.body }));
+    const assets = await this.collectKind('asset');
+    return { goal, routes, lemmaRaw: (id) => assets.get(id)?.raw };
+  }
+
+  private async routeMapDigestFor(target: string): Promise<string> {
+    const { goal, routes, lemmaRaw } = await this.routeMapInputs(target);
+    return routeMapDigest(goal, routes, lemmaRaw);
+  }
+
+  /** An approved route map still covers the result's open routes (see routeMapCovered). */
+  private async routeMapApproved(target: string): Promise<boolean> {
+    const record = (await this.approvals()).records.find((item) => item.kind === 'routes' && item.target === target);
+    if (!record?.nodes) return false;
+    const { goal, routes, lemmaRaw } = await this.routeMapInputs(target);
+    return routeMapCovered({ statement: record.statement, routes: Object.fromEntries(Object.entries(record.nodes).map(([id, node]) => [id, node.digest])) }, goal, routes, lemmaRaw);
+  }
+
+  /** The researcher (or auto mode they turned on) approves a result's route map: each open route is recorded with its digest. */
+  private async approveRouteMap(target: string, source: string): Promise<void> {
+    const { goal, routes, lemmaRaw } = await this.routeMapInputs(target);
+    if (!goal) throw new Error(`Unknown result ${target}.`);
+    const statement = statementDigest(goal);
+    const file = await this.approvals();
+    file.records = file.records.filter((entry) => !(entry.kind === 'routes' && entry.target === target));
+    const provenance = await this.provenance();
+    const nodes = Object.fromEntries(Object.entries(routeMapEntries(routes, lemmaRaw)).map(([id, digest]) => [id, { digest, statement }]));
+    file.records.push({ kind: 'routes', target, digest: routeMapDigest(goal, routes, lemmaRaw), statement, approvedAt: provenance.created_at, source, performed_by: provenance.performed_by, nodes, ...(provenance.base_commit ? { base_commit: provenance.base_commit } : {}) });
+    await this.writeApprovals(file);
+    if (this.state) {
+      this.state.approvalQueue = this.state.approvalQueue.filter((item) => !(item.kind === 'routes' && item.target === target));
+      await this.save();
+    }
+    await this.event('approved', { kind: 'routes', target, source });
+  }
+
+  /** The researcher asked for other routes: the open ones are dropped, and their words become the direction of the next round. */
+  private async rejectRouteMap(target: string, text: string): Promise<void> {
+    for (const plan of (await this.routePlans()).filter((item) => item.data.target_asset === target && item.data.status === 'pending')) {
+      await this.dropRouteFile(plan, `The researcher asked for other routes${text.trim() ? `: ${text.trim()}` : '.'}`);
+    }
+    await this.writeDecision('direction', target, text.trim() || 'Plan other routes than the ones dropped.', { failedPlansAtDirection: await this.failedPlans(target) });
+    await this.setStage('select', { assetId: undefined, planId: undefined });
+  }
+
+  private async dropRouteFile(plan: AssetInfo, reason: string): Promise<void> {
+    const parsed = parseMarkdown(plan.raw);
+    parsed.data.status = 'abandoned';
+    await this.writeOwned(plan.file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Dropped\n\n${reason}\n`, parsed.data));
+    await this.writeDecision('route_drop', plan.id, reason);
+    await this.event('route_dropped', { planId: plan.id, target: plan.data.target_asset });
+  }
+
+  /**
+   * The researcher asks for a round of routes to a result; with `fork`, every route of the round
+   * starts from that settled result. Never automatic: the agent runs this only when the researcher asks.
+   */
+  async requestRoutes(target: string, fork?: string, note?: string): Promise<string> {
+    const raw = await this.files.readFile(`${this.paths.assets}/${target}.md`).catch(() => '');
+    if (!raw) throw new Error(`Unknown result ${target}.`);
+    const data = parseMarkdown(raw).data;
+    if (data.status !== 'draft' || !PROVABLE_TYPES.has(data.type) || isConstructionSpec(raw)) throw new Error(`${target} is not a draft theorem, lemma, or proposition still to prove.`);
+    if (proofText(parseMarkdown(raw).content)) throw new Error(`${target} already has a proof; review it instead.`);
+    if ((await this.loopSettings()).routeWidth === 0) throw new Error('Routes are off: Settings → Parallel routes → Routes per round is 0.');
+    if (fork) {
+      const assets = await this.collectKind('asset');
+      const from = assets.get(fork);
+      if (!from) throw new Error(`Unknown result ${fork}.`);
+      if (from.data.status !== 'approved') throw new Error(`${fork} is not approved yet: a fork starts from a settled result.`);
+      if (fork === target || assetClosure([fork], assets).order.includes(target)) throw new Error(`${fork} rests on ${target}: a route from it would be circular.`);
+    }
+    const last = await this.lastRouteRound(target);
+    await this.writeDecision('route_request', target, note?.trim() || (fork ? `Plan routes to ${target} that start from ${fork}.` : `Plan a round of routes to ${target}.`), { routeRound: last, ...(fork ? { fork } : {}) });
+    if (this.state) {
+      if (this.state.parked[target]) await this.clearPark(target, 'routes requested');
+      if (this.state.current.assetId === target && this.state.stage === 'plan') await this.setStage('select', { assetId: undefined });
+      await this.save();
+    }
+    return `Routes requested for ${target}${fork ? `, starting from ${fork}` : ''}. The loop plans them when it next reaches ${target}; continue with ${LOOP_COMMAND} next.`;
+  }
+
+  /** The researcher drops one route. */
+  async dropRoute(planId: string, reason: string): Promise<string> {
+    const plan = (await this.routePlans()).find((item) => item.id === planId);
+    if (!plan) throw new Error(`${planId} is not a route.`);
+    if (plan.data.status !== 'pending') throw new Error(`${planId} is ${plan.data.status}, not open.`);
+    if (!reason.trim()) throw new Error('Say why with --reason.');
+    await this.dropRouteFile(plan, reason.trim());
+    if (this.state?.current.planId === planId) await this.setStage('select', { assetId: undefined, planId: undefined });
+    return `Route ${planId} dropped. Continue with ${LOOP_COMMAND} next.`;
+  }
+
+  private requireMergeStage(): RouteRound {
+    const state = this.require();
+    if (state.stage !== 'route_merge' || !state.current.route) throw new Error('Routes are merged only during stage route_merge.');
+    return state.current.route;
+  }
+
+  /**
+   * Stage route_merge: `dup` states the same as `keep`; every open route that uses `dup` uses `keep`
+   * instead, and `dup` is archived with `merged_into`. Only a draft lemma that nothing but routes
+   * uses can be merged away.
+   */
+  async mergeRouteLemma(dup: string, keep: string): Promise<string> {
+    this.requireMergeStage();
+    if (dup === keep) throw new Error('Name two different results.');
+    const assets = await this.collectKind('asset');
+    const from = assets.get(dup); const into = assets.get(keep);
+    if (!from || from.origin) throw new Error(`${dup} is not a result of this project.`);
+    if (!into) throw new Error(`Unknown result ${keep}.`);
+    if (into.data.type === CONJECTURE_TYPE || ['deprecated', 'archived'].includes(into.data.status)) throw new Error(`${keep} is a conjecture or retired; a route cannot rest on it.`);
+    if (from.data.status !== 'draft' || proofText(from.body)) throw new Error(`${dup} is approved or proved; merge the other way round.`);
+    const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
+    if (requiredAssetIds(project).includes(dup)) throw new Error(`${dup} is a required result; it cannot be merged away.`);
+    const users = [...assets.values()].filter((node) => Array.isArray(node.data.depends_on) && node.data.depends_on.includes(dup)).map((node) => node.id);
+    if (users.length) throw new Error(`${dup} is in the depends_on of ${users.join(', ')}; only a lemma that routes alone use can be merged away.`);
+    const changed: string[] = []; const abandoned: string[] = [];
+    for (const plan of (await this.routePlans()).filter((item) => item.data.status === 'pending' && routeLemmas(item.data).includes(dup))) {
+      const parsed = parseMarkdown(plan.raw);
+      if (parsed.data.target_asset === keep || assetClosure([keep], assets).order.includes(String(parsed.data.target_asset))) {
+        parsed.data.status = 'abandoned';
+        await this.writeOwned(plan.file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Abandoned\n\n${dup} is the same as ${keep}, on which ${parsed.data.target_asset} cannot rest.\n`, parsed.data));
+        abandoned.push(plan.id);
+        continue;
+      }
+      parsed.data.route_lemmas = [...new Set(routeLemmas(parsed.data).map((id) => id === dup ? keep : id))];
+      await this.writeOwned(plan.file, stringifyMarkdown(parsed.content.replace(new RegExp(`\\b${dup}\\b`, 'g'), keep), parsed.data));
+      changed.push(plan.id);
+    }
+    if (!changed.length && !abandoned.length) throw new Error(`No open route uses ${dup}.`);
+    const parsed = parseMarkdown(from.raw);
+    parsed.data.status = 'archived';
+    parsed.data.merged_into = keep;
+    await this.writeOwned(from.file, stringifyMarkdown(parsed.content, parsed.data));
+    await this.event('route_lemmas_merged', { dup, keep, routes: changed, abandoned });
+    return `${dup} merged into ${keep}: ${changed.length ? `the route(s) ${changed.join(', ')} now use ${keep}` : 'no route still uses it'}${abandoned.length ? `; ${abandoned.join(', ')} abandoned (they would rest on their own target)` : ''}.`;
+  }
+
+  /** Stage route_merge: `strong` implies `weak`. `weak` gets a route of its own from `strong`, so proving either serves the routes that need `weak`. */
+  async implyRouteLemma(strong: string, weak: string, note?: string): Promise<string> {
+    this.requireMergeStage();
+    if (strong === weak) throw new Error('Name two different results.');
+    const assets = await this.collectKind('asset');
+    const from = assets.get(strong); const to = assets.get(weak);
+    if (!from || !to) throw new Error(`Unknown result ${!from ? strong : weak}.`);
+    if (from.data.type === CONJECTURE_TYPE || ['deprecated', 'archived'].includes(from.data.status)) throw new Error(`${strong} is a conjecture or retired; a route cannot rest on it.`);
+    if (to.origin || to.data.status !== 'draft' || proofText(to.body)) throw new Error(`${weak} is not a draft result still to prove.`);
+    if (assetClosure([strong], assets).order.includes(weak)) throw new Error(`${strong} already rests on ${weak}.`);
+    const converse = (await this.routePlans()).find((plan) => plan.data.status === 'pending' && plan.data.target_asset === strong && routeLemmas(plan.data).includes(weak));
+    if (converse) throw new Error(`${weak} already implies ${strong} (${converse.id}): they are equivalent, so merge them instead (${LOOP_COMMAND} route merge <dup> --into <keep>).`);
+    const id = `route_${weak}_from_${strong}`.slice(0, 120);
+    const file = `${this.paths.plans}/${id}.md`;
+    if (await this.files.exists(file)) throw new Error(`${id} exists already.`);
+    const title = String(from.data.title ?? strong);
+    const body = `\n## Goal\n\nTarget: [${weak}](../assets/${weak}.md)\n\n## Route\n\n- ${strong}: ${note?.trim() || `it implies ${weak} directly.`}\n\n## Plan\n\n1. [ ] Derive ${weak} from ${strong}.\n\n## Verification\n\nThe derivation gives the exact statement of ${weak}.\n`;
+    await this.writeOwned(file, stringifyMarkdown(body, { type: 'plan', title: `Route to ${weak} from ${title}`, status: 'pending', target_asset: weak, route_lemmas: [strong], route_title: `from ${title}`, origin: 'agent', route_round: (await this.lastRouteRound(weak)) + 1, inspired_by: [], tags: ['route'] }));
+    await this.event('route_implied', { strong, weak, planId: id });
+    return `${weak} gets the route ${id} from ${strong}: proving ${strong} now serves every route that needs ${weak}.`;
+  }
+
+  /** Stage route_merge: two lemmas look alike but differ; the difference is kept as an observation. */
+  async distinctRouteLemmas(a: string, b: string, note: string): Promise<string> {
+    this.requireMergeStage();
+    if (!note.trim()) throw new Error('Say how they differ with --note.');
+    const idea = await this.saveIdea(`${a} and ${b} differ`, note.trim(), [a, b], 'agent', ['route'], 'observation');
+    return `Recorded how ${a} and ${b} differ (${idea}).`;
+  }
+
+  /** The routes to a result, for the researcher and the CLI: state, reduction, lemmas settled, and the work left. */
+  async routeStatus(target: string): Promise<{ target: string; routes: RouteInfo[]; text: string }> {
+    const assets = await this.collectKind('asset');
+    if (!assets.has(target)) throw new Error(`Unknown result ${target}.`);
+    const approvals = (await this.approvals()).records;
+    const settled = new Set([...assets.values()].filter((node) => node.data.status === 'approved' && (node.origin === 'library' || isApproved(approvals, 'asset', node.id, node.raw))).map((node) => node.id));
+    const examples = [...assets.values()].filter((node) => node.data.type === 'example' && typeof node.data.refutes === 'string');
+    const settings = await this.loopSettings();
+    const { routes, graph } = await this.routeGraph({ assets, settled, examples, maxLive: settings.maxLiveRoutes });
+    const mine = routes.filter((route) => route.target === target);
+    const numbers = new ProofNumbers(graph);
+    const lines = mine.map((route) => {
+      const left = numbers.ofRoute(route);
+      return `- ${route.title} (${route.planId}, ${route.origin}${route.forkedFrom ? ` from ${route.forkedFrom}` : ''}): ${route.state}; reduction ${route.reduction}; lemmas ${route.settledLemmas}/${route.lemmas.length}${route.lemmas.length ? ` (${route.lemmas.join(', ')})` : ''}${Number.isFinite(left) && isActiveRoute(route) ? `; ${left} step(s) left` : ''}${route.death ? `; ${route.death.lemma} ${route.death.kind}` : ''}${route.suspendedBy?.length ? `; waits on ${route.suspendedBy.join(', ')}` : ''}`;
+    });
+    const open = mine.filter(isOpenRoute).length;
+    const text = mine.length ? [`Routes to ${target}: ${open} open of ${mine.length}`, ...lines].join('\n') : `No routes to ${target} yet.`;
+    return { target, routes: mine, text };
   }
 
   // ---------- conjectures ----------
@@ -3028,9 +3552,10 @@ export class ResearchLoopCore {
     const drift = await this.inputDrift();
     const driftNote = drift.length ? await this.afterInputDrift(drift) : undefined;
     await this.refreshRetired();
-    const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute', 'verify_proof'].includes(state.stage);
+    const perAsset = ['search', 'search_summary', 'verify_counterexample', 'verify_construction', 'plan', 'execute', 'verify_proof', 'route', 'route_merge', 'reduce', 'verify_reduction'].includes(state.stage);
     // `falsify` is the stage name older loop versions saved; selection now runs an object search instead.
-    let recompute = ['select', 'waiting', 'ready', 'review_project', 'discuss_goals', 'falsify'].includes(state.stage);
+    // A route map under review waits like the project's: selection works on other results meanwhile.
+    let recompute = ['select', 'waiting', 'ready', 'review_project', 'review_routes', 'discuss_goals', 'falsify'].includes(state.stage);
     if (!recompute && !(await this.isProjectApproved()) && state.stage !== 'draft_project') recompute = true;
     if (perAsset && state.current.assetId) {
       const file = `${this.paths.assets}/${state.current.assetId}.md`;
@@ -3039,6 +3564,14 @@ export class ResearchLoopCore {
       const recheckingApproved = state.stage === 'verify_proof' && Boolean(state.current.recheck?.length) && data?.status === 'approved';
       if (!data || (data.status !== 'draft' && !recheckingApproved) || state.parked[state.current.assetId]) recompute = true;
       if (data?.type === CONJECTURE_TYPE && !SEARCH_STAGES.has(state.stage)) recompute = true;
+    }
+    if (ROUTE_STAGES.has(state.stage) && !state.current.route) recompute = true;
+    if ((state.stage === 'reduce' || state.stage === 'verify_reduction') && state.current.planId) {
+      // The route was dropped, failed, or won meanwhile: there is nothing left to reduce or check.
+      const raw = await this.files.readFile(`${this.paths.plans}/${state.current.planId}.md`).catch(() => '');
+      let open = false;
+      try { const data = raw ? parseMarkdown(raw).data : undefined; open = Boolean(data) && isRoutePlan(data) && data!.status === 'pending'; } catch { /* unreadable: choose again */ }
+      if (!open) recompute = true;
     }
     // A node check whose target no longer waits for auto mode (approved meanwhile, changed, or held for the researcher) is dropped.
     if (state.stage === 'verify_node' && !(state.current.node && await this.needsNodeCheck(state.current.node))) recompute = true;
@@ -3056,6 +3589,8 @@ export class ResearchLoopCore {
       if (selection.stage === 'conjecture') patch.ideaId = selection.ideaId;
       if (selection.stage === 'verify_node') { patch.node = selection.node; patch.assetId = selection.node.id; }
       if (selection.stage === 'plan' && 'assetId' in selection) patch.planId = await this.pendingPlan(selection.assetId);
+      if (selection.stage === 'reduce' || selection.stage === 'verify_reduction') patch.planId = selection.planId;
+      if (selection.stage === 'route') patch.route = { target: selection.assetId, round: (await this.lastRouteRound(selection.assetId)) + 1, slots: [], ...(selection.fork ? { fork: selection.fork } : {}) };
       if (selection.stage === 'verify_proof') {
         patch.planId = selection.planId;
         patch.recheck = selection.recheck?.length ? selection.recheck : undefined;
@@ -3081,6 +3616,10 @@ export class ResearchLoopCore {
       if (selection.stage === 'waiting' || selection.stage === 'ready') await this.save();
       if (selection.stage === 'waiting' && run && !(await this.assessGoals(run)) && !(await this.exploreConjecture(run, `nothing else is left that it can do on its own (${selection.reason})`))) return this.result(await this.handOver(`nothing is left that it can do on its own (${selection.reason})`));
       if (selection.stage === 'ready' && run) await this.exploreConjecture(run, 'every goal is proved');
+    }
+    if (state.stage === 'route') {
+      const waiting = await this.prepareRouteRound();
+      if (waiting) return this.result(waiting);
     }
     const result = this.result();
     if (driftNote) result.instruction = `${driftNote.replace(/ (Continue with next\.|Check again against the current version: run next for the fresh context\.)/, '')}\n\n${result.instruction}`;
@@ -3146,6 +3685,7 @@ export class ResearchLoopCore {
       ...(assetId ? directionFocus(latestDirection(await this.decisions(), assetId)) : {}),
       ...(state.stage === 'verify_proof' && state.current.recheck?.length ? { recheck: state.current.recheck } : {}),
       ...(state.stage === 'verify_node' && state.current.node ? { node: state.current.node, assetId: undefined } : {}),
+      ...(ROUTE_STAGES.has(state.stage) && state.current.route ? { route: { round: state.current.route.round, ...(state.current.route.fork ? { fork: state.current.route.fork } : {}) } } : {}),
     };
     const search = assetId && (state.stage === 'search' || state.stage === 'search_summary') ? state.current.search : undefined;
     const writeManifest = (rendered: RenderedContext, manifest: ContextManifest, extra: Record<string, unknown> = {}) => this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: state.stage, assetId, stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, budget: manifest.budget, worker: manifest.worker, files: rendered.files, omitted: rendered.omitted.map((item) => item.id), ...extra }, null, 2) + '\n');
@@ -3177,6 +3717,31 @@ export class ResearchLoopCore {
         if (slot && Number(slot[1]) > search.slots.length) await this.files.deleteFile(file);
       }
       const index = [`# Search round ${search.round} (${search.mode}) for ${assetId}`, '', 'One pack per worker slot; each worker reads only its own.', '', ...packs.map((item) => `- slot ${item.slot} (${item.direction}): ${item.file} (~${item.tokens} tokens)`), ''].join('\n');
+      await this.files.writeFile(CONTEXT_PACK_PATH, index);
+      const rendered = { ...first!, text: index, files: [...files], tokens: packs.reduce((sum, item) => sum + item.tokens, 0) };
+      await writeManifest(rendered, first!.manifest, { packs });
+      return { ...rendered, packs };
+    }
+    const round = state.stage === 'route' ? state.current.route : undefined;
+    if (round?.slots.length && assetId) {
+      // One pack per route worker, like a search round: the driver never reads the workers' material.
+      const packs: Array<{ slot: number; direction: string; file: string; tokens: number }> = [];
+      const files = new Set<string>();
+      let first: (RenderedContext & { manifest: ContextManifest }) | undefined;
+      for (const slot of round.slots) {
+        const manifest = planContext({ ...focus, route: { round: round.round, slot, ...(round.fork ? { fork: round.fork } : {}) } }, sources, limit);
+        const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
+        const file = `${STATE_DIR}/context/route-${slot.slot}.md`;
+        await this.files.writeFile(file, rendered.text);
+        packs.push({ slot: slot.slot, direction: slot.direction, file, tokens: rendered.tokens });
+        for (const item of rendered.files) files.add(item);
+        first ??= { ...rendered, manifest };
+      }
+      if (this.files.deleteFile) for (const file of await this.files.listFiles(`${STATE_DIR}/context`, '.md')) {
+        const slot = /route-(\d+)\.md$/.exec(file);
+        if (slot && Number(slot[1]) > round.slots.length) await this.files.deleteFile(file);
+      }
+      const index = [`# Routes to ${assetId}, round ${round.round}`, '', 'One pack per worker slot; each worker reads only its own.', '', ...packs.map((item) => `- slot ${item.slot} (${item.direction}): ${item.file} (~${item.tokens} tokens)`), ''].join('\n');
       await this.files.writeFile(CONTEXT_PACK_PATH, index);
       const rendered = { ...first!, text: index, files: [...files], tokens: packs.reduce((sum, item) => sum + item.tokens, 0) };
       await writeManifest(rendered, first!.manifest, { packs });
@@ -3340,6 +3905,25 @@ export class ResearchLoopCore {
         const idea = state.current.ideaId ?? '(none)';
         return `Stage conjecture for the idea ${idea}. The pack holds the idea, the results it relates to, the goals, and the existing conjectures. Make it precise as one new conjecture in ${this.paths.assets}/<id>.md: type conjecture, title, status draft, source.kind original, depends_on, uses_definitions, serves (the results it would unblock or strengthen: an open goal, a set-aside result, or a proved one), a precise statement, and ## Motivation (why it is believed: evidence, special cases; and what it would give). Use existing definitions (search the library first, ${LOOP_COMMAND} library search <words>) or draft new ones in ${this.paths.definitions}/. Do not search, plan, or prove it: the loop searches it for a counterexample next, and the researcher agrees on its statement. If it cannot be stated precisely, or it is known, false, or trivial, write nothing and report none with the reason; the idea stays for the researcher with your note. Run research-maintenance validate and links.${report('complete --asset <id>|none|question')}`;
       }
+      case 'route': {
+        const round = state.current.route;
+        if (!round?.slots.length) return `Run: ${LOOP_COMMAND} next`;
+        const slots = round.slots.map((slot) => `slot ${slot.slot} (origin ${slot.origin}${slot.ideaId ? `, idea ${slot.ideaId}` : ''}): ${slot.label}`).join('; ');
+        return `Stage route for ${round.target}, round ${round.round}${round.fork ? `; every route starts from ${round.fork}` : ''}. Use the plan-routes skill. Spawn one subagent per slot in a single message, each given only its slot number and its own pack, and require at most three lines back. Each writes at most one route, ${this.paths.plans}/route_${round.target}_r${round.round}_s<slot>_<slug>.md: type plan, status pending, target_asset ${round.target}, route_lemmas (the results the route proves first: reuse existing IDs, library ones included, and create each new one as a draft lemma in ${this.paths.assets}/ with a precise ## Statement), route_title (a short name for the researcher), origin as its slot says${round.fork ? `, forked_from ${round.fork} (also listed in route_lemmas)` : ''}, inspired_by (the slot's idea, when it has one); body ## Goal with the target link, ## Route (one line per lemma: what it gives the reduction), ## Plan (the reduction from the lemmas, as a checklist), ## Verification, and with failed plans present ## Difference from failed plans. Plan only: no proof, no counterexample search, no change to existing files. Slots: ${slots}.${report('complete|none|question')}`;
+      }
+      case 'route_merge': {
+        const round = state.current.route;
+        if (!round) return `Run: ${LOOP_COMMAND} next`;
+        return `Stage route_merge for ${round.target}, round ${round.round}. Use the merge-routes skill. The pack holds the open routes to ${round.target} and their lemmas. Compare this round's new lemmas with every other lemma and with results already in the project or the library (${LOOP_COMMAND} library search <words>). When two state the same, run ${LOOP_COMMAND} route merge <dup> --into <keep> (keep the one already proved or approved, else the older); when one implies another, ${LOOP_COMMAND} route imply <stronger> <weaker> [--note "..."]; when they look alike but differ, ${LOOP_COMMAND} route distinct <a> <b> --note "<how>". Change no file yourself. The summary says what was merged, or that nothing was.${report('complete')}`;
+      }
+      case 'review_routes': {
+        const target = state.current.route?.target ?? asset;
+        return `Stage review_routes for ${target}. Call request_approval(kind: "routes", target: "${target}", summary: "<one line per route, the lemmas they share, what was merged>") so the researcher can review the route map in the dashboard. Do not edit files. Then run: ${LOOP_COMMAND} next`;
+      }
+      case 'reduce':
+        return `Stage reduce for the route ${state.current.planId} to ${asset}. Use the execute-proof skill (a route's reduction). Write under ## Reduction in ${this.paths.plans}/${state.current.planId}.md the complete argument that ${asset} follows from the route's lemmas and its dependencies, each used as a black box by its statement (the pack shows them); tick the plan's checklist as you go. Change nothing else: not ${asset}, not the lemmas. Success: the plan stays pending; report proved. Obstruction: set the plan status failed and write ## Failure (which step, why it cannot be done, what would be needed); report failed.${report('proved|failed|question')}`;
+      case 'verify_reduction':
+        return `Stage verify_reduction for the route ${state.current.planId} to ${asset}. Use the verify-proof skill on the reduction, in a fresh subagent. Check, as written, that ## Reduction in ${state.current.planId} proves the exact statement of ${asset} from the route's lemmas and its dependencies, used only by their statements. Add ## Reduction verdict to the plan: first line confirmed or rejected, then the reasons step by step. Change nothing else.${report('confirmed|rejected|question')}`;
       case 'waiting':
         return `Stage waiting. ${state.lastError ?? 'Nothing is actionable.'} Tell the researcher what needs their decision, then stop; the loop resumes when they act.`;
       case 'ready':
@@ -3424,6 +4008,11 @@ export class ResearchLoopCore {
     if (stage === 'verify_construction') allowedFolders.add(folders.candidates);
     if (stage === 'plan' || stage === 'execute' || stage === 'verify_proof') allowedFolders.add(folders.plans);
     if (stage === 'execute') allowedFolders.add(folders.assets);
+    // A round of routes writes the routes and the new lemmas (and definitions) they need; a reduction and its check, only their route.
+    if (stage === 'route') { allowedFolders.add(folders.plans); allowedFolders.add(folders.assets); allowedFolders.add(folders.definitions); }
+    if (stage === 'reduce' || stage === 'verify_reduction') allowedFolders.add(folders.plans);
+    const round = state.current.route;
+    const routeAssets = stage === 'route' ? await this.collectKind('asset') : undefined;
     const allowedFiles = new Set<string>();
     if (stage === 'draft_project') allowedFiles.add(this.paths.projectMd);
     if (stage === 'sources') { allowedFiles.add(this.paths.paperIndex); allowedFiles.add(this.paths.bibliography); }
@@ -3447,7 +4036,7 @@ export class ResearchLoopCore {
       const data = parseMarkdown(raw).data;
       if (stage === 'conjecture' && isIn(file, folders.assets) && data.type !== CONJECTURE_TYPE) problems.push(`${file}: this stage writes one conjecture (type conjecture) and nothing else in ${folders.assets}.`);
       if (stage === 'conjecture' && isIn(file, folders.ideas) && modified.includes(file) && path.posix.basename(file, '.md') === state.current.ideaId && parseMarkdown(raw).data.status !== 'draft') problems.push(`${file}: leave the idea draft; the loop resolves it from your report.`);
-      if (modified.includes(file) && ['scaffold', 'sources', 'search', 'search_summary', 'plan', 'conjecture'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
+      if (modified.includes(file) && ['scaffold', 'sources', 'search', 'search_summary', 'plan', 'conjecture', 'route', 'route_merge', 'review_routes'].includes(stage) && !inLibrary && !isIn(file, folders.ideas) && !(stage === 'plan' && isIn(file, folders.plans) && data.status === 'pending')) problems.push(`${file}: existing files may not be changed during ${stage}.`);
       if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.counterexampleId}.md`) problems.push(`${file}: verification may change only the candidate example.`);
       if (stage === 'execute' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md`) problems.push(`${file}: execution may change only its target asset.`);
       if (stage === 'execute' && isIn(file, folders.plans) && file !== `${folders.plans}/${state.current.planId}.md`) problems.push(`${file}: execution may change only its active plan.`);
@@ -3455,6 +4044,35 @@ export class ResearchLoopCore {
       if ((stage === 'plan' || stage === 'execute') && isIn(file, folders.plans) && data.target_asset !== state.current.assetId) problems.push(`${file}: plan targets ${data.target_asset}, not ${state.current.assetId}.`);
       if (stage === 'verify_counterexample' && isIn(file, folders.assets) && file !== `${folders.assets}/${state.current.assetId}.md` && (data.type !== 'example' || data.refutes !== state.current.assetId)) problems.push(`${file}: only a counterexample example refuting ${state.current.assetId} may be written now.`);
       const id = path.posix.basename(file, '.md');
+      if (stage === 'route' && isIn(file, folders.plans)) {
+        const match = round ? new RegExp(`^route_${round.target}_r${round.round}_s(\\d+)_[a-z0-9_]+$`).exec(id) : null;
+        const slot = match ? round!.slots.find((item) => item.slot === Number(match[1])) : undefined;
+        if (!round || !match) problems.push(`${file}: a route is named route_${round?.target ?? '<result>'}_r${round?.round ?? '<round>'}_s<slot>_<slug>.`);
+        else if (!slot) problems.push(`${file}: slot ${match[1]} was not assigned this round (slots ${round.slots.map((item) => item.slot).join(', ')}).`);
+        if (!isRoutePlan(data)) problems.push(`${file}: a route needs route_lemmas (a list; empty for a direct route).`);
+        else if (round) {
+          if (data.status !== 'pending') problems.push(`${file}: a new route is pending.`);
+          if (data.target_asset !== round.target) problems.push(`${file}: the route targets ${String(data.target_asset)}, not ${round.target}.`);
+          if (slot && data.origin !== slot.origin) problems.push(`${file}: origin must be ${slot.origin}, as its slot says.`);
+          if (round.fork && data.forked_from !== round.fork) problems.push(`${file}: this round starts from ${round.fork}: set forked_from ${round.fork} and list it in route_lemmas.`);
+          for (const key of ['reduction_digest', 'reduction_verified_digest', 'reduction_inputs', 'reduction_checked', 'route_round', 'superseded_by']) if (data[key] !== undefined) problems.push(`${file}: ${key} is written by the loop; remove it.`);
+          for (const lemma of routeLemmas(data)) {
+            const node = routeAssets?.get(lemma);
+            if (!node) problems.push(`${file}: unknown lemma ${lemma}; create it as a draft lemma with a precise ## Statement, or reuse an existing ID.`);
+            else if (node.data.type === CONJECTURE_TYPE || ['deprecated', 'archived'].includes(node.data.status)) problems.push(`${file}: ${lemma} is a conjecture or retired; a route cannot rest on it.`);
+          }
+          if (routeAssets && assetClosure(routeLemmas(data), routeAssets).order.includes(round.target)) problems.push(`${file}: a lemma of this route rests on ${round.target} itself.`);
+        }
+      }
+      if (stage === 'route' && isIn(file, folders.assets)) {
+        if (!PROVABLE_TYPES.has(data.type) || isConstructionSpec(raw)) problems.push(`${file}: a route's new lemma is a draft theorem, lemma, or proposition.`);
+        else if (statementIncomplete(parseMarkdown(raw).content)) problems.push(`${file}: a route's new lemma needs a precise ## Statement.`);
+      }
+      if ((stage === 'reduce' || stage === 'verify_reduction') && isIn(file, folders.plans)) {
+        if (file !== `${folders.plans}/${state.current.planId}.md`) problems.push(`${file}: this stage may change only the route ${state.current.planId}.`);
+        else if (stage === 'reduce' && !['pending', 'failed'].includes(data.status)) problems.push(`${file}: leave the route pending (report proved), or set it failed with ## Failure (report failed).`);
+        else if (stage === 'verify_reduction' && (data.status !== 'pending' || reductionDigest(parseMarkdown(raw).content) !== data.reduction_digest)) problems.push(`${file}: the check may only add ## Reduction verdict, leaving the route pending and its ## Reduction unchanged.`);
+      }
       if (isIn(file, folders.checks) && !(search && data.type === 'search_round' && data.target_asset === state.current.assetId && id.startsWith(`search_${state.current.assetId}_r${search.round}_`))) {
         problems.push(`${file}: only the round record search_${state.current.assetId ?? '<asset>'}_r${search?.round ?? '<round>'}_<slug> (type search_round, target_asset ${state.current.assetId ?? '<asset>'}) may be written, during an object search; the loop writes falsification checks.`);
       }
@@ -3475,7 +4093,8 @@ export class ResearchLoopCore {
       }
       if (isIn(file, folders.plans) && data.type === 'plan') {
         const failed = (await this.failedPlans(String(data.target_asset))).filter((id) => id !== path.posix.basename(file, '.md'));
-        if (failed.length && data.status === 'pending') {
+        // Only a plan being written answers the failures so far; an older route given its reduction later need not name failures that came after it.
+        if (failed.length && data.status === 'pending' && (stage === 'plan' || stage === 'route')) {
           const section = sectionContent(parseMarkdown(raw).content, 'Difference from failed plans');
           const missing = failed.filter((id) => !section.includes(id));
           if (missing.length) problems.push(`${file}: ## Difference from failed plans must mention ${missing.join(', ')}.`);
@@ -3519,6 +4138,14 @@ export class ResearchLoopCore {
         counts.set(slot, (counts.get(slot) ?? 0) + 1);
       }
       for (const [slot, count] of counts) if (count > perWorker) problems.push(`slot ${slot} wrote ${count} candidates; at most ${perWorker} per worker. Keep the best; an object you have not checked may become a test_case idea, a failed one never.`);
+    }
+    if (stage === 'route' && round) {
+      const counts = new Map<string, number>();
+      for (const file of added.filter((item) => isIn(item, folders.plans))) {
+        const slot = new RegExp(`^route_${round.target}_r${round.round}_s(\\d+)_`).exec(path.posix.basename(file, '.md'))?.[1];
+        if (slot) counts.set(slot, (counts.get(slot) ?? 0) + 1);
+      }
+      for (const [slot, count] of counts) if (count > 1) problems.push(`slot ${slot} wrote ${count} routes; one per slot. Keep the best and record the others as approach ideas.`);
     }
     const records = added.filter((item) => isIn(item, folders.checks)).length;
     if (((stage === 'search' && search?.slots.length === 1) || stage === 'search_summary') && records !== 1) problems.push(`Write exactly one round record ${folders.checks}/search_${state.current.assetId}_r${search?.round}_<slug>.md (type search_round, ## Obstructions, ## Limitations); found ${records}.`);
@@ -3572,7 +4199,7 @@ export class ResearchLoopCore {
     const { stage, current: { assetId } } = this.require();
     const result = await this.reportStage(report);
     // An autonomous run pays for each executed plan, each search round, and each conjecture idea it tries to make precise.
-    const attempt = (stage === 'execute' && (report.outcome === 'proved' || report.outcome === 'failed')) || (stage === 'search' && report.outcome === 'searched')
+    const attempt = ((stage === 'execute' || stage === 'reduce') && (report.outcome === 'proved' || report.outcome === 'failed')) || (stage === 'search' && report.outcome === 'searched')
       || (stage === 'conjecture' && (report.outcome === 'complete' || report.outcome === 'none'));
     const handover = attempt ? await this.charge(assetId, stage, report.outcome) : undefined;
     return handover ? { stage: this.require().stage, message: `${result.message}\n${handover}` } : result;
@@ -3685,6 +4312,97 @@ export class ResearchLoopCore {
         if ((await this.autoApproveQueued()).includes('project:project')) return finish('project.md drafted and approved automatically (auto mode). Continue with next.', 'select');
         return finish('project.md drafted; request the researcher\'s approval with request_approval(kind: "project").', 'review_project');
       }
+      case 'route': {
+        const round = state.current.route;
+        if (!round) throw new Error(`No round of routes is open; run ${LOOP_COMMAND} next.`);
+        const { added } = await validated();
+        const written = added.filter((file) => path.posix.dirname(file) === this.paths.plans);
+        state.researcherInput = undefined;
+        if (report.outcome === 'none') {
+          if (written.length) throw new Error(`report none writes no route; remove ${written.join(', ')} or report complete.`);
+          if (!report.summary.trim()) throw new Error('Say in --summary why no route is in sight.');
+          await finish(`No route to ${round.target} in sight.`, 'select', { assetId: undefined });
+          await this.routesStuck(round.target, `No route to ${round.target} is in sight: ${report.summary.trim()}`);
+          return { stage: this.require().stage, message: `No route to ${round.target} in sight. ${(await this.autonomy()) ? 'Decide yourself what comes next (the instruction from next says how).' : 'The researcher is asked for a direction; continue with next.'}` };
+        }
+        if (report.outcome !== 'complete') throw new Error('route outcome must be complete, none, or question.');
+        if (!written.length) throw new Error('No route was written: write at least one, or report none --summary "<why no route is in sight>".');
+        for (const file of written) {
+          const parsed = parseMarkdown(await this.files.readFile(file));
+          parsed.data.route_round = round.round;
+          await this.writeOwned(file, stringifyMarkdown(parsed.content, parsed.data));
+        }
+        await this.event('routes_proposed', { target: round.target, round: round.round, routes: written.map((file) => path.posix.basename(file, '.md')) });
+        return finish(`${written.length} route(s) to ${round.target} recorded. Next: merge them with the other routes and known results.`, 'route_merge', { route: round });
+      }
+      case 'route_merge': {
+        const round = state.current.route;
+        if (!round) throw new Error(`No round of routes is open; run ${LOOP_COMMAND} next.`);
+        await validated();
+        if (report.outcome !== 'complete') throw new Error('route_merge outcome must be complete.');
+        await this.writeDecision('route_merge', round.target, report.summary.trim() || 'Nothing to merge.', { routeRound: round.round });
+        const settings = await this.loopSettings();
+        const main = requiredAssetIds(await this.files.readFile(this.paths.projectMd).catch(() => '')).includes(round.target);
+        const open = (await this.routePlans()).some((plan) => plan.data.target_asset === round.target && plan.data.status === 'pending');
+        if (settings.rigor.reviewRoutes === 'main' && main && open && !(await this.routeMapApproved(round.target))) {
+          await this.enqueueApproval('routes', round.target, report.summary.trim() || `Review the routes to ${round.target}.`);
+          if ((await this.autoApproveQueued()).includes(`routes:${round.target}`)) return finish(`Routes to ${round.target} merged; the route map was approved automatically (auto mode). Continue with next.`, 'select', { assetId: undefined });
+          return finish(`Routes to ${round.target} merged. Call request_approval(kind: "routes", target: "${round.target}", summary: "<one line per route, the lemmas they share, what was merged>") and continue with next: the loop works on other results while the researcher reviews the map.`, 'review_routes', { route: round });
+        }
+        return finish(`Routes to ${round.target} merged. Continue with next.`, 'select', { assetId: undefined });
+      }
+      case 'review_routes':
+        throw new Error(`Nothing to report in review_routes: call request_approval(kind: "routes") and run ${LOOP_COMMAND} next.`);
+      case 'reduce': {
+        await validated();
+        const assetId = state.current.assetId!;
+        const planId = state.current.planId!;
+        const file = `${this.paths.plans}/${planId}.md`;
+        const plan = parseMarkdown(await this.files.readFile(file));
+        const title = String(plan.data.route_title ?? planId);
+        if (report.outcome === 'proved') {
+          if (plan.data.status !== 'pending' || !sectionContent(plan.content, 'Reduction')) throw new Error(`${planId} needs the complete argument under ## Reduction, its status still pending.`);
+          const digest = reductionDigest(plan.content);
+          plan.data.reduction_digest = digest;
+          // The statements it was written against: a later change to one of them voids it.
+          plan.data.reduction_inputs = Object.fromEntries((state.current.inputs ?? []).filter((input) => input.kind === 'asset' && input.part === 'statement').map((input) => [input.id, input.digest]));
+          delete plan.data.reduction_verified_digest;
+          delete plan.data.reduction_checked;
+          const check = (await this.loopSettings()).rigor.verifyProofs === 'agent';
+          if (!check) plan.data.reduction_verified_digest = digest;
+          await this.writeOwned(file, stringifyMarkdown(plan.content, plan.data));
+          await this.event('route_reduced', { target: assetId, planId });
+          return finish(`The reduction of the route ${title} to ${assetId} is recorded.${check ? ' Next: an independent check of it.' : ''} Continue with next.`, 'select', { assetId: undefined, planId: undefined });
+        }
+        if (report.outcome !== 'failed') throw new Error('reduce outcome must be proved, failed, or question.');
+        if (plan.data.status !== 'failed' || !sectionContent(plan.content, 'Failure')) throw new Error(`${planId} must have status failed and a ## Failure section.`);
+        await this.event('route_failed', { target: assetId, planId, reason: 'reduction' });
+        return finish(`The route ${title} to ${assetId} failed. Continue with next: the loop goes on with the other routes.`, 'select', { assetId: undefined, planId: undefined });
+      }
+      case 'verify_reduction': {
+        await validated();
+        const assetId = state.current.assetId!;
+        const planId = state.current.planId!;
+        const file = `${this.paths.plans}/${planId}.md`;
+        const plan = parseMarkdown(await this.files.readFile(file));
+        const verdict = sectionContent(plan.content, 'Reduction verdict');
+        if (!verdict) throw new Error(`${planId} needs a ## Reduction verdict.`);
+        if (report.outcome === 'confirmed') {
+          if (verdictOutcome(verdict) !== 'confirmed') throw new Error(`## Reduction verdict of ${planId} must begin with confirmed.`);
+          plan.data.reduction_verified_digest = plan.data.reduction_digest;
+          plan.data.reduction_checked = true;
+          await this.writeOwned(file, stringifyMarkdown(plan.content, plan.data));
+          await this.event('route_reduction_verified', { target: assetId, planId });
+          return finish(`The reduction of ${planId} holds (independent check). Continue with next.`, 'select', { assetId: undefined, planId: undefined });
+        }
+        if (report.outcome !== 'rejected') throw new Error('verify_reduction outcome must be confirmed, rejected, or question.');
+        if (verdictOutcome(verdict) !== 'rejected') throw new Error(`## Reduction verdict of ${planId} must begin with rejected.`);
+        plan.data.status = 'failed';
+        delete plan.data.reduction_digest; delete plan.data.reduction_verified_digest; delete plan.data.reduction_inputs;
+        await this.writeOwned(file, stringifyMarkdown(`${plan.content.trimEnd()}\n\n## Failure\n\nThe independent check rejected the reduction:\n\n${verdict}\n`, plan.data));
+        await this.event('route_failed', { target: assetId, planId, reason: 'reduction_rejected' });
+        return finish(`The independent check rejected the reduction of ${planId}; the route failed. Continue with next.`, 'select', { assetId: undefined, planId: undefined });
+      }
       case 'conjecture': {
         const ideaId = state.current.ideaId;
         if (!ideaId) throw new Error(`No conjecture idea is open; run ${LOOP_COMMAND} next.`);
@@ -3793,7 +4511,8 @@ export class ResearchLoopCore {
         }
         await this.writeCheck(assetId, 'counterexample_rejected', `Candidate ${exampleId} was checked independently and rejected:\n\n${sectionContent(example.content, 'Verdict') || report.summary}`, 'Only this candidate family was examined; no systematic search beyond it is recorded here.');
         if (await this.isConjecture(assetId)) return finish(`Candidate rejected; the conjecture ${assetId} stands. Continue with next.`, 'select', { assetId: undefined, counterexampleId: undefined });
-        return finish(`Candidate rejected. Next: plan for ${assetId}.`, 'plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) });
+        const [nextStage, patch] = await this.afterSurvived(assetId);
+        return finish(`Candidate rejected. Next: ${nextStage === 'plan' ? `plan for ${assetId}` : `routes to ${assetId}; continue with next`}.`, nextStage, patch);
       }
       case 'plan': {
         if (report.outcome === 'none') return this.noNewPlan(await validated(), report.summary, finish, Boolean(run));
@@ -4378,7 +5097,7 @@ export class ResearchLoopCore {
     }
     if (run.deciding === assetId) {
       delete run.deciding;
-      if (construct) await this.setStage('select', { assetId: undefined });
+      if (construct || await this.willRoute(assetId)) await this.setStage('select', { assetId: undefined });
       else await this.setStage('plan', { assetId, planId: undefined });
     } else await this.save();
     return `${assetId} has ${attempts} more ${construct ? 'search round(s)' : 'proof attempt(s)'} with your direction. Run: ${LOOP_COMMAND} next`;

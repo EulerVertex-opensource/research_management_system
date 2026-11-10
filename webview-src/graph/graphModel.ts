@@ -13,7 +13,7 @@ export const MAX_VISIBLE = 150;
 export type AttentionFilter = 'all' | 'attention' | GraphFlag | 'draft' | 'approved';
 
 /** The graph's three views: one main result's tree, only what needs the researcher, or everything with filters. */
-export type GraphMode = 'goal' | 'needs' | 'all';
+export type GraphMode = 'goal' | 'needs' | 'all' | 'routes';
 
 export interface ViewOptions {
   /** Results as an ordered list of boxes, or as the graph. */

@@ -24,6 +24,11 @@ const STAGE_TEXT: Record<string, string> = {
   verify_proof: 'checking the proof of {result}',
   verify_node: 'checking {result} before it is approved',
   conjecture: 'making a conjecture precise',
+  route: 'planning routes to {result}',
+  route_merge: 'merging the routes to {result}',
+  review_routes: 'waiting for you to review the routes to {result}',
+  reduce: 'writing how a route reaches {result}',
+  verify_reduction: 'checking how a route reaches {result}',
   waiting: 'stopped until you act',
   ready: 'done with every main result',
 };
@@ -107,6 +112,7 @@ export function approvalTitle(kind: string, title: string, type: string, library
   if (kind === 'project') return 'Accept the goals in project.md';
   if (kind === 'definition') return `Review the definition of ${title}`;
   if (kind === 'specification') return `Accept the required properties of ${title}`;
+  if (kind === 'routes') return `Review the routes to ${title}`;
   if (kind === 'citation') return `Check the citation for ${title}`;
   if (kind === 'package') return `Accept the imported package ${title}`;
   if (kind === 'counterexample') return `Check a possible counterexample: ${title}`;
@@ -119,6 +125,7 @@ export function acceptLabel(kind: string, type: string): string {
   if (kind === 'project') return 'Accept the goals';
   if (kind === 'definition') return 'Accept definition';
   if (kind === 'specification') return 'Accept the properties';
+  if (kind === 'routes') return 'Work on these routes';
   if (kind === 'citation') return 'The citation matches';
   if (kind === 'package') return 'Accept package';
   if (kind === 'counterexample') return 'Yes, it is a counterexample';
@@ -131,6 +138,7 @@ export function needsLabel(kind: string | undefined): string {
   if (kind === 'citation') return 'Check citation';
   if (kind === 'package') return 'Accept package';
   if (kind === 'specification') return 'Accept properties';
+  if (kind === 'routes') return 'Review routes';
   if (kind === 'question') return 'Question for you';
   return 'Needs your review';
 }

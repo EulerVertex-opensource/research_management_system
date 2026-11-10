@@ -36,7 +36,7 @@ function memoryFiles(initial = {}) {
 
 let counter = 0;
 function fixture(settings = {}) {
-  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, ...settings }) });
+  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, routeWidth: 0, ...settings }) });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, iterationCap: 5 });
   return { files, core, map: files.map };
 }
@@ -273,7 +273,7 @@ test('a changed statement starts the search over; an old falsify stage re-select
   f.map.set('.research-assistant-loop/state.json', JSON.stringify({ ...state, stage: 'falsify', current: { ...state.current, search: undefined } }));
   await f.core.load();
   // The researcher widened the search meanwhile; the next round uses it.
-  f.map.set(SETTINGS, JSON.stringify({ version: 1, refuteWidth: 3 }));
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, refuteWidth: 3 }));
   assert.equal((await f.core.next()).stage, 'search');
   assert.equal(f.core.current.current.search.slots.length, 3);
 });
@@ -283,7 +283,7 @@ test('lowering the round limit below the rounds already recorded ends the search
   await driveToSearch(f);
   await searchNothing(f);
   assert.equal(f.core.current.current.search.round, 2);
-  f.map.set(SETTINGS, JSON.stringify({ version: 1, refuteRounds: 1 }));
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, refuteRounds: 1 }));
   await f.core.stop();
   await f.core.start('claude', { force: true });
   assert.equal((await f.core.next()).stage, 'plan');

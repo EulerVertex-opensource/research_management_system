@@ -6,7 +6,7 @@ import { AUTO_APPROVE_RULES, AutoApprovePolicy, AutonomyPolicy, LOOP_NUMBER_KEYS
  */
 
 export const DEFAULT_AUTO_APPROVE: AutoApprovePolicy = {
-  enabled: false, proofs: true, supporting: true, citations: true, definitions: true, conjectures: true, conjectureIdeas: true, counterexamples: false, specifications: false, project: false,
+  enabled: false, proofs: true, supporting: true, citations: true, definitions: true, conjectures: true, conjectureIdeas: true, counterexamples: false, specifications: false, routes: false, project: false,
 };
 
 /** What autonomous mode approves: every rule, each still judged from the file itself. */
@@ -16,14 +16,17 @@ export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
 /**
  * Where each rigor policy appears in the Settings view: `checks` under "How thorough" (what the loop
  * verifies before building on a result), `away` under "How involved are you" (what happens when the
- * researcher does not respond). A Record so a new policy without a place does not compile.
+ * researcher does not respond), `routes` under "Parallel routes" (how a main result's routes are
+ * planned). A Record so a new policy without a place does not compile. Presets cover the checks only.
  */
-export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away'> = {
+export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away' | 'routes'> = {
   refuteSearch: 'checks', verifyProofs: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks', verifyExtracted: 'checks',
   missingDefinitions: 'away', whenStuck: 'away', unansweredQuestions: 'away',
+  reviewRoutes: 'routes', lemmaRoutes: 'routes',
 };
 export const CHECK_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'checks');
 export const AWAY_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'away');
+export const ROUTE_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'routes');
 type CheckPolicy = Pick<RigorPolicy, 'refuteSearch' | 'verifyProofs' | 'agreeDefinitions' | 'onDependencyChange' | 'verifyExtracted'>;
 
 /** How thorough: Careful is the default; Fast trades checks for progress. Presets cover the checks only. */
@@ -31,7 +34,7 @@ export const RIGOR_PRESETS: Record<'careful' | 'fast', CheckPolicy> = {
   careful: { refuteSearch: 'all', verifyProofs: 'agent', agreeDefinitions: 'main', onDependencyChange: 'revert', verifyExtracted: 'agent' },
   fast: { refuteSearch: 'main', verifyProofs: 'off', agreeDefinitions: 'off', onDependencyChange: 'flag', verifyExtracted: 'off' },
 };
-export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait' };
+export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait', reviewRoutes: 'main', lemmaRoutes: 'off' };
 
 /** The preset a policy's checks match, or `custom`. */
 export function rigorPreset(policy: RigorPolicy): 'careful' | 'fast' | 'custom' {
@@ -67,14 +70,17 @@ export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(ty
   onDependencyChange: { label: 'When something a result rests on changes', hint: 'A changed definition or statement can make the proofs built on it be about something else.', options: { revert: 'Everything downstream back to review', flag: 'Mark it for re-check' } },
   missingDefinitions: { label: 'When a definition is used but missing', hint: 'The agent drafts it in either case; it never accepts it for you.', options: { wait: 'Draft it, then wait for me', continue: 'Draft it and go on' } },
   whenStuck: { label: 'When a result is stuck and you give no direction', hint: 'After the failed-attempt limit, or when a construction search runs out.', options: { park: 'Set it aside', retry: 'Agent tries one new approach itself' } },
+  reviewRoutes: { label: 'Review route maps', hint: 'Before the routes to a main result are worked on, you see them side by side, with the lemmas they share, and approve, drop, or add routes. Off: the loop starts on them at once.', options: { main: 'Before working on them', off: 'Don’t ask me' } },
+  lemmaRoutes: { label: 'When a lemma in a route is stuck', hint: 'A lemma normally gets one proof attempt after another. On: once its attempts run out, the loop first plans several routes to it before asking you.', options: { off: 'Ask me', on: 'Try several routes first' } },
   unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
 };
 
 /** Where a numeric loop setting appears in the Settings view. */
-export type LoopFieldGroup = 'general' | 'away' | 'refute' | 'construct' | 'search' | 'autonomy' | 'teaching';
+export type LoopFieldGroup = 'general' | 'away' | 'routes' | 'refute' | 'construct' | 'search' | 'autonomy' | 'teaching';
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   general: 'Search & effort',
   away: 'When you don’t respond',
+  routes: 'Parallel routes',
   refute: 'Object search: refute (falsify)',
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
@@ -107,6 +113,9 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   autonomyHours: { defaultValue: 0, range: [0, 168], group: 'autonomy', unit: 'hours', label: 'Time limit', hint: 'Hands the loop back after this long even with budget left; 0 means no time limit.' },
   autonomyRevisions: { defaultValue: 2, range: [0, 10], group: 'autonomy', label: 'Goal reassessments', hint: 'Times the agent may judge what the goals still need when only set-aside results remain: it brings back a set-aside result that something new gets past, or adds a weaker or alternative goal of its own. Each one after the first needs something proved or set aside since the last. It never drops your goals; you decide about them at hand-back.' },
   autonomyConjectures: { defaultValue: 0, range: [0, 20], group: 'autonomy', label: 'Conjectures to explore', hint: 'Conjectures the agent may take up as goals of its own, best first, once your goals are proved or nothing else is left that it can do. 0 means it never explores; it still recommends them at hand-back. Taking up a conjecture that gets past a set-aside result counts as a goal reassessment instead.' },
+  routeWidth: { defaultValue: 3, range: [0, 8], group: 'routes', label: 'Routes per round', hint: 'Routes planned side by side for a main result, each in its own direction (yours first, when you have some). 0: one proof attempt after another, as before.' },
+  maxLiveRoutes: { defaultValue: 3, range: [1, 8], group: 'routes', label: 'Routes worked on at once', hint: 'Routes to one result kept going together; the most promising ones go first, the rest wait until one fails.' },
+  routeRounds: { defaultValue: 2, range: [1, 10], group: 'routes', label: 'Rounds of routes', hint: 'Rounds of new routes for one result, once every route so far failed, before the loop asks you for a direction.' },
   studyAhead: { defaultValue: 0, range: [0, 50], group: 'teaching', unit: 'results', label: 'How far the loop may get ahead of you', hint: 'Verified results you have not studied yet (with the teach skill, or marked in Results) before the loop waits for you instead of starting new proofs. 0 means it never waits; working on its own ignores this.' },
 };
 

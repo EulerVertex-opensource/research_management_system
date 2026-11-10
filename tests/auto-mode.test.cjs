@@ -28,7 +28,7 @@ const succeeded = (id) => matter.stringify('\n## Goal\n\nTarget: [asset](../asse
 const check = (target = 'main_theorem') => matter.stringify('\n## Cases checked\n\n- n = 0 and n = 1\n\n## Limitations\n\nOnly small cases.\n', { type: 'falsification_check', title: `Check ${target}`, target_asset: target, outcome: 'no_counterexample_found' });
 const SETTINGS = '.research-assistant-loop/settings.json';
 // Proofs go straight to approval here; the independent check has its own tests (verify-proof.test.cjs).
-const auto = (rules = {}, extra = {}) => JSON.stringify({ version: 1, autoApprove: { enabled: true, ...rules }, rigor: { verifyProofs: 'off' }, ...extra });
+const auto = (rules = {}, extra = {}) => JSON.stringify({ version: 1, routeWidth: 0, autoApprove: { enabled: true, ...rules }, rigor: { verifyProofs: 'off' }, ...extra });
 
 function memoryFiles(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -54,7 +54,7 @@ async function confirmNodeChecks(f) {
 
 let counter = 0;
 function fixture(initial = {}, options = { iterationCap: 5 }) {
-  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, rigor: { verifyProofs: 'off' } }), ...initial });
+  const files = memoryFiles({ 'research/project.md': '# Project\n\n## Required Results\n', 'research/papers.md': '# Papers\n', [SETTINGS]: JSON.stringify({ version: 1, routeWidth: 0, rigor: { verifyProofs: 'off' } }), ...initial });
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, ...options });
   return { files, core, map: files.map };
 }
@@ -399,7 +399,7 @@ test('invalid settings JSON means no auto approval', async () => {
 test('failed-plan limit and iteration cap come from the loop settings', async () => {
   const f = fixture();
   await driveToFalsify(f);
-  f.map.set(SETTINGS, JSON.stringify({ version: 1, maxFailedPlans: 2 }));
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, maxFailedPlans: 2 }));
   for (let attempt = 1; attempt <= 2; attempt++) {
     const difference = attempt > 1 ? '\n## Difference from failed plans\n\n- attempt_1: different route\n' : '';
     f.map.set(`research/plans/attempt_${attempt}.md`, plan(`attempt_${attempt}`, 'pending', difference));
@@ -411,12 +411,12 @@ test('failed-plan limit and iteration cap come from the loop settings', async ()
   }
   assert.equal(f.core.current.pendingQuestion.kind, 'blocked');
 
-  const settingsCap = fixture({ [SETTINGS]: JSON.stringify({ version: 1, iterationCap: 7 }) }, {});
+  const settingsCap = fixture({ [SETTINGS]: JSON.stringify({ version: 1, routeWidth: 0, iterationCap: 7 }) }, {});
   await settingsCap.core.start('codex');
   assert.equal(settingsCap.core.current.autopilot.iterationCap, 7);
   await settingsCap.core.setIterationCap(3);
   assert.equal(JSON.parse(settingsCap.map.get('.research-assistant-loop/state.json')).autopilot.iterationCap, 3);
-  const override = fixture({ [SETTINGS]: JSON.stringify({ version: 1, iterationCap: 7 }) }, { iterationCap: 2 });
+  const override = fixture({ [SETTINGS]: JSON.stringify({ version: 1, routeWidth: 0, iterationCap: 7 }) }, { iterationCap: 2 });
   await override.core.start('codex');
   assert.equal(override.core.current.autopilot.iterationCap, 2);
 });
@@ -480,7 +480,7 @@ test('a definition that fails its check waits for the researcher, and is not che
 
 test('without auto mode, and with extracted results not checked, the researcher approves definitions as before', async () => {
   const f = fixture();
-  f.map.set(SETTINGS, JSON.stringify({ version: 1, rigor: { verifyProofs: 'off', verifyExtracted: 'off' } }));
+  f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, rigor: { verifyProofs: 'off', verifyExtracted: 'off' } }));
   await driveToSelect(f, { 'research/assets/main_theorem.md': asset('', { uses_definitions: ['natural'] }), 'research/definitions/natural.md': definition('A natural number is a member of N.') });
   assert.equal((await f.core.next()).stage, 'waiting');
   assert.equal(nodeChecks(f).length, 0);
