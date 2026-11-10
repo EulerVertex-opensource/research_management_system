@@ -71,6 +71,20 @@ test('MCP bridge lists tools and degrades gracefully without the extension', asy
   } finally { c.close(); p.cleanup(); }
 });
 
+test('looking at the status is not a sign of the agent working; saving an idea is', async () => {
+  const p = project();
+  const now = new Date().toISOString();
+  p.write('.research-assistant-loop/state.json', JSON.stringify({ version: 2, runId: 'r', provider: 'claude', status: 'running', stage: 'select', current: { stageStartedAt: now }, progress: {}, parked: {}, answers: [], approvalQueue: [], autopilot: { iterationCap: 5, sessions: {} }, lastError: null, startedAt: now, runningSince: now, updatedAt: now }));
+  const agent = path.join(p.root, '.research-assistant-loop/agent.json');
+  const c = client(p.root);
+  try {
+    assert.equal((await c.call('loop_status', {})).state.status, 'running');
+    assert.equal(fs.existsSync(agent), false, 'an observer leaves no activity mark');
+    assert.equal((await c.call('record_idea', { title: 'Try induction', body: 'Induct on n.' })).ok, true);
+    assert.equal(fs.existsSync(agent), true);
+  } finally { c.close(); p.cleanup(); }
+});
+
 test('MCP bridge forwards pending, await_answer, and final results with the bridge token; hung extensions time out', async () => {
   const p = project();
   const requests = [];

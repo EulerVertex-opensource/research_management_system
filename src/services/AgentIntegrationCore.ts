@@ -24,6 +24,7 @@ export function hookEntries(scriptPath: string, provider: AgentProvider): Record
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: command('UserPromptSubmit'), timeout: 20 }] }],
     PreToolUse: [{ matcher: AGENT_PROVIDERS[provider].writeToolMatcher, hooks: [{ type: 'command', command: command('PreToolUse'), timeout: 20 }] }],
     Stop: [{ hooks: [{ type: 'command', command: command('Stop'), timeout: 120 }] }],
+    ...(AGENT_PROVIDERS[provider].preCompactHook ? { PreCompact: [{ hooks: [{ type: 'command' as const, command: command('PreCompact'), timeout: 20 }] }] } : {}),
     ...(AGENT_PROVIDERS[provider].sessionEndHook ? { SessionEnd: [{ hooks: [{ type: 'command' as const, command: command('SessionEnd'), timeout: 10 }] }] } : {}),
   };
 }

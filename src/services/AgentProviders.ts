@@ -27,6 +27,8 @@ export interface AgentProviderSpec {
   shellTool?: string;
   /** Whether the agent has a SessionEnd hook, so a closed chat is seen at once rather than after a silence. */
   sessionEndHook: boolean;
+  /** Whether the agent's PreCompact hook turns its stdout into instructions for the compaction summary (Claude Code; Codex's PreCompact can only stop compaction). */
+  preCompactHook: boolean;
   /** Subagent definitions folder; absent where the agent has no project-level subagent files. */
   agentsDir?: string;
   /** Where the agent itself keeps research-worker subagents the extension does not write (ignored, never generated). */
@@ -50,6 +52,7 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     readToolMatcher: 'Read|Grep|Glob|Bash',
     shellTool: 'Bash',
     sessionEndHook: true,
+    preCompactHook: true,
     agentsDir: '.claude/agents',
     hooksFileHasPermissions: true,
     mcp: { kind: 'project-json', file: '.mcp.json' },
@@ -64,6 +67,7 @@ export const AGENT_PROVIDERS: Record<AgentProvider, AgentProviderSpec> = {
     hooksFile: '.codex/hooks.json',
     writeToolMatcher: 'apply_patch|Bash|Write|Edit|mcp__research_assistant__record_idea|mcp__research_assistant__add_remark',
     sessionEndHook: false,
+    preCompactHook: false,
     externalWorkers: { dir: '.codex/agents', extension: '.toml' },
     hooksFileHasPermissions: false,
     mcp: { kind: 'codex-cli' },

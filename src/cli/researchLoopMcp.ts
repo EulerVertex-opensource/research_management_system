@@ -78,7 +78,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
   // Only an agent calls these tools: a sign of life for the dashboard while the loop runs (the teaching chat's popup is not the loop's work).
   const files = new NodeLoopFiles(root);
   const running = await files.readFile(STATE_PATH).then((text) => (JSON.parse(text) as { status?: string }).status === 'running').catch(() => false);
-  if (running && name !== 'mark_understood' && !(name === 'add_remark' && args.from === 'teaching')) await noteAgentActivity(files, { kind: 'active', throttle: true });
+  // Looking at the status is not work: an observer must not make the dashboard show the agent as busy.
+  if (running && name !== 'mark_understood' && name !== 'loop_status' && !(name === 'add_remark' && args.from === 'teaching')) await noteAgentActivity(files, { kind: 'active', throttle: true });
   if (name === 'ask_researcher' || name === 'request_approval' || name === 'await_answer') return forward(root, name, args);
   if (name === 'mark_understood') {
     const result = await forward(root, name, args);
@@ -87,6 +88,8 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
   }
   const paths = await loadProjectPaths(root);
   const core = new ResearchLoopCore(files, paths);
+  // A status read changes nothing: it needs no write lock (state.json is replaced whole, so the read is consistent).
+  if (name === 'loop_status') { await core.load(); return { ok: true, state: core.statusSummary({ recentParked: 3 }), brief: core.briefStatus() }; }
   return core.transaction(`MCP ${name}`, () => callCoreTool(core, paths, name, args));
 }
 

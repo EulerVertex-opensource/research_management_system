@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { ProjectPaths } from '../models/types';
-import { LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
+import { CONTEXT_PACK_PATH, LoopState, STATE_DIR, sharedFolders, stageSignature } from './ResearchLoopModel';
 import { LOOP_COMMAND, MAINTENANCE_COMMAND } from './AgentProviders';
 import { folderNoteProblem, layoutProblem, projectRelative } from '../domain/layout';
 import { UNDERSTANDING_PATH } from '../domain/understandingLevels';
@@ -20,6 +20,8 @@ export interface HookInput {
   prompt?: string;
   /** SessionStart: startup | resume | clear | compact. */
   source?: string;
+  /** PreCompact: manual | auto. */
+  trigger?: string;
   /** The chat's transcript (JSONL); its last usage record tells how much context the chat carries. */
   transcript_path?: string;
 }
@@ -84,8 +86,30 @@ const thousands = (tokens: number) => `~${Math.round(tokens / 1000)}K`;
 export function contextResetDecision(state: LoopState | undefined, input: HookInput, tokens: number | undefined): string | undefined {
   if (!state || state.status !== 'running' || tokens === undefined || tokens < CONTEXT_RESET_TOKENS) return undefined;
   if (state.autonomy && !state.autonomy.handedOverAt) return undefined;
-  if (!loopCalls(input).some((call) => call.command === 'next')) return undefined;
+  if (!runsLoopNext(input)) return undefined;
   return `Research loop: this chat carries ${thousands(tokens)} tokens of context, so the loop paused before the next stage; it continues more cheaply in a fresh chat, rebuilt from the files. Do not run anything else. Tell the researcher in two lines that the work so far is saved, and that they continue with /clear (Codex: a new thread) and then the research-loop skill.`;
+}
+
+/** The tool call runs `research-loop next`: where the driver's chat size is measured and checked. */
+export function runsLoopNext(input: HookInput): boolean {
+  return loopCalls(input).some((call) => call.command === 'next');
+}
+
+/**
+ * PreCompact (Claude Code turns the hook's stdout into instructions for the
+ * compaction summary): what the driver's summary keeps. The loop rebuilds from
+ * its files after compaction, so the summary carries only what no file holds;
+ * a copy of proofs or verdicts would go stale. Undefined without a loop.
+ */
+export function compactInstructions(state: LoopState | undefined): string | undefined {
+  if (!state || (state.status !== 'running' && state.status !== 'paused')) return undefined;
+  const autonomous = Boolean(state.autonomy && !state.autonomy.handedOverAt);
+  return [
+    `Research loop: this chat drives the research loop (${state.status}, stage ${state.stage}${state.current.assetId ? `, asset ${state.current.assetId}` : ''}${autonomous ? ', autonomous run' : ''}).`,
+    `Everything the loop needs is in files, and it rebuilds from them after compaction: ${STATE_DIR}/state.json, the stage's context pack ${CONTEXT_PACK_PATH}, and the research folders. Keep the summary short.`,
+    `Keep: that this chat drives the research loop and continues with ${LOOP_COMMAND} next${autonomous ? ' (no one is watching: continue without asking)' : ''}; what the current step was in the middle of (the command or subagent running, what is left of this step); and, quoted, anything the researcher said in this chat that no file records yet (instructions, preferences, answers).`,
+    'Leave out: proof text, file contents, earlier stages and their verdicts, subagent reports already recorded with report, and the loop\'s status lines. They are in the files, and a copy in the summary goes stale.',
+  ].join('\n');
 }
 
 /** Shown to the researcher when the loop hands them a long chat to answer in. */

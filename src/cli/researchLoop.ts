@@ -6,7 +6,7 @@ import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, isWaitingForHuman, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
-import { CONTEXT_RESET_TOKENS, GUARD_PATH, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, loopRemarkDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole, nextSessionRole, writingToolDecision, WRITING_NOTE } from '../services/ResearchLoopHooks';
+import { CONTEXT_RESET_TOKENS, GUARD_PATH, compactInstructions, runsLoopNext, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, loopRemarkDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole, nextSessionRole, writingToolDecision, WRITING_NOTE } from '../services/ResearchLoopHooks';
 import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
 import { AgentSignal, noteAgentActivity } from '../services/AgentActivity';
@@ -94,7 +94,7 @@ ${PACKAGE_USAGE}
   sync publish [--message "..."] [--interactive]   (needs the researcher's confirmation in VS Code or the terminal)
   migrate-approvals   (split research/approvals.json into one file per approved target)
   restore-approvals   (re-apply status: approved where the researcher's approval record still matches the content)
-  hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd>   (reads hook JSON on stdin)
+  hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|PreCompact|Stop|SessionEnd>   (reads hook JSON on stdin)
   precommit   (git pre-commit hook: refuse commits that add research file problems)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
@@ -416,8 +416,12 @@ async function runLockedHook(event: string, root: string, core: ResearchLoopCore
       if (role === 'drive' && session && state && state.lock?.sessionId !== session) await core.touch(session, false, true);
       const decision = preToolUseDecision(paths, input, root, (relative) => fs.existsSync(path.join(root, relative)));
       if (decision.deny) { process.stdout.write(denyOutput(decision.reason ?? 'Denied by the research loop.') + '\n'); return; }
+      const driving = Boolean(session && state?.lock?.sessionId === session);
+      const tokens = driving && runsLoopNext(input) ? chatContextTokens(input) : undefined;
+      // Measured at every next, so an autonomous run's growth and its compactions (drops) show in the log.
+      if (state && tokens !== undefined) await core.event('context_size', { sessionId: session, tokens, stage: state.stage, autonomous: Boolean(state.autonomy && !state.autonomy.handedOverAt) });
       // The driver starts the next stage in a fresh chat once this one has grown large.
-      const reset = state?.lock?.sessionId === session ? contextResetDecision(state, input, chatContextTokens(input)) : undefined;
+      const reset = driving ? contextResetDecision(state, input, tokens) : undefined;
       if (reset && session) {
         await note({ kind: 'ended', by: 'stop', sessionId: session });
         await core.pause('Paused to continue in a fresh chat: the previous chat had grown large. Resume with /clear (Codex: a new thread) and the research-loop skill; the loop rebuilds from the files.');
@@ -470,6 +474,14 @@ async function runLockedHook(event: string, root: string, core: ResearchLoopCore
       await core.touch(session);
       await note({ kind: 'active', sessionId: session });
       process.stdout.write(stopBlockOutput(decision.reason ?? 'Continue the research loop.') + '\n');
+      return;
+    }
+    case 'PreCompact': {
+      // Only the driver's chat: its summary keeps what no file records and drops what the loop rebuilds.
+      const instructions = mayDrive ? compactInstructions(state) : undefined;
+      if (!instructions || !state) return;
+      await core.event('context_compacted', { sessionId: session, trigger: typeof input.trigger === 'string' ? input.trigger : undefined, tokens: chatContextTokens(input), stage: state.stage, autonomous: Boolean(state.autonomy && !state.autonomy.handedOverAt) });
+      process.stdout.write(instructions + '\n');
       return;
     }
     case 'SessionEnd': {

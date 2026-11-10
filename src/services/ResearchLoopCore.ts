@@ -99,6 +99,8 @@ const EXTENSION_LISTED = 10;
 /** Selection passes after auto approvals; each pass approves at least one request, so this only guards against surprises. */
 const MAX_AUTO_PASSES = 16;
 const EMPTY_HASH = crypto.createHash('sha256').update('').digest('hex');
+/** A save of an idea identical to one saved this recently is taken as a retry of that save. */
+const IDEA_RETRY_WINDOW_MS = 10 * 60 * 1000;
 /** Stages whose outcome rests on what they read: their inputs are frozen when they begin and compared at the report. */
 const FROZEN_STAGES = new Set<LoopStage>(['execute', 'verify_proof', 'verify_node', 'verify_counterexample', 'verify_construction']);
 
@@ -322,14 +324,18 @@ export class ResearchLoopCore {
     const inputs = state?.current.inputs;
     if (!state || !inputs?.length || !FROZEN_STAGES.has(state.stage)) return [];
     const target = state.stage === 'verify_node' ? state.current.node?.id : state.current.assetId;
+    return this.changedInputs(inputs.filter((input) => input.id !== target));
+  }
+
+  /** The frozen inputs whose file no longer has the frozen digest. */
+  private async changedInputs(inputs: FrozenInput[]): Promise<FrozenInput[]> {
     const changed: FrozenInput[] = [];
-    for (const input of inputs) if (input.id !== target && await this.inputDigest(input.file, input.part, input.kind) !== input.digest) changed.push(input);
+    for (const input of inputs) if (await this.inputDigest(input.file, input.part, input.kind) !== input.digest) changed.push(input);
     return changed;
   }
 
   /** The frozen statement digests of what `id` rests on, as a proof's dependency_digests; undefined when one was missing. */
-  private frozenDependencies(id: string): Record<string, string> | undefined {
-    const inputs = this.state?.current.inputs;
+  private frozenDependencies(id: string, inputs = this.state?.current.inputs): Record<string, string> | undefined {
     if (!inputs) return undefined;
     const deps = inputs.filter((input) => input.id !== id && input.part === 'statement');
     if (deps.some((input) => !input.digest)) return undefined;
@@ -1786,8 +1792,14 @@ export class ResearchLoopCore {
     if (!body.trim()) throw new Error('Idea text is required.');
     const assetIds = new Set((await this.files.listFiles(this.paths.assets)).map((file) => path.posix.basename(file, '.md')));
     for (const asset of relatedAssets) if (!assetIds.has(asset)) throw new Error(`Unknown related asset: ${asset}`);
-    const ideaId = `idea_${this.id().replace(/-/g, '').slice(0, 12)}`;
     const raw = stringifyMarkdown(`\n${body.trim()}\n`, { type: 'idea', title: title.trim() || 'Untitled idea', status: 'draft', idea_kind: ideaKind, origin, related_assets: relatedAssets, tags, ...extra });
+    // A retried call (a client timeout, a transport resend) must not save the idea twice: the same idea saved moments ago is that save.
+    const since = new Date(Date.parse(this.now()) - IDEA_RETRY_WINDOW_MS).toISOString();
+    for (const event of (await this.recentEvents(50, (item) => item.type === 'idea_saved' && String(item.at ?? '') >= since)).reverse()) {
+      const earlier = `${this.paths.ideas}/${String(event.ideaId)}.md`;
+      if (await this.files.readFile(earlier).catch(() => '') === raw) { await this.event('idea_repeated', { ideaId: event.ideaId }); return String(event.ideaId); }
+    }
+    const ideaId = `idea_${this.id().replace(/-/g, '').slice(0, 12)}`;
     await this.files.writeFile(`${this.paths.ideas}/${ideaId}.md`, raw);
     await this.event('idea_saved', { ideaId, relatedAssets, origin });
     return ideaId;
@@ -2258,6 +2270,9 @@ export class ResearchLoopCore {
     const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
     const file = checkPackPath(node.id);
     await this.files.writeFile(file, rendered.text);
+    // What this check reads, frozen with its pack: the verdict is recorded only if these are unchanged.
+    const inputs = await this.freezeInputs('verify_node', { stageStartedAt: this.now(), node }) ?? [];
+    await this.files.writeFile(checkInputsPath(node.id), JSON.stringify({ node, inputs }, null, 2) + '\n');
     const instruction = `Check ${nodeCheckWhat(node)}. Read only the pack ${file} and what you request with ${LOOP_COMMAND} show <id> [--section Heading]. Change no file. Record the verdict with ${LOOP_COMMAND} check verdict ${node.id} confirmed --summary "<what you checked>" or ${LOOP_COMMAND} check verdict ${node.id} rejected --summary "<the first problem: what is wrong and what would fix it>".`;
     return { file, tokens: rendered.tokens, instruction };
   }
@@ -2267,7 +2282,19 @@ export class ResearchLoopCore {
     if (!summary.trim()) throw new Error('Give the verdict in --summary: what you checked, or the first problem and what would fix it.');
     const { node, raw, skip } = await this.checkTargetOf(id);
     if (!node) throw new Error(`${id}: nothing to check (${skip}).`);
-    await this.writeCheckVerdict(node, raw, verdict, summary.trim(), 'extraction');
+    // The verdict covers what the check task froze; anything changed since (the node itself included: the checker changes no file) voids it.
+    let frozen: { node: NodeCheckTarget; inputs: FrozenInput[] } | undefined;
+    try { frozen = JSON.parse(await this.files.readFile(checkInputsPath(id))) as { node: NodeCheckTarget; inputs: FrozenInput[] }; } catch { frozen = undefined; }
+    if (frozen) {
+      const changed = frozen.node.mode !== node.mode ? frozen.inputs.filter((input) => input.id === id) : await this.changedInputs(frozen.inputs);
+      if (changed.length) {
+        const names = [...new Set(changed.map((input) => input.id))].join(', ');
+        await this.event('inputs_changed', { check: id, changed: changed.map((input) => `${input.id}#${input.part}`) });
+        throw new Error(`${names} changed since the check of ${id} began, so this verdict covers only the earlier version and is not recorded. Run ${LOOP_COMMAND} check next again for a fresh check of the current version. This is someone else's change: do not revert it.`);
+      }
+    }
+    await this.writeCheckVerdict(node, raw, verdict, summary.trim(), 'extraction', frozen && node.mode === 'proof' ? this.frozenDependencies(id, frozen.inputs) ?? {} : undefined);
+    if (frozen && this.files.deleteFile) await this.files.deleteFile(checkInputsPath(id));
     return this.afterCheckVerdict(id, verdict, summary.trim(), `Run ${LOOP_COMMAND} check next for what remains.`);
   }
 
@@ -4464,6 +4491,11 @@ function changedDigests(stamped: unknown, current: Record<string, string>): stri
 /** Where research-loop check writes a pack: never the loop's own pack, which a running loop reads. */
 function checkPackPath(id: string): string {
   return `${STATE_DIR}/checks/${id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`;
+}
+
+/** Beside an extraction check's pack: what the check reads, frozen when the task was written. */
+function checkInputsPath(id: string): string {
+  return checkPackPath(id).replace(/\.md$/, '.inputs.json');
 }
 
 const coverageTarget = (source: string) => source.trim();

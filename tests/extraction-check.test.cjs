@@ -306,3 +306,21 @@ test('the teaching chat counts a manuscript proof as verified once its check con
   f.map.set(NATURAL, definition('A natural number is a positive member of N.'));
   assert.deepEqual(await verified(), []);
 });
+
+test('an extraction check whose inputs change before its verdict is not recorded; a fresh check is', async () => {
+  const { statementDigest } = load('../src/domain/digests.ts');
+  const f = fixture(settings(), { [NATURAL]: definition(), [MAIN]: theorem() });
+  await f.core.extractionCheckTask({ id: 'main_theorem', mode: 'proof' });
+  await f.core.extractionCheckTask({ id: 'natural', mode: 'definition' });
+  // The checker read the old definition; the researcher sharpens it before the verdicts come back.
+  f.map.set(NATURAL, definition('A natural number is a positive member of N.'));
+  await assert.rejects(f.core.recordExtractionCheck('main_theorem', 'confirmed', 'Every step follows.'), /natural changed since the check of main_theorem began[\s\S]*do not revert it/);
+  await assert.rejects(f.core.recordExtractionCheck('natural', 'confirmed', 'Well formed.'), /natural changed since the check of natural began/);
+  assert.deepEqual(decisions(f, 'proof_check'), []);
+  assert.deepEqual(decisions(f, 'node_check'), []);
+  // A fresh task freezes the current version, and the verdict is stamped with what it read.
+  await f.core.extractionCheckTask({ id: 'main_theorem', mode: 'proof' });
+  await f.core.recordExtractionCheck('main_theorem', 'confirmed', 'Every step follows.');
+  assert.equal(decisions(f, 'proof_check')[0].data.dependency_digests.natural, statementDigest(f.map.get(NATURAL)));
+  assert.equal(f.map.has('.research-assistant-loop/checks/main_theorem.inputs.json'), false, 'the frozen inputs go with the recorded verdict');
+});

@@ -13,7 +13,7 @@ function load(file) {
   return module.exports;
 }
 
-const { stopDecision, preToolUseDecision, contextTokensFrom, contextResetDecision, isHandbackPrompt, CONTEXT_RESET_TOKENS } = load('../src/services/ResearchLoopHooks.ts');
+const { stopDecision, preToolUseDecision, contextTokensFrom, contextResetDecision, compactInstructions, isHandbackPrompt, CONTEXT_RESET_TOKENS } = load('../src/services/ResearchLoopHooks.ts');
 const { newState, stageSignature } = load('../src/services/ResearchLoopModel.ts');
 const { nextAgentActivity } = load('../src/services/AgentActivity.ts');
 const paths = { researchRoot: 'research', projectMd: 'research/project.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans' };
@@ -311,6 +311,47 @@ test('a large driver chat pauses the loop before next and frees the lock; hand-b
     assert.match(denied.stdout, /\/clear/);
     assert.equal(state().status, 'paused');
     assert.equal(state().lock, undefined, 'a fresh chat may resume without taking over');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the driver\'s compaction summary keeps what no file records; nothing without a loop', () => {
+  const text = compactInstructions(running());
+  assert.match(text, /stage plan, asset main_theorem/);
+  assert.match(text, /research-loop\.cjs next/);
+  assert.match(text, /researcher said in this chat that no file records/);
+  assert.match(text, /Leave out: proof text/);
+  assert.doesNotMatch(text, /autonomous/);
+  assert.match(compactInstructions(running({ autonomy: { startedAt: 'then', spent: 0 } })), /no one is watching: continue without asking/);
+  assert.match(compactInstructions(running({ status: 'paused' })), /\(paused, stage plan/);
+  assert.equal(compactInstructions(undefined), undefined);
+  assert.equal(compactInstructions(running({ status: 'stopped' })), undefined);
+});
+
+test('the driver\'s chat size is logged at every next, and its compactions with their instructions; other chats are not', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'research-loop-measure-'));
+  try {
+    const write = (relative, content) => { fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true }); fs.writeFileSync(path.join(root, relative), content); };
+    write('.research-assistant.json', JSON.stringify({ version: 1, layout: 'overleaf-shared', latex: { projectRoot: '.', main: 'main.tex', bibliography: 'references.bib', macros: [], notations: null, sections: 'sections' }, research: { root: 'research', project: 'research/project.md', paperIndex: 'research/papers.md', assets: 'research/assets', definitions: 'research/definitions', ideas: 'research/ideas', plans: 'research/plans', papers: 'research/papers', localSourcePdfs: 'research-local/raw_papers' } }));
+    write('research/project.md', '# Project\n');
+    const transcript = (tokens) => { const file = path.join(root, `t-${tokens}.jsonl`); fs.writeFileSync(file, JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1, cache_read_input_tokens: tokens, cache_creation_input_tokens: 0 } } }) + '\n'); return file; };
+    const hook = (event, session, input = {}) => spawnSync(process.execPath, [cli, 'hook', event], { encoding: 'utf8', input: JSON.stringify({ cwd: root, session_id: session, ...input }) });
+    const events = (type) => fs.readFileSync(path.join(root, '.research-assistant-loop/events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((event) => event.type === type);
+    const next = { tool_name: 'Bash', tool_input: { command: 'node .claude/skills/research-loop/scripts/research-loop.cjs next' } };
+    assert.equal(spawnSync(process.execPath, [cli, 'start', '--provider', 'claude', '--goal', 'Prove', '--project', root], { encoding: 'utf8' }).status, 0);
+    hook('UserPromptSubmit', 'driver', { prompt: '/research-loop' });
+    hook('PreToolUse', 'driver', { ...next, transcript_path: transcript(40000) });
+    hook('PreToolUse', 'driver', { tool_name: 'Bash', tool_input: { command: 'ls' }, transcript_path: transcript(41000) });
+    hook('PreToolUse', 'driver', { ...next, transcript_path: transcript(90000) });
+    hook('PreToolUse', 'other', { tool_name: 'Bash', tool_input: { command: 'ls' }, transcript_path: transcript(70000) });
+    assert.deepEqual(events('context_size').map((event) => [event.sessionId, event.tokens, event.autonomous]), [['driver', 40001, false], ['driver', 90001, false]], 'only the driver\'s next is measured');
+
+    const compacted = hook('PreCompact', 'driver', { trigger: 'auto', transcript_path: transcript(150000) });
+    assert.equal(compacted.status, 0);
+    assert.match(compacted.stdout, /^Research loop: this chat drives the research loop/);
+    assert.match(compacted.stdout, /Leave out: proof text/);
+    assert.deepEqual(events('context_compacted').map((event) => [event.sessionId, event.trigger, event.tokens]), [['driver', 'auto', 150001]]);
+    assert.equal(hook('PreCompact', 'other', { trigger: 'manual', transcript_path: transcript(150000) }).stdout, '', 'another chat compacts as it likes');
+    assert.equal(events('context_compacted').length, 1);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

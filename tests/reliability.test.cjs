@@ -100,3 +100,19 @@ test('F10: a file deleted during a stage is reported and fails the stage, except
   assert.ok(problems.some((problem) => problem.startsWith(`${paths.definitions}/natural.md: deleted during stage`)), problems.join('\n'));
   assert.ok(!problems.some((problem) => problem.includes('try_induction')), problems.join('\n'));
 });
+
+test('F12: saving the same idea again moments later returns the first save; a different idea, or the same one later, is new', async () => {
+  let clock = Date.parse('2026-11-09T10:00:00Z');
+  const files = memoryFiles({ [paths.projectMd]: '# Project\n', [SETTINGS]: JSON.stringify({ version: 1 }) });
+  const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}`, now: () => new Date(clock).toISOString() });
+  const first = await core.saveIdea('Try induction', 'Induct on n.', [], 'agent', ['route'], 'approach');
+  clock += 30_000;
+  assert.equal(await core.saveIdea('Try induction', 'Induct on n.', [], 'agent', ['route'], 'approach'), first, 'a retried call');
+  const ideas = () => [...files.map.keys()].filter((file) => file.startsWith(`${paths.ideas}/`));
+  assert.equal(ideas().length, 1);
+  assert.notEqual(await core.saveIdea('Try induction', 'Induct on n, strongly.', [], 'agent', ['route'], 'approach'), first);
+  assert.notEqual(await core.saveIdea('Try induction', 'Induct on n.', [], 'researcher', ['route'], 'approach'), first, 'whose idea it is matters');
+  clock += 11 * 60_000;
+  assert.notEqual(await core.saveIdea('Try induction', 'Induct on n.', [], 'agent', ['route'], 'approach'), first, 'the same idea much later is deliberate');
+  assert.equal(ideas().length, 4);
+});

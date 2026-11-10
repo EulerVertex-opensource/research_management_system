@@ -43,6 +43,7 @@ for (const id of ['claude', 'codex']) {
     assert.equal(parsed.hooks.PreToolUse[0].matcher, spec.writeToolMatcher);
     assert.equal(parsed.hooks.SessionStart[0].matcher, 'startup|resume|clear|compact');
     assert.equal(Boolean(parsed.hooks.SessionEnd?.[0]?.hooks[0].command.includes(script)), spec.sessionEndHook);
+    assert.equal(Boolean(parsed.hooks.PreCompact?.[0]?.hooks[0].command.includes(script)), spec.preCompactHook);
     assert.equal(Boolean(parsed.permissions), spec.hooksFileHasPermissions);
     if (spec.hooksFileHasPermissions) assert.ok(parsed.permissions.allow.includes('mcp__research-assistant'));
     assert.equal(buildHooksFile(id, once, script), once);
