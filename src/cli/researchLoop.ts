@@ -6,6 +6,8 @@ import { execFile } from 'child_process';
 import { ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, isWaitingForHuman, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
+import { loadUsageView } from '../services/UsageCollector';
+import { spanLabel, usageSpans, usageText } from '../domain/usageView';
 import { CONTEXT_RESET_TOKENS, GUARD_PATH, compactInstructions, runsLoopNext, GuardRecord, HookInput, SESSIONS_PATH, SessionRole, contextOutput, contextResetDecision, contextTokensFrom, denyOutput, guardDecision, isHandbackPrompt, loopRemarkDecision, parseSessionRoles, preToolUseDecision, researchReads, roleSignal, sessionRole, stopBlockOutput, stopDecision, systemMessageOutput, teachingToolDecision, waitingContextNote, withSessionRole, nextSessionRole, writingToolDecision, WRITING_NOTE } from '../services/ResearchLoopHooks';
 import { TEACH_PROMPT_PATTERN } from '../domain/understandingLevels';
 import { hasContextPack } from '../services/ResearchContext';
@@ -95,6 +97,7 @@ ${PACKAGE_USAGE}
   migrate-approvals   (split research/approvals.json into one file per approved target)
   restore-approvals   (re-apply status: approved where the researcher's approval record still matches the content)
   hook <SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|PreCompact|Stop|SessionEnd>   (reads hook JSON on stdin)
+  usage [--list] [--span <id or number from --list>] [--json]   (token usage of the loop's chats and their workers, read from the agents' own transcripts)
   precommit   (git pre-commit hook: refuse commits that add research file problems)
 Global: --project ROOT (default: nearest .research-assistant.json above cwd)`;
 
@@ -419,7 +422,7 @@ async function runLockedHook(event: string, root: string, core: ResearchLoopCore
       const driving = Boolean(session && state?.lock?.sessionId === session);
       const tokens = driving && runsLoopNext(input) ? chatContextTokens(input) : undefined;
       // Measured at every next, so an autonomous run's growth and its compactions (drops) show in the log.
-      if (state && tokens !== undefined) await core.event('context_size', { sessionId: session, tokens, stage: state.stage, autonomous: Boolean(state.autonomy && !state.autonomy.handedOverAt) });
+      if (state && tokens !== undefined) await core.event('context_size', { sessionId: session, transcriptPath: input.transcript_path, tokens, stage: state.stage, autonomous: Boolean(state.autonomy && !state.autonomy.handedOverAt) });
       // The driver starts the next stage in a fresh chat once this one has grown large.
       const reset = driving ? contextResetDecision(state, input, tokens) : undefined;
       if (reset && session) {
@@ -480,7 +483,7 @@ async function runLockedHook(event: string, root: string, core: ResearchLoopCore
       // Only the driver's chat: its summary keeps what no file records and drops what the loop rebuilds.
       const instructions = mayDrive ? compactInstructions(state) : undefined;
       if (!instructions || !state) return;
-      await core.event('context_compacted', { sessionId: session, trigger: typeof input.trigger === 'string' ? input.trigger : undefined, tokens: chatContextTokens(input), stage: state.stage, autonomous: Boolean(state.autonomy && !state.autonomy.handedOverAt) });
+      await core.event('context_compacted', { sessionId: session, transcriptPath: input.transcript_path, trigger: typeof input.trigger === 'string' ? input.trigger : undefined, tokens: chatContextTokens(input), stage: state.stage, autonomous: Boolean(state.autonomy && !state.autonomy.handedOverAt) });
       process.stdout.write(instructions + '\n');
       return;
     }
@@ -630,7 +633,7 @@ async function main(): Promise<void> {
   const session = typeof args.flags.session === 'string' ? args.flags.session : undefined;
   const out = (value: unknown) => process.stdout.write((typeof value === 'string' ? value : JSON.stringify(value, null, 2)) + '\n');
   // The agent drives the loop through these commands: each is a sign of life (status is also what a researcher runs in a terminal).
-  const alive = () => (command !== 'status' && command !== 'teach' && command !== 'check' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
+  const alive = () => (command !== 'status' && command !== 'teach' && command !== 'check' && command !== 'usage' && core.current?.status === 'running' && !stale ? noteAgentActivity(new NodeLoopFiles(root), { kind: 'active', sessionId: session }) : Promise.resolve());
   await alive();
   const run = async (): Promise<void> => {
   switch (command) {
@@ -672,6 +675,20 @@ async function main(): Promise<void> {
       const instruction = next.stage === 'waiting' || next.stage === 'ready' ? `${next.instruction}\n${LINK_HINT}` : next.instruction;
       if (json) out({ stage: next.stage, blocked: next.blocked, instruction, brief: next.brief });
       else out(`Stage: ${next.stage}\n${instruction}`);
+      return;
+    }
+    case 'usage': {
+      const events = await core.recentEvents(Number.MAX_SAFE_INTEGER);
+      const spans = usageSpans(events);
+      if (args.flags.list === true) {
+        out(json ? spans : spans.length ? spans.map((span, index) => `${index + 1}. ${span.kind === 'autonomous' ? '   ' : ''}${spanLabel(span)}  [${span.id}]`).join('\n') : 'No research loop run yet.');
+        return;
+      }
+      const wanted = typeof args.flags.span === 'string' ? args.flags.span : undefined;
+      const span = wanted && /^\d+$/.test(wanted) ? spans[Number(wanted) - 1]?.id : wanted;
+      if (wanted && !spans.some((item) => item.id === span)) throw new Error(`No span ${wanted}; see research-loop usage --list.`);
+      const view = await loadUsageView({ root, events, span, resetTokens: CONTEXT_RESET_TOKENS });
+      out(json ? view : usageText(view));
       return;
     }
     case 'context': {
@@ -991,7 +1008,7 @@ async function main(): Promise<void> {
 }
 
 /** Read-only commands (and teach, which writes no loop state and may wait for the researcher's answer at a terminal). */
-const UNLOCKED_COMMANDS = new Set(['status', 'show', 'context', 'teach']);
+const UNLOCKED_COMMANDS = new Set(['status', 'show', 'context', 'teach', 'usage']);
 
 main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

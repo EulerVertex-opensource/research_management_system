@@ -20,6 +20,7 @@ import { OverviewPage } from './graph/OverviewPage';
 import { NeedsYouPage } from './graph/NeedsYouPage';
 import { ProgressView } from './graph/ProgressView';
 import { ActivityPage, buttonStyle } from './graph/AttentionList';
+import type { UsageState } from './graph/UsageCard';
 import { CoverageMatrix } from './graph/CoverageMatrix';
 import { DEFAULT_OPTIONS, ViewOptions, waitingItems } from './graph/graphModel';
 import { TechnicalDetails } from './technical';
@@ -226,6 +227,8 @@ export function App() {
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   // `at` restarts the timer when the same kind of prompt is copied again.
+  const [usage, setUsage] = useState<UsageState | undefined>();
+  const [usageSpan, setUsageSpan] = useState<string | undefined>();
   const [copied, setCopied] = useState<{ prompt: 'instruction' | 'teaching'; at: number } | null>(null);
   useEffect(() => {
     if (!copied) return;
@@ -255,6 +258,9 @@ export function App() {
         break;
       case 'manuscriptStatus':
         dispatch({ type: 'MANUSCRIPT_STATUS', status: msg.status });
+        break;
+      case 'usageData':
+        setUsage({ view: msg.view, error: msg.error });
         break;
       case 'graphData':
         dispatch({ type: 'GRAPH_DATA', payload: msg.payload });
@@ -333,6 +339,15 @@ export function App() {
   useEffect(() => {
     if (state.activeView === 'library') send({ type: 'getPackages' });
   }, [state.activeView, state.nodes, send]);
+
+  // The Usage card reads transcripts on the extension side: asked for while Activity is open, and refreshed each minute.
+  useEffect(() => {
+    if (state.activeView !== 'activity') return;
+    const ask = () => send({ type: 'getUsage', span: usageSpan });
+    ask();
+    const timer = setInterval(ask, 60_000);
+    return () => clearInterval(timer);
+  }, [state.activeView, usageSpan, send]);
 
   // A package dialog asks for its first preview when it opens.
   useEffect(() => {
@@ -831,7 +846,7 @@ export function App() {
               ? <ProgressView payload={state.graph} options={resultsOptions} onOptions={setResultsOptions} selectedId={resultsSelected} onSelect={setResultsSelected} onNavigate={openNodeById} onAction={graphAction} />
               : <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Loading the results…</div>
           ) : state.activeView === 'activity' ? (
-            <ActivityPage entries={state.graph?.history} onShow={showInResults} />
+            <ActivityPage entries={state.graph?.history} onShow={showInResults} usage={usage} usageSpan={usageSpan} onUsageSpan={setUsageSpan} />
           ) : state.activeView === 'settings' ? (
             <SettingsView
               settings={state.settings}

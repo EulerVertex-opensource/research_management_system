@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { AttentionButton, AttentionPriority, GraphAction, HistoryEntry } from '../../src/models/graph';
 import { CHAT_BUTTON_HINT } from '../../src/domain/copy';
 import { CITED_COLOR, COLOR, TONE_COLOR } from './colors';
+import { UsageCard, UsageState } from './UsageCard';
 
 export const GROUP_COLOR: Record<AttentionPriority, string> = { 0: COLOR.error, 1: COLOR.waiting, 2: COLOR.link, 3: CITED_COLOR, 4: COLOR.muted };
 
@@ -84,12 +85,13 @@ export function HistoryList({ entries, onShow }: { entries: HistoryEntry[]; onSh
   );
 }
 
-/** The Activity tab: what the agent and the researcher did, newest first. */
-export function ActivityPage({ entries, onShow }: { entries: HistoryEntry[] | undefined; onShow: (id: string) => void }) {
+/** The Activity tab: where the tokens went, then what the agent and the researcher did, newest first. */
+export function ActivityPage({ entries, onShow, usage, usageSpan, onUsageSpan }: { entries: HistoryEntry[] | undefined; onShow: (id: string) => void; usage?: UsageState; usageSpan?: string; onUsageSpan: (span: string) => void }) {
   return (
     <div style={{ height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '16px 18px 24px', background: COLOR.canvas }}>
       <div style={{ maxWidth: 820, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Activity</h2>
+        <UsageCard usage={usage} span={usageSpan} onSpan={onUsageSpan} onShow={onShow} />
         <section style={{ border: `1px solid ${COLOR.border}`, borderRadius: 8, background: COLOR.card, padding: '12px 16px' }}>
           {entries ? <HistoryList entries={entries} onShow={onShow} /> : <div style={{ fontSize: 13, opacity: 0.6 }}>Loading…</div>}
         </section>

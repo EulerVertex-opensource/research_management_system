@@ -24,6 +24,9 @@ import { toIdeaKind } from '../domain/nodeKinds';
 import { findNodeFile, locateNodeFile } from '../domain/registry';
 import { ResearchNode } from '../models/types';
 import { GraphAction, GraphPayload, LoopHealth } from '../models/graph';
+import { UsageView } from '../models/usage';
+import { loadUsageView } from './UsageCollector';
+import { CONTEXT_RESET_TOKENS } from './ResearchLoopHooks';
 import { collectGraphPayload } from './GraphViewModel';
 import { computeLoopHealth, HealthNode } from '../domain/loopHealth';
 import { isTimelineEvent } from '../domain/history';
@@ -574,6 +577,14 @@ export class LoopHost implements vscode.Disposable {
       }
       return { decision: 'later', text: '' };
     }
+  }
+
+  // ---------- dashboard usage ----------
+
+  /** Token usage of the loop's chats and their workers, from the agents' own transcripts (read incrementally). */
+  async usageView(span: string | undefined, title: (id: string) => string): Promise<UsageView> {
+    const events = this.core ? await this.core.recentEvents(Number.MAX_SAFE_INTEGER) : [];
+    return loadUsageView({ root: this.files.rootUri.fsPath, events, span, resetTokens: CONTEXT_RESET_TOKENS, title });
   }
 
   // ---------- dashboard graph ----------

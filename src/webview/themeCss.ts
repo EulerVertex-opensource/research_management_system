@@ -26,6 +26,11 @@ export const THEME_CSS = `
     --ra-danger: #ba1a1a;         /* danger-600: stuck, no longer holds */
     --ra-definition: #0b838e;     /* conceptual-600 */
     --ra-cited: #8958a0;          /* rigorous-600 */
+    /* Chart series (categorical, fixed order; validated for color-vision deficiency on the card surface). */
+    --ra-series-1: #2a78d6;
+    --ra-series-2: #eb6834;
+    --ra-series-3: #1baf7a;
+    --ra-series-4: #eda100;
     /* Solid fills behind white text: the same in both themes. */
     --ra-primary-solid: #367293;
     --ra-primary-solid-hover: #2d5c77;
@@ -43,5 +48,9 @@ export const THEME_CSS = `
     --ra-danger: #f55555;         /* danger-600 (dark) */
     --ra-definition: #47dbd3;     /* conceptual-600 (dark) */
     --ra-cited: #b993cc;          /* rigorous-600 (dark) */
+    --ra-series-1: #3987e5;
+    --ra-series-2: #d95926;
+    --ra-series-3: #199e70;
+    --ra-series-4: #c98500;
   }
 `;

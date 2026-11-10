@@ -1,4 +1,5 @@
 import type { GraphAction, GraphPayload } from './graph';
+import type { UsageView } from './usage';
 import type { SettingsErrors, SettingsPatch, SettingsPayload } from './settings';
 import type { SyncBadge, SyncNotice } from './sync';
 import type { CitationView, ExportPreviewView, ExportRequest, ImportPreviewView, PackageModal, PackagesPayload } from './packages';
@@ -15,6 +16,8 @@ export type ExtensionMessage =
   | { type: 'papersData'; papers: PaperEntry[] }
   | { type: 'manuscriptStatus'; status: ManuscriptStatus }
   | { type: 'graphData'; payload: GraphPayload }
+  /** Answer to `getUsage`: the Activity page's Usage card (`error` when the transcripts could not be read). */
+  | { type: 'usageData'; view?: UsageView; error?: string }
   /** Switch the dashboard to a view, e.g. the Overview after a status bar click. */
   | { type: 'showView'; view: 'graph' }
   /** Open one node's page, e.g. from a link in the agent chat. */
@@ -76,6 +79,8 @@ export type WebviewMessage =
   | { type: 'applyLatexBuildSettings' }
   | { type: 'installLatexWorkshop' }
   | { type: 'getGraph' }
+  /** The Usage card for a span (a run or an autonomous stretch; the newest when absent). */
+  | { type: 'getUsage'; span?: string }
   | { type: 'graphAction'; request: GraphAction }
   | { type: 'getSettings' }
   | { type: 'updateSettings'; requestId: string; patch: SettingsPatch }

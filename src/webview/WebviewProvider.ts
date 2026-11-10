@@ -824,6 +824,16 @@ export class WebviewProvider {
           break;
         }
 
+        case 'getUsage': {
+          const index = this.nodeIndex;
+          try {
+            this.send({ type: 'usageData', view: await this.loopHost.usageView(msg.span, (id) => index?.getById(id)?.title ?? id) });
+          } catch (error: unknown) {
+            this.send({ type: 'usageData', error: error instanceof Error ? error.message : String(error) });
+          }
+          break;
+        }
+
         case 'graphAction': {
           await this.loopHost.graphAction(msg.request);
           if (msg.request.action === 'agent' || msg.request.action === 'teach') this.send({ type: 'copied', prompt: msg.request.action === 'teach' ? 'teaching' : 'instruction' });

@@ -344,6 +344,7 @@ test('the driver\'s chat size is logged at every next, and its compactions with 
     hook('PreToolUse', 'driver', { ...next, transcript_path: transcript(90000) });
     hook('PreToolUse', 'other', { tool_name: 'Bash', tool_input: { command: 'ls' }, transcript_path: transcript(70000) });
     assert.deepEqual(events('context_size').map((event) => [event.sessionId, event.tokens, event.autonomous]), [['driver', 40001, false], ['driver', 90001, false]], 'only the driver\'s next is measured');
+    assert.equal(events('context_size')[0].transcriptPath, transcript(40000), 'the transcript is kept, so usage can be read from it later');
 
     const compacted = hook('PreCompact', 'driver', { trigger: 'auto', transcript_path: transcript(150000) });
     assert.equal(compacted.status, 0);
