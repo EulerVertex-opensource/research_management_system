@@ -102,6 +102,7 @@ export function describeEvent(event: LoopEvent, title: (id: string) => string, t
       const into = Array.isArray(event.into) ? event.into.map(String) : [];
       return { text: `An idea plans kept relying on became the draft lemma ${title(id)}${into.length ? `, which ${into.map(title).join(', ')} now ${into.length === 1 ? 'depends' : 'depend'} on` : ''}.`, tone: 'info', target: id };
     }
+    case 'batch_started': return { text: `Started working on ${plural(Array.isArray(event.items) ? event.items.length : 0, 'result')} side by side: ${(Array.isArray(event.items) ? event.items : []).map((item) => title(text((item as Record<string, unknown>).assetId))).join(', ')}.`, tone: 'info' };
     case 'routes_proposed': return entry(`Planned ${plural(Array.isArray(event.routes) ? event.routes.length : 0, 'route')} to ${name}.`, 'info');
     case 'route_lemmas_merged': return { text: `Two routes need the same lemma: ${title(text(event.dup))} is ${title(text(event.keep))}.`, tone: 'info', target: text(event.keep) };
     case 'route_implied': return { text: `${title(text(event.strong))} implies ${title(text(event.weak))}, so proving it also serves the routes that need ${title(text(event.weak))}.`, tone: 'info', target: text(event.weak) };

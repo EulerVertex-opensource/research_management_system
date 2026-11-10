@@ -97,7 +97,8 @@ export function computeLoopHealth(input: HealthInput): LoopHealth {
       ifIgnored: 'Nothing happens until you start it.', statusBar: { text: '', level: 'normal' }, signature: 'idle' };
   }
 
-  const doing = stageText(state.stage, state.current.assetId ? title(state.current.assetId) : undefined, state.current.search?.mode);
+  const batchOpen = state.stage === 'batch' ? (state.current.batch?.items ?? []).filter((item) => !item.done) : [];
+  const doing = batchOpen.length ? `working on ${batchOpen.map((item) => title(item.assetId)).join(', ')} side by side` : stageText(state.stage, state.current.assetId ? title(state.current.assetId) : undefined, state.current.search?.mode);
 
   if (state.status === 'paused') {
     const reason = state.lastError ?? '';

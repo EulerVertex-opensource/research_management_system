@@ -8,7 +8,7 @@ import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ProjectPaths } from '../models/types';
 import {
   AUTO_HOLDS_PATH, AgentProvider, ApprovalFile, ApprovalKind, ApprovalRecord, ApprovalRequest, ASSESSMENT_PATH, CONTEXT_MANIFEST_PATH, CONTEXT_PACK_PATH, EVENTS_PATH, GoalAssessment, LoopFiles, LoopQuestion, LoopStage, LoopState,
-  FrozenInput, LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, ROUTE_STAGES, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
+  BATCH_STAGES, BatchItem, FrozenInput, LoopExtension, NodeCheckTarget, PackageApprovalNode, QuestionKind, ROUTE_STAGES, SEARCH_STAGES, SNAPSHOT_PATH, STATE_DIR, STATE_PATH, StageReport, WaitingReason, approvalDigest, approvalRecordOf, isApproved, isWaitingForHuman, newState,
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { STATE_LOCK_PATH, StateLockOptions, acquireStateLock } from './StateLock';
@@ -237,8 +237,24 @@ export class ResearchLoopCore {
     return parsed.version === 2 ? parsed as LoopState : undefined;
   }
 
+  /**
+   * While one item of a batch reports: the batch's own `current`, which a save writes in place of the
+   * item's view (so state.json always holds the batch), and the stage the item's report moved on to.
+   */
+  private itemMode?: { batch: LoopState['current']; next?: LoopStage };
+  /** While one item of a batch reports (or the batch closes): the changed files its validation covers. */
+  private itemScope?: (file: string) => boolean;
+
   private async save(): Promise<void> {
     if (!this.state) return;
+    if (this.itemMode) {
+      const mode = this.itemMode;
+      const item = this.state;
+      this.itemMode = undefined;
+      this.state = { ...item, stage: 'batch', current: mode.batch };
+      try { await this.save(); } finally { item.revision = this.state.revision; item.updatedAt = this.state.updatedAt; this.state = item; this.itemMode = mode; }
+      return;
+    }
     if (this.lockDepth > 0) {
       // Under the lock nobody else may have saved since this core loaded: a different revision means a writer that skips the lock.
       let onDisk = 0;
@@ -413,10 +429,13 @@ export class ResearchLoopCore {
 
   private async setStage(stage: LoopStage, patch: Partial<LoopState['current']> = {}): Promise<void> {
     const state = this.require();
+    // An item of a batch moves on only in its own view: the batch stays the stage, and its snapshot stays put.
+    if (this.itemMode) { this.itemMode.next = stage; state.current = { ...state.current, ...patch }; await this.save(); return; }
     state.stage = stage;
     state.current = { ...state.current, ...patch, stageStartedAt: this.now(), baseCommit: await this.git?.head() };
     if (!SEARCH_STAGES.has(stage)) delete state.current.search;
     if (!ROUTE_STAGES.has(stage)) delete state.current.route;
+    if (stage !== 'batch') delete state.current.batch;
     if (stage !== 'verify_proof') delete state.current.recheck;
     if (stage !== 'verify_node') delete state.current.node;
     if (stage !== 'waiting') delete state.waitingOn;
@@ -2558,7 +2577,8 @@ export class ResearchLoopCore {
     return node ? { stage: 'verify_node', node } : selection;
   }
 
-  private async selectOnce(): Promise<Selection> {
+  /** `skip`: results another worker of a batch already has; selection passes over them. */
+  private async selectOnce(skip: ReadonlySet<string> = new Set()): Promise<Selection> {
     const state = this.require();
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     const approvals = (await this.approvals()).records;
@@ -2624,7 +2644,7 @@ export class ResearchLoopCore {
     const settled = new Set<string>();
     // What each result needs next, in the order met; the first in topological order is chosen below.
     const work = new Map<string, Selection>();
-    const offer = (id: string, selection: Selection) => { if (!work.has(id)) work.set(id, selection); };
+    const offer = (id: string, selection: Selection) => { if (!work.has(id) && !skip.has(id)) work.set(id, selection); };
     // Results worked on through routes (parallel routes), not by one plan after another.
     const routed = new Set<string>();
     const settings = await this.loopSettings();
@@ -2717,11 +2737,11 @@ export class ResearchLoopCore {
       else offer(id, { stage: 'plan', assetId: id });
     }
     let candidate: Selection | undefined;
-    const routing = routed.size ? { ...(await this.routeGraph({ assets, settled, examples, maxLive: settings.maxLiveRoutes })), work, routed, required, decisions, settings } : undefined;
+    const routing = routed.size ? { ...(await this.routeGraph({ assets, settled, examples, maxLive: settings.maxLiveRoutes })), work, routed, required, decisions, settings, skip } : undefined;
     for (const id of order) {
       if (routing && routed.has(id) && !routeOnly.has(id)) {
         const selection = await this.routeSelection(id, routing);
-        if (selection === 'reselect') return this.selectOnce();
+        if (selection === 'reselect') return this.selectOnce(skip);
         if (selection) { candidate = selection; break; }
         continue;
       }
@@ -2763,6 +2783,146 @@ export class ResearchLoopCore {
       ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
     ];
     return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
+  }
+
+  // ---------- batches: several results worked on at once ----------
+
+  /**
+   * What a selection takes, so the next worker of a batch passes over it: the route for a reduction or
+   * its check (several routes to one result are reduced side by side: each writes only its own plan),
+   * else the result.
+   */
+  private selectionKey(selection: Selection): string | undefined {
+    if (selection.stage === 'reduce' || selection.stage === 'verify_reduction') return `plan:${selection.planId}`;
+    if (selection.stage === 'verify_node') return selection.node.id;
+    return 'assetId' in selection ? selection.assetId : undefined;
+  }
+
+  /** One item of a batch from a selection of a stage a batch may hold; a plan that already exists is executed instead. */
+  private async batchItem(selection: Selection, item: number): Promise<BatchItem | undefined> {
+    if (!BATCH_STAGES.has(selection.stage)) return undefined;
+    if (selection.stage === 'verify_node') return { item, stage: 'verify_node', assetId: selection.node.id, node: selection.node };
+    if (!('assetId' in selection)) return undefined;
+    const assetId = selection.assetId;
+    if (selection.stage === 'plan') {
+      const pending = await this.pendingPlan(assetId);
+      if (!pending) return { item, stage: 'plan', assetId };
+      const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
+      return { item, stage: 'execute', assetId, planId: pending, ...(raw ? { statementDigest: statementDigest(raw) } : {}) };
+    }
+    if (selection.stage === 'verify_proof') {
+      if (selection.recheck?.length) await this.setAsideVerdict(selection.planId);
+      return { item, stage: 'verify_proof', assetId, planId: selection.planId, ...(selection.recheck?.length ? { recheck: selection.recheck } : {}) };
+    }
+    if (selection.stage === 'reduce' || selection.stage === 'verify_reduction') return { item, stage: selection.stage, assetId, planId: selection.planId };
+    return undefined;
+  }
+
+  /** What an item's stage sees as `current`: the batch's, narrowed to the item. */
+  private itemCurrent(item: BatchItem, base: LoopState['current']): LoopState['current'] {
+    const { batch: _batch, route: _route, search: _search, ...rest } = base;
+    return { ...rest, assetId: item.assetId, planId: item.planId, node: item.node, recheck: item.recheck, inputs: item.inputs, statementDigest: item.statementDigest };
+  }
+
+  /**
+   * With more than one worker allowed and the chosen stage one a batch may hold, gather more stages
+   * for other results (selection passing over the results already taken) and start a batch. Returns
+   * whether it did; one item alone runs as an ordinary stage.
+   */
+  private async startBatch(first: Selection): Promise<boolean> {
+    const workers = (await this.loopSettings()).parallelWorkers;
+    if (workers < 2) return false;
+    const head = await this.batchItem(first, 1);
+    if (!head) return false;
+    const items = [head];
+    const skip = new Set([this.selectionKey(first)!]);
+    for (let tries = 0; items.length < workers && tries < workers * 3; tries++) {
+      const next = await this.selectOnce(skip);
+      const key = this.selectionKey(next);
+      if (!key || skip.has(key)) break;
+      skip.add(key);
+      const item = await this.batchItem(next, items.length + 1);
+      if (item) items.push(item);
+    }
+    if (items.length < 2) return false;
+    await this.setStage('batch', { assetId: undefined, planId: undefined, batch: { items } });
+    const state = this.require();
+    for (const item of items) {
+      const inputs = await this.freezeInputs(item.stage, this.itemCurrent(item, state.current));
+      if (inputs) item.inputs = inputs;
+    }
+    await this.save();
+    await this.event('batch_started', { items: items.map((item) => ({ item: item.item, stage: item.stage, assetId: item.assetId })) });
+    return true;
+  }
+
+  /** The files an item owns among the changed ones: its target's proof (execute), its plan, or the plan it writes. */
+  private async itemOwned(item: BatchItem, files: string[]): Promise<Set<string>> {
+    const owned = new Set<string>();
+    for (const file of files) {
+      if (item.planId && file === `${this.paths.plans}/${item.planId}.md`) owned.add(file);
+      else if (item.stage === 'execute' && file === `${this.paths.assets}/${item.assetId}.md`) owned.add(file);
+      else if (item.stage === 'plan' && path.posix.dirname(file) === this.paths.plans) {
+        try { if (parseMarkdown(await this.files.readFile(file)).data.target_asset === item.assetId) owned.add(file); } catch { /* unreadable: the item's rules report it */ }
+      }
+    }
+    return owned;
+  }
+
+  /**
+   * Report one item of a batch: the item's stage runs its usual report against its own files only,
+   * as if it were the stage (no snapshot is retaken, so the other items' changes stay checked). The
+   * last item also checks that nothing outside the items changed, then the batch closes.
+   */
+  private async reportBatchItem(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
+    const state = this.require();
+    const batch = state.current.batch;
+    if (!batch) throw new Error(`No batch is open; run ${LOOP_COMMAND} next.`);
+    if (report.item === undefined) throw new Error(`A batch is open: report each item with --item <n> (open: ${batch.items.filter((entry) => !entry.done).map((entry) => entry.item).join(', ')}).`);
+    const item = batch.items.find((entry) => entry.item === report.item);
+    if (!item) throw new Error(`No item ${report.item} in this batch (items ${batch.items.map((entry) => entry.item).join(', ')}).`);
+    if (item.done) throw new Error(`Item ${item.item} was reported already (${item.done.outcome}).`);
+    const changes = await this.changedFiles();
+    const changed = [...changes.added, ...changes.modified, ...changes.removed];
+    const last = batch.items.every((entry) => entry === item || entry.done);
+    if (last) {
+      // Nothing but the items' own files (and ideas) may have changed during the batch.
+      const ownedByAny = new Set<string>();
+      for (const entry of batch.items) for (const file of await this.itemOwned(entry, changed)) ownedByAny.add(file);
+      this.itemScope = (file) => !ownedByAny.has(file);
+      try {
+        const { problems } = await this.validateStageFiles();
+        if (problems.length) throw new Error(`Batch validation failed (files no item owns):\n- ${problems.join('\n- ')}\nRestore your own unintended changes with git and report item ${item.item} again.`);
+      } finally { this.itemScope = undefined; }
+    }
+    const owned = await this.itemOwned(item, changed);
+    const saved = { stage: state.stage, current: state.current };
+    this.itemMode = { batch: saved.current };
+    this.itemScope = (file) => owned.has(file);
+    state.stage = item.stage;
+    state.current = this.itemCurrent(item, saved.current);
+    let result: { stage: LoopStage; message: string };
+    try {
+      result = await this.reportStage(report);
+    } finally {
+      state.stage = saved.stage;
+      state.current = saved.current;
+      this.itemMode = undefined;
+      this.itemScope = undefined;
+    }
+    item.done = { outcome: report.outcome, summary: report.summary, at: this.now() };
+    const open = batch.items.filter((entry) => !entry.done);
+    if (!open.length) {
+      await this.event('batch_finished', { items: batch.items.length });
+      await this.setStage('select', { assetId: undefined, planId: undefined });
+      // Attempts spent by earlier items may have used up the budget: the run ends now that the batch is reported.
+      const run = await this.autonomy();
+      const over = run ? this.autonomyOver(run, await this.loopSettings()) : undefined;
+      if (over) return { stage: this.require().stage, message: `Item ${item.item}: ${result.message}\n${await this.handOver(over)}` };
+      return { stage: 'select', message: `Item ${item.item}: ${result.message}\nEvery item of the batch is reported. Continue with ${LOOP_COMMAND} next.` };
+    }
+    await this.save();
+    return { stage: 'batch', message: `Item ${item.item}: ${result.message}\nStill to report: item(s) ${open.map((entry) => entry.item).join(', ')}.` };
   }
 
   // ---------- parallel routes ----------
@@ -2865,8 +3025,9 @@ export class ResearchLoopCore {
    * direction from the researcher (in autonomous mode, the agent's own decision).
    */
   private async routeSelection(id: string, ctx: {
-    routes: RouteInfo[]; graph: ProofGraph; work: Map<string, Selection>; routed: Set<string>; required: string[]; decisions: DecisionInfo[]; settings: LoopSettings;
+    routes: RouteInfo[]; graph: ProofGraph; work: Map<string, Selection>; routed: Set<string>; required: string[]; decisions: DecisionInfo[]; settings: LoopSettings; skip?: ReadonlySet<string>;
   }): Promise<Selection | 'reselect' | undefined> {
+    const skip = ctx.skip ?? new Set<string>();
     const { settings } = ctx;
     if (settings.rigor.reviewRoutes === 'main' && ctx.required.includes(id) && ctx.routes.some((route) => route.target === id && isActiveRoute(route)) && !(await this.routeMapApproved(id))) {
       await this.enqueueApproval('routes', id, `Review the routes to ${id} before they are worked on: drop a route, add one of your own, or approve the map.`);
@@ -2882,8 +3043,8 @@ export class ResearchLoopCore {
       const used = Math.max(0, last - (latestDirection(ctx.decisions, node)?.routeRound ?? 0));
       rounds.set(node, this.routeRequest(node, last, ctx.decisions) || used < settings.routeRounds ? 'round' : 'stuck');
     }
-    const actionable = (node: string) => ctx.work.has(node) || (ctx.routed.has(node) && rounds.has(node) && rounds.get(node) !== 'waiting');
-    const step = mostProvingStep(id, ctx.graph, actionable);
+    const actionable = (node: string) => !skip.has(node) && (ctx.work.has(node) || (ctx.routed.has(node) && rounds.has(node) && rounds.get(node) !== 'waiting'));
+    const step = mostProvingStep(id, ctx.graph, actionable, (candidate) => (candidate.kind === 'reduce' || candidate.kind === 'verify_reduction') && skip.has(`plan:${candidate.planId}`));
     if (!step) return undefined;
     switch (step.kind) {
       case 'asset': {
@@ -3542,9 +3703,11 @@ export class ResearchLoopCore {
       const over = this.autonomyOver(run, await this.loopSettings());
       if (over) return this.result(await this.handOver(over));
       if (run.deciding && (state.parked[run.deciding] || !(await this.isDraftResult(run.deciding)))) { delete run.deciding; await this.save(); }
-      if (run.deciding) return this.result(await this.decisionInstruction(run.deciding));
+      if (run.deciding && state.stage !== 'batch') return this.result(await this.decisionInstruction(run.deciding));
     }
-    if (state.pendingQuestion) return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
+    // A batch is reported in full first, whatever one of its items raised.
+    if (state.stage === 'batch' && !state.current.batch?.items.some((item) => !item.done)) await this.setStage('select', { assetId: undefined, planId: undefined });
+    if (state.pendingQuestion && state.stage !== 'batch') return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
     // Selection reads nodes leniently and skips a file it cannot parse; deciding on that view would treat an existing result as missing.
     const unparsable = await this.unparsableNodes();
     if (unparsable.length) return this.result(`These research files do not parse, so the loop cannot tell what they hold:\n${unparsable.map((problem) => `- ${problem}`).join('\n')}\nFix them (keep their IDs; run research-maintenance validate), then run next. Do not re-create them under new IDs.`);
@@ -3583,8 +3746,11 @@ export class ResearchLoopCore {
     }
     // Between stages, a rewording from the teaching chat goes first: its check is short and the researcher is waiting on it.
     if (recompute && await this.startRevision()) recompute = false;
-    if (recompute) {
-      const selection = await this.computeSelection();
+    const chosen = recompute ? await this.computeSelection() : undefined;
+    // With several workers allowed, independent results are worked on side by side.
+    if (chosen && await this.startBatch(chosen)) recompute = false;
+    if (recompute && chosen) {
+      const selection = chosen;
       const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined, ideaId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined, ideaId: undefined };
       if (selection.stage === 'conjecture') patch.ideaId = selection.ideaId;
       if (selection.stage === 'verify_node') { patch.node = selection.node; patch.assetId = selection.node.id; }
@@ -3634,7 +3800,8 @@ export class ResearchLoopCore {
     result.brief.context = { file: CONTEXT_PACK_PATH, tokens: pack.tokens, items: pack.included.map((item) => `${item.id}${Array.isArray(item.view) ? `#${item.view.join(',')}` : item.view === 'all' ? '' : `#${item.view}`}`), omitted: pack.omitted.map((item) => item.id), ...(pack.packs ? { packs: pack.packs } : {}) };
     if (pack.manifest.worker) result.brief.worker = pack.manifest.worker;
     if (pack.packs) {
-      result.instruction += `\nWorker packs (research-worker-${pack.manifest.worker ?? 'deep'}, one per slot; give each worker only its own pack and do not read them yourself): ${pack.packs.map((item) => `slot ${item.slot}: ${item.file} (~${item.tokens} tokens)`).join('; ')}.`;
+      const unit = state.stage === 'batch' ? 'item' : 'slot';
+      result.instruction += `\nWorker packs (research-worker-${pack.manifest.worker ?? 'deep'}, one per ${unit}; give each worker only its own pack and do not read them yourself): ${pack.packs.map((item) => `${unit} ${item.slot}: ${item.file} (~${item.tokens} tokens)`).join('; ')}.`;
       return result;
     }
     result.instruction += `\nContext pack (~${pack.tokens} tokens): ${CONTEXT_PACK_PATH}. Read it instead of the research folders; for anything else run ${LOOP_COMMAND} show <id> [--section Heading] and say why.${pack.manifest.worker ? ` Subagent: research-worker-${pack.manifest.worker}.` : ''}`;
@@ -3672,8 +3839,31 @@ export class ResearchLoopCore {
    * Compile the current stage's context pack, write it (and its manifest) to
    * the loop folder, and return it. Deterministic: same files, same pack.
    */
-  async contextPack(budget?: number): Promise<RenderedContext & { manifest: ContextManifest; packs?: Array<{ slot: number; direction: string; file: string; tokens: number }> }> {
+  async contextPack(budget?: number, out?: string): Promise<RenderedContext & { manifest: ContextManifest; packs?: Array<{ slot: number; direction: string; file: string; tokens: number }> }> {
     const state = this.require();
+    if (state.stage === 'batch' && state.current.batch && !out) {
+      // One pack per item, compiled as for its own stage; the driver never reads the workers' material.
+      const packs: Array<{ slot: number; direction: string; file: string; tokens: number }> = [];
+      const files = new Set<string>();
+      let first: (RenderedContext & { manifest: ContextManifest }) | undefined;
+      const saved = { stage: state.stage, current: state.current };
+      try {
+        for (const item of state.current.batch.items.filter((entry) => !entry.done)) {
+          state.stage = item.stage;
+          state.current = this.itemCurrent(item, saved.current);
+          const file = `${STATE_DIR}/context/item-${item.item}.md`;
+          const pack = await this.contextPack(budget, file);
+          packs.push({ slot: item.item, direction: `${item.stage} ${item.assetId}`, file, tokens: pack.tokens });
+          for (const entry of pack.files) files.add(entry);
+          first ??= pack;
+        }
+      } finally { state.stage = saved.stage; state.current = saved.current; }
+      const index = ['# Batch', '', 'One pack per item; each worker reads only its own.', '', ...packs.map((item) => `- item ${item.slot} (${item.direction}): ${item.file} (~${item.tokens} tokens)`), ''].join('\n');
+      await this.files.writeFile(CONTEXT_PACK_PATH, index);
+      const rendered = { ...first!, text: index, files: [...files], tokens: packs.reduce((sum, item) => sum + item.tokens, 0) };
+      await this.files.writeFile(CONTEXT_MANIFEST_PATH, JSON.stringify({ stage: 'batch', stageStartedAt: state.current.stageStartedAt, tokens: rendered.tokens, packs }, null, 2) + '\n');
+      return { ...rendered, manifest: { ...first!.manifest, stage: 'batch' }, packs };
+    }
     const sources = await this.contextSources();
     const assetId = state.current.assetId;
     const limit = budget ?? (await this.contextBudget(state.stage));
@@ -3749,8 +3939,8 @@ export class ResearchLoopCore {
     }
     const manifest = planContext(focus, sources, limit);
     const rendered = renderContext(manifest, sources, `${LOOP_COMMAND} show`);
-    await this.files.writeFile(CONTEXT_PACK_PATH, rendered.text);
-    await writeManifest(rendered, manifest);
+    await this.files.writeFile(out ?? CONTEXT_PACK_PATH, rendered.text);
+    if (!out) await writeManifest(rendered, manifest);
     return { ...rendered, manifest };
   }
 
@@ -3905,6 +4095,12 @@ export class ResearchLoopCore {
         const idea = state.current.ideaId ?? '(none)';
         return `Stage conjecture for the idea ${idea}. The pack holds the idea, the results it relates to, the goals, and the existing conjectures. Make it precise as one new conjecture in ${this.paths.assets}/<id>.md: type conjecture, title, status draft, source.kind original, depends_on, uses_definitions, serves (the results it would unblock or strengthen: an open goal, a set-aside result, or a proved one), a precise statement, and ## Motivation (why it is believed: evidence, special cases; and what it would give). Use existing definitions (search the library first, ${LOOP_COMMAND} library search <words>) or draft new ones in ${this.paths.definitions}/. Do not search, plan, or prove it: the loop searches it for a counterexample next, and the researcher agrees on its statement. If it cannot be stated precisely, or it is known, false, or trivial, write nothing and report none with the reason; the idea stays for the researcher with your note. Run research-maintenance validate and links.${report('complete --asset <id>|none|question')}`;
       }
+      case 'batch': {
+        const open = (state.current.batch?.items ?? []).filter((item) => !item.done);
+        if (!open.length) return `Run: ${LOOP_COMMAND} next`;
+        const lines = open.map((item) => `Item ${item.item}: ${this.instruction({ ...state, stage: item.stage, current: this.itemCurrent(item, state.current) }).replace('--summary "<= 5 lines"', `--item ${item.item} --summary "<= 5 lines"`)}`);
+        return `Stage batch: ${open.length} result(s) worked on side by side, each by its own worker. Spawn one subagent per item in a single message (research-worker-deep), give each only its item's instruction below and its own pack, and require at most five lines back. Then report every item on its own with --item <n>, in any order, and run next only once all are reported. A partial execution gets a fresh worker for that item alone.${state.pendingQuestion ? ' A question waits for the researcher; report the items meanwhile.' : ''}\n\n${lines.join('\n\n')}`;
+      }
       case 'route': {
         const round = state.current.route;
         if (!round?.slots.length) return `Run: ${LOOP_COMMAND} next`;
@@ -3989,7 +4185,8 @@ export class ResearchLoopCore {
   private async validateStageFiles(ignore: Set<string> = new Set()): Promise<{ added: string[]; modified: string[]; problems: string[] }> {
     const state = this.require();
     const changes = await this.changedFiles();
-    const [added, modified, removed] = [changes.added, changes.modified, changes.removed].map((files) => files.filter((file) => !ignore.has(file)));
+    const scope = this.itemScope ?? (() => true);
+    const [added, modified, removed] = [changes.added, changes.modified, changes.removed].map((files) => files.filter((file) => !ignore.has(file) && scope(file)));
     const problems: string[] = [];
     const stage = state.stage;
     const folders = this.folders();
@@ -4196,8 +4393,13 @@ export class ResearchLoopCore {
   }
 
   async report(report: StageReport): Promise<{ stage: LoopStage; message: string }> {
-    const { stage, current: { assetId } } = this.require();
-    const result = await this.reportStage(report);
+    const state = this.require();
+    if (report.item !== undefined && state.stage !== 'batch') throw new Error('--item belongs to a batch; none is open.');
+    // A batch item is charged like the stage it is.
+    const item = state.stage === 'batch' ? state.current.batch?.items.find((entry) => entry.item === report.item) : undefined;
+    const stage = item?.stage ?? state.stage;
+    const assetId = item?.assetId ?? state.current.assetId;
+    const result = state.stage === 'batch' ? await this.reportBatchItem(report) : await this.reportStage(report);
     // An autonomous run pays for each executed plan, each search round, and each conjecture idea it tries to make precise.
     const attempt = ((stage === 'execute' || stage === 'reduce') && (report.outcome === 'proved' || report.outcome === 'failed')) || (stage === 'search' && report.outcome === 'searched')
       || (stage === 'conjecture' && (report.outcome === 'complete' || report.outcome === 'none'));
@@ -4209,9 +4411,10 @@ export class ResearchLoopCore {
     const state = this.require();
     if (state.status !== 'running') throw new Error(`The loop is ${state.status}; resume it first.`);
     await this.resolveOverdueQuestion();
-    if (state.pendingQuestion) throw new Error(`Question ${state.pendingQuestion.id} is still pending; answer it (or wait) before reporting.`);
+    // The other items of a batch were done alongside: a question or a decision one of them raised waits until the batch is reported.
+    if (state.pendingQuestion && !this.itemMode) throw new Error(`Question ${state.pendingQuestion.id} is still pending; answer it (or wait) before reporting.`);
     const run = await this.autonomy();
-    if (run?.deciding && report.outcome !== 'question') throw new Error(await this.decisionInstruction(run.deciding));
+    if (run?.deciding && report.outcome !== 'question' && !this.itemMode) throw new Error(await this.decisionInstruction(run.deciding));
     const stale = report.outcome === 'question' ? undefined : await this.staleBaseProblem();
     if (stale) throw new Error(stale);
     const stage = state.stage;
@@ -4831,6 +5034,9 @@ export class ResearchLoopCore {
     run.spent += 1;
     await this.save();
     await this.event('autonomy_spent', { assetId, stage, outcome });
+    // Mid-batch the run does not end: the other items' work is reported first, and the batch's close checks the budget.
+    const state = this.require();
+    if (state.stage === 'batch' && state.current.batch?.items.some((item) => !item.done)) return undefined;
     const over = this.autonomyOver(run, await this.loopSettings());
     return over ? this.handOver(over) : undefined;
   }

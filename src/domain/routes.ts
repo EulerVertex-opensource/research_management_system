@@ -190,7 +190,7 @@ export type RouteStep =
  * reduction is verified and whose lemmas are all settled is ready to commit. `actionable` lets the
  * loop skip results it cannot work on now (waiting on approval, parked, and so on).
  */
-export function mostProvingStep(goal: string, graph: ProofGraph, actionable: (id: string) => boolean): RouteStep | undefined {
+export function mostProvingStep(goal: string, graph: ProofGraph, actionable: (id: string) => boolean, blocked: (step: RouteStep) => boolean = () => false): RouteStep | undefined {
   const numbers = new ProofNumbers(graph);
   const share = new Map<string, number>();
   const seen = new Set<string>();
@@ -212,11 +212,14 @@ export function mostProvingStep(goal: string, graph: ProofGraph, actionable: (id
     if (!routes.length) return actionable(id) ? { kind: 'asset', id } : undefined;
     for (const route of rankRoutes(routes, (candidate) => numbers.ofRoute(candidate))) {
       if (numbers.ofRoute(route) === Infinity) continue;
-      if (route.reduction === 'none') return { kind: 'reduce', planId: route.planId, target: id };
-      if (route.reduction === 'written') return { kind: 'verify_reduction', planId: route.planId, target: id };
+      if (route.reduction !== 'verified') {
+        const step: RouteStep = { kind: route.reduction === 'written' ? 'verify_reduction' : 'reduce', planId: route.planId, target: id };
+        // Another worker has the reduction (a batch): this route's lemmas may go on meanwhile.
+        if (!blocked(step)) return step;
+      }
       const open = route.lemmas.filter((lemma) => !graph.settled(lemma))
         .sort((a, b) => (share.get(b) ?? 0) - (share.get(a) ?? 0) || numbers.ofAsset(a) - numbers.ofAsset(b));
-      if (!open.length) return { kind: 'commit', planId: route.planId, target: id };
+      if (!open.length) { if (route.reduction === 'verified') return { kind: 'commit', planId: route.planId, target: id }; continue; }
       for (const lemma of open) { const step = descend(lemma, inner); if (step) return step; }
     }
     return undefined;

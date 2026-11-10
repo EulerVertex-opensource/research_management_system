@@ -19,7 +19,8 @@ export type LoopStatus = 'idle' | 'running' | 'paused' | 'stopped';
 export type LoopStage =
   | 'discuss_goals' | 'draft_project' | 'review_project' | 'scaffold' | 'sources' | 'select'
   | 'search' | 'search_summary' | 'verify_counterexample' | 'verify_construction' | 'plan' | 'execute' | 'verify_proof' | 'verify_node' | 'conjecture' | 'waiting' | 'ready'
-  | 'route' | 'route_merge' | 'review_routes' | 'reduce' | 'verify_reduction';
+  | 'route' | 'route_merge' | 'review_routes' | 'reduce' | 'verify_reduction'
+  | 'batch';
 /** Stages of one round of routes to a result; the round in `current.route` lives through all of them. */
 export const ROUTE_STAGES: ReadonlySet<LoopStage> = new Set<LoopStage>(['route', 'route_merge', 'review_routes']);
 /** What `verify_node` checks: a definition, or a result taken from a source (a citation or a library result). */
@@ -35,6 +36,23 @@ export interface NodeCheckTarget { id: string; mode: 'definition' | 'citation' |
  * the report, the work covered an earlier version and is redone.
  */
 export interface FrozenInput { id: string; kind: 'asset' | 'definition'; file: string; part: 'statement' | 'proof' | 'node'; digest: string }
+/**
+ * One item of a batch (stage `batch`): a stage for one result, run by its own worker alongside the
+ * others and reported on its own (`report ... --item N`). Items have distinct targets.
+ */
+export interface BatchItem {
+  item: number;
+  stage: LoopStage;
+  assetId: string;
+  planId?: string;
+  node?: NodeCheckTarget;
+  recheck?: string[];
+  statementDigest?: string;
+  inputs?: FrozenInput[];
+  done?: { outcome: ReportOutcome; summary: string; at: string };
+}
+/** Stages a batch may hold: each writes only its own target's files. */
+export const BATCH_STAGES: ReadonlySet<LoopStage> = new Set<LoopStage>(['plan', 'execute', 'verify_proof', 'verify_node', 'reduce', 'verify_reduction']);
 /** `routes`: before a round of routes, the researcher's own routes to the result, if they have any. */
 export type QuestionKind = 'goals' | 'discussion' | 'blocked' | 'counterexample_review' | 'routes';
 /** `specification`: the required properties of a construction, approved before any search spends tokens on them. */
@@ -170,6 +188,8 @@ export interface LoopState {
     recheck?: string[];
     /** A round of routes to a result (stages route, route_merge, review_routes). */
     route?: RouteRound;
+    /** Stage `batch`: the items worked on side by side. */
+    batch?: { items: BatchItem[] };
     /** Stage `verify_node`: the definition, or the cited or library result, checked before auto mode approves it. */
     node?: NodeCheckTarget;
     /** Stages that execute or check work: what they work from, as it was when the stage began. */
@@ -240,6 +260,8 @@ export interface StageReport {
   assumedDefinitions?: string[];
   /** `report none --confirm`: the agent went through the leading set-aside results and still finds none to bring back. */
   confirm?: boolean;
+  /** Stage `batch`: the item reported. */
+  item?: number;
 }
 
 export interface ResearchFolders { assets: string; definitions: string; ideas: string; plans: string; library?: string; checks?: string; decisions?: string; handoffs?: string; candidates?: string }

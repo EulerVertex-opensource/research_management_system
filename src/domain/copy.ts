@@ -29,6 +29,7 @@ const STAGE_TEXT: Record<string, string> = {
   review_routes: 'waiting for you to review the routes to {result}',
   reduce: 'writing how a route reaches {result}',
   verify_reduction: 'checking how a route reaches {result}',
+  batch: 'working on several results side by side',
   waiting: 'stopped until you act',
   ready: 'done with every main result',
 };

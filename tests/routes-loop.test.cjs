@@ -386,3 +386,186 @@ test('with "try several routes first", a stuck lemma gets a round of routes befo
   assert.equal((await f.core.next()).stage, 'route');
   assert.equal(f.core.current.current.route.target, 'energy_bound');
 });
+
+// ---------- batches: several workers at once ----------
+
+async function twoRoutes(f) {
+  await driveToRoutes(f);
+  await roundSlots(f);
+  f.map.set('research/assets/energy_bound.md', result('energy_bound', 'The energy is bounded.'));
+  f.map.set('research/assets/compactness.md', result('compactness', 'The family is compact.'));
+  f.map.set(planFile('route_main_theorem_r1_s1_energy'), route('main_theorem', ['energy_bound']));
+  f.map.set(planFile('route_main_theorem_r1_s2_compact'), route('main_theorem', ['energy_bound', 'compactness']));
+  await f.core.report({ outcome: 'complete', summary: 'Two routes' });
+  await f.core.report({ outcome: 'complete', summary: 'Nothing to merge' });
+}
+
+test('with several workers, the two reductions and the shared lemma are worked on side by side and reported item by item', async () => {
+  const f = fixture({ parallelWorkers: 3 });
+  await twoRoutes(f);
+  const result = await f.core.next();
+  assert.equal(result.stage, 'batch');
+  const items = f.core.current.current.batch.items;
+  // The cheapest route's reduction; its lemma (shared) while that is being written; then the other route's reduction.
+  assert.deepEqual(items.map((item) => [item.stage, item.planId ?? item.assetId]), [
+    ['reduce', 'route_main_theorem_r1_s1_energy'], ['plan', 'energy_bound'], ['reduce', 'route_main_theorem_r1_s2_compact'],
+  ]);
+  assert.match(result.instruction, /Item 1: Stage reduce for the route route_main_theorem_r1_s1_energy[\s\S]*--item 1 --summary/);
+  assert.match(result.instruction, /Item 2: Stage plan for asset energy_bound[\s\S]*--item 2 --summary/);
+  assert.match(result.instruction, /item 3: \.research-assistant-loop\/context\/item-3\.md/);
+  assert.match(f.map.get('.research-assistant-loop/context/item-1.md'), /stage reduce/);
+  assert.match(f.map.get('.research-assistant-loop/context/item-2.md'), /stage plan/);
+  // Each reduction froze its own inputs.
+  assert.ok(items[0].inputs.some((input) => input.id === 'energy_bound'));
+  // The workers write, all at once.
+  f.map.set(planFile('route_main_theorem_r1_s1_energy'), withReduction(f.map.get(planFile('route_main_theorem_r1_s1_energy'))));
+  const second = matter(f.map.get(planFile('route_main_theorem_r1_s2_compact')));
+  f.map.set(planFile('route_main_theorem_r1_s2_compact'), matter.stringify(`${second.content.trimEnd()}\n\n## Failure\n\nCompactness does not give the limit.\n`, { ...second.data, status: 'failed' }));
+  f.map.set(planFile('plan_energy'), matter.stringify('\n## Goal\n\nTarget: [energy_bound](../assets/energy_bound.md)\n\n## Plan\n\n1. [ ] Bound it.\n\n## Verification\n\nDirect.\n', { type: 'plan', title: 'plan_energy', status: 'pending', target_asset: 'energy_bound', inspired_by: [], tags: [] }));
+  // Reports: an item number is required, once each, in any order.
+  await assert.rejects(f.core.report({ outcome: 'failed', summary: 'x' }), /report each item with --item/);
+  await assert.rejects(f.core.report({ outcome: 'failed', summary: 'x', item: 9 }), /No item 9/);
+  const r3 = await f.core.report({ outcome: 'failed', summary: 'Compactness does not give the limit', item: 3 });
+  assert.equal(r3.stage, 'batch');
+  assert.match(r3.message, /Still to report: item\(s\) 1, 2/);
+  assert.equal(JSON.parse(f.map.get('.research-assistant-loop/state.json')).stage, 'batch', 'state.json keeps the batch between item reports');
+  await assert.rejects(f.core.report({ outcome: 'failed', summary: 'x', item: 3 }), /reported already/);
+  await f.core.report({ outcome: 'complete', summary: 'Planned', item: 2, planId: 'plan_energy' });
+  assert.equal(read(f, planFile('plan_energy')).data.status, 'pending');
+  const r1 = await f.core.report({ outcome: 'proved', summary: 'Reduced', item: 1 });
+  assert.equal(r1.stage, 'select');
+  assert.match(r1.message, /Every item of the batch is reported/);
+  assert.ok(read(f, planFile('route_main_theorem_r1_s1_energy')).data.reduction_verified_digest);
+  assert.equal(read(f, planFile('route_main_theorem_r1_s2_compact')).data.status, 'failed');
+  // Next: the planned lemma is executed (alone now: nothing else is open).
+  const next = await f.core.next();
+  assert.equal(next.stage, 'plan');
+  assert.equal(f.core.current.current.planId, 'plan_energy', 'the plan written in the batch is executed next');
+});
+
+test('in a batch, each item may change only its own files, and a change no item owns stops the last report', async () => {
+  const f = fixture({ parallelWorkers: 2 });
+  await twoRoutes(f);
+  assert.equal((await f.core.next()).stage, 'batch');
+  const [first, second] = f.core.current.current.batch.items;
+  assert.deepEqual([first.stage, second.stage], ['reduce', 'plan']);
+  f.map.set(planFile(first.planId), withReduction(f.map.get(planFile(first.planId))));
+  f.map.set(planFile('plan_energy'), matter.stringify('\n## Goal\n\nTarget: [energy_bound](../assets/energy_bound.md)\n\n## Plan\n\n1. [ ] Bound it.\n\n## Verification\n\nDirect.\n', { type: 'plan', title: 'plan_energy', status: 'pending', target_asset: 'energy_bound', inspired_by: [], tags: [] }));
+  // A worker also edits a lemma's statement: no item owns it.
+  f.map.set('research/assets/compactness.md', result('compactness', 'The family is precompact.'));
+  await f.core.report({ outcome: 'proved', summary: 'Reduced', item: 1 });
+  await assert.rejects(f.core.report({ outcome: 'complete', summary: 'Planned', item: 2, planId: 'plan_energy' }), /files no item owns[\s\S]*compactness\.md/);
+  f.map.set('research/assets/compactness.md', result('compactness', 'The family is compact.'));
+  const closed = await f.core.report({ outcome: 'complete', summary: 'Planned', item: 2, planId: 'plan_energy' });
+  assert.equal(closed.stage, 'select');
+});
+
+test('autonomous mode pays one attempt per reduction in a batch', async () => {
+  const f = fixture({ parallelWorkers: 2, autonomy: { enabled: true }, autonomyBudget: 50 });
+  await driveToRoutes(f);
+  await f.core.next();
+  f.map.set('research/assets/energy_bound.md', result('energy_bound', 'The energy is bounded.'));
+  f.map.set(planFile('route_main_theorem_r1_s1_energy'), route('main_theorem', ['energy_bound']));
+  f.map.set(planFile('route_main_theorem_r1_s2_direct'), route('main_theorem', []));
+  await f.core.report({ outcome: 'complete', summary: 'Two routes' });
+  await f.core.report({ outcome: 'complete', summary: 'Nothing to merge' });
+  assert.equal((await f.core.next()).stage, 'batch');
+  const spent = f.core.current.autonomy.spent;
+  for (const item of f.core.current.current.batch.items) {
+    if (item.stage !== 'reduce') continue;
+    f.map.set(planFile(item.planId), withReduction(f.map.get(planFile(item.planId))));
+  }
+  const reduces = f.core.current.current.batch.items.filter((item) => item.stage === 'reduce');
+  for (const item of f.core.current.current.batch.items) {
+    if (item.stage === 'reduce') await f.core.report({ outcome: 'proved', summary: 'Reduced', item: item.item });
+    else if (item.stage === 'plan') {
+      f.map.set(planFile(`plan_${item.assetId}`), matter.stringify(`\n## Goal\n\nTarget: [${item.assetId}](../assets/${item.assetId}.md)\n\n## Plan\n\n1. [ ] Do it.\n\n## Verification\n\nDirect.\n`, { type: 'plan', title: 'p', status: 'pending', target_asset: item.assetId, inspired_by: [], tags: [] }));
+      await f.core.report({ outcome: 'complete', summary: 'Planned', item: item.item, planId: `plan_${item.assetId}` });
+    }
+  }
+  assert.equal(f.core.current.autonomy.spent, spent + reduces.length);
+});
+
+test('one worker, or one item to work on: no batch', async () => {
+  const f = fixture({ parallelWorkers: 1 });
+  await twoRoutes(f);
+  assert.equal((await f.core.next()).stage, 'reduce');
+  const g = fixture({ parallelWorkers: 3, routeWidth: 1 });
+  await driveToRoutes(g);
+  await roundSlots(g);
+  g.map.set(planFile('route_main_theorem_r1_s1_direct'), route('main_theorem', []));
+  await g.core.report({ outcome: 'complete', summary: 'One direct route' });
+  await g.core.report({ outcome: 'complete', summary: 'Nothing to merge' });
+  assert.equal((await g.core.next()).stage, 'reduce', 'a single item runs as an ordinary stage');
+});
+
+test('two lemmas of one route are planned side by side, then executed side by side; the route is then committed', async () => {
+  const f = fixture({ parallelWorkers: 2, routeWidth: 1 });
+  await driveToRoutes(f);
+  await roundSlots(f);
+  f.map.set('research/assets/lemma_a.md', result('lemma_a', 'A holds.'));
+  f.map.set('research/assets/lemma_b.md', result('lemma_b', 'B holds.'));
+  f.map.set(planFile('route_main_theorem_r1_s1_ab'), route('main_theorem', ['lemma_a', 'lemma_b']));
+  await f.core.report({ outcome: 'complete', summary: 'One route' });
+  await f.core.report({ outcome: 'complete', summary: 'Nothing to merge' });
+  // Batch 1: the reduction, and a lemma meanwhile.
+  assert.equal((await f.core.next()).stage, 'batch');
+  assert.deepEqual(f.core.current.current.batch.items.map((item) => item.stage), ['reduce', 'plan']);
+  f.map.set(planFile('route_main_theorem_r1_s1_ab'), withReduction(f.map.get(planFile('route_main_theorem_r1_s1_ab'))));
+  const planFor = (id, status = 'pending', extra = '') => matter.stringify(`\n## Goal\n\nTarget: [${id}](../assets/${id}.md)\n\n## Plan\n\n1. [${status === 'succeeded' ? 'x' : ' '}] Prove it.\n\n## Verification\n\nDirect.\n${extra}`, { type: 'plan', title: `plan_${id}`, status, target_asset: id, inspired_by: [], tags: [] });
+  const second = f.core.current.current.batch.items[1].assetId;
+  f.map.set(planFile(`plan_${second}`), planFor(second));
+  await f.core.report({ outcome: 'proved', summary: 'Reduced', item: 1 });
+  await f.core.report({ outcome: 'complete', summary: 'Planned', item: 2, planId: `plan_${second}` });
+  // Batch 2: the planned lemma is executed while the other is planned.
+  assert.equal((await f.core.next()).stage, 'batch');
+  const items = f.core.current.current.batch.items;
+  const execute = items.find((item) => item.stage === 'execute');
+  const plan = items.find((item) => item.stage === 'plan');
+  assert.equal(execute.assetId, second);
+  assert.equal(execute.planId, `plan_${second}`);
+  assert.ok(execute.statementDigest, 'the statement is frozen for the execution');
+  const other = plan.assetId;
+  const proved = (id) => { const asset = read(f, `research/assets/${id}.md`); f.map.set(`research/assets/${id}.md`, matter.stringify(`${asset.content.trimEnd()}\n\n## Proof\n\nDirect (${id}).\n`, asset.data)); };
+  proved(second);
+  f.map.set(planFile(`plan_${second}`), planFor(second, 'succeeded', '\n## Outcome\n\nProof in the asset.\n'));
+  f.map.set(planFile(`plan_${other}`), planFor(other));
+  // The execution may not change its statement; the check sees only its own files.
+  await f.core.report({ outcome: 'proved', summary: 'Proved', item: execute.item });
+  await f.core.report({ outcome: 'complete', summary: 'Planned', item: plan.item, planId: `plan_${other}` });
+  // Then the last lemma alone (an ordinary stage), and the route is committed.
+  assert.equal((await f.core.next()).stage, 'plan');
+  await f.core.report({ outcome: 'complete', summary: 'Execute', planId: `plan_${other}` });
+  proved(other);
+  f.map.set(planFile(`plan_${other}`), planFor(other, 'succeeded', '\n## Outcome\n\nProof in the asset.\n'));
+  await f.core.report({ outcome: 'proved', summary: 'Proved' });
+  await f.core.next();
+  assert.deepEqual(read(f, 'research/assets/main_theorem.md').data.depends_on, ['lemma_a', 'lemma_b']);
+  assert.equal(read(f, planFile('route_main_theorem_r1_s1_ab')).data.status, 'succeeded');
+});
+
+test('a budget used up mid-batch ends the autonomous run only once the batch is reported', async () => {
+  const f = fixture({ parallelWorkers: 2, autonomy: { enabled: true }, autonomyBudget: 50 });
+  await driveToRoutes(f);
+  await f.core.next();
+  f.map.set(planFile('route_main_theorem_r1_s1_a'), route('main_theorem', []));
+  f.map.set(planFile('route_main_theorem_r1_s2_b'), route('main_theorem', [], { route_title: 'another direct one' }));
+  await f.core.report({ outcome: 'complete', summary: 'Two routes' });
+  await f.core.report({ outcome: 'complete', summary: 'Nothing to merge' });
+  assert.equal((await f.core.next()).stage, 'batch');
+  // Leave room for exactly one more attempt.
+  const settings = JSON.parse(f.map.get(SETTINGS));
+  f.map.set(SETTINGS, JSON.stringify({ ...settings, autonomyBudget: f.core.current.autonomy.spent + 1 }));
+  const [first, second] = f.core.current.current.batch.items;
+  for (const item of [first, second]) {
+    const plan = matter(f.map.get(planFile(item.planId)));
+    f.map.set(planFile(item.planId), matter.stringify(`${plan.content.trimEnd()}\n\n## Failure\n\nNo.\n`, { ...plan.data, status: 'failed' }));
+  }
+  const one = await f.core.report({ outcome: 'failed', summary: 'No', item: first.item });
+  assert.equal(one.stage, 'batch', 'the budget is spent, but the batch goes on');
+  assert.equal(f.core.current.status, 'running');
+  const two = await f.core.report({ outcome: 'failed', summary: 'No', item: second.item });
+  assert.equal(f.core.current.status, 'paused', 'the run ends once the batch is reported');
+  assert.ok(f.core.current.autonomy.handedOverAt);
+  assert.notEqual(two.stage, 'batch');
+});

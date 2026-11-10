@@ -57,7 +57,7 @@ const USAGE = `Usage: research-loop <command> [options]
   next [--json]
   context [--json] [--budget N]   (compile the current stage's context pack; next does this too)
   show <id|paper_slug|project> [--section Heading]... [--full]   (one node or paper part on request)
-  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--asset ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm]
+  report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--asset ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm] [--item N]
   search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
   route status <result> [--json]   (the routes to a result: state, reduction, lemmas settled, work left)
@@ -415,7 +415,9 @@ async function runLockedHook(event: string, root: string, core: ResearchLoopCore
     }
     case 'PreToolUse': {
       const paths = await loadProjectPaths(root);
-      const remarkRule = loopRemarkDecision(paths, input, state?.status === 'running' ? state.stage : undefined, root);
+      // A batch with a check among its open items is a checking stage for the remark rule: its workers share this chat.
+      const checking = state?.stage === 'batch' && state.current.batch?.items.some((item) => !item.done && item.stage.startsWith('verify_'));
+      const remarkRule = loopRemarkDecision(paths, input, state?.status === 'running' ? (checking ? 'verify_proof' : state.stage) : undefined, root);
       if (remarkRule.deny) { process.stdout.write(denyOutput(remarkRule.reason ?? 'Denied by the research loop.') + '\n'); return; }
       // Read tools reach this hook only for the remark rule above.
       if (/^(read|grep|glob)$/i.test(input.tool_name ?? '')) return;
@@ -721,7 +723,9 @@ async function main(): Promise<void> {
         question: typeof args.flags.question === 'string' ? args.flags.question : undefined,
         assumedDefinitions: typeof args.flags['assumed-definitions'] === 'string' ? args.flags['assumed-definitions'].split(',').map((item) => item.trim()).filter(Boolean) : undefined,
         confirm: args.flags.confirm === true || undefined,
+        item: typeof args.flags.item === 'string' && /^\d+$/.test(args.flags.item) ? Number(args.flags.item) : undefined,
       };
+      if (args.flags.item !== undefined && report.item === undefined) throw new Error('--item takes the item number, e.g. --item 2');
       if (outcome !== 'question' && !report.summary.trim()) throw new Error('--summary is required');
       const result = await core.report(report);
       await core.touch(session);

@@ -97,12 +97,14 @@ export const DEFAULT_CONTEXT_BUDGETS: Partial<Record<LoopStage, number>> = {
   discuss_goals: 4000, draft_project: 8000, review_project: 4000, scaffold: 12000, sources: 16000,
   search: 8000, search_summary: 4000, verify_counterexample: 10000, verify_construction: 10000, plan: 16000, execute: 30000, verify_proof: 20000, verify_node: 12000, conjecture: 10000,
   route: 16000, route_merge: 12000, review_routes: 4000, reduce: 30000, verify_reduction: 20000,
+  // A batch compiles one pack per item, each within its own stage's budget.
+  batch: 30000,
 };
 
 /** Stages that get a pack, and which subagent tier runs them. */
 export const STAGE_WORKERS: Partial<Record<LoopStage, ContextWorker>> = {
   scaffold: 'light', sources: 'light', search: 'deep', search_summary: 'light', verify_counterexample: 'deep', verify_construction: 'deep', plan: 'deep', execute: 'deep', verify_proof: 'deep', verify_node: 'deep', conjecture: 'deep',
-  route: 'deep', route_merge: 'deep', reduce: 'deep', verify_reduction: 'deep',
+  route: 'deep', route_merge: 'deep', reduce: 'deep', verify_reduction: 'deep', batch: 'deep',
 };
 
 export function hasContextPack(stage: LoopStage): boolean { return stage in DEFAULT_CONTEXT_BUDGETS; }

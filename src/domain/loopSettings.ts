@@ -80,7 +80,7 @@ export type LoopFieldGroup = 'general' | 'away' | 'routes' | 'refute' | 'constru
 export const LOOP_FIELD_GROUPS: Record<LoopFieldGroup, string> = {
   general: 'Search & effort',
   away: 'When you don’t respond',
-  routes: 'Parallel routes',
+  routes: 'Parallel routes and workers',
   refute: 'Object search: refute (falsify)',
   construct: 'Object search: construct',
   search: 'Object search: workers and board',
@@ -115,6 +115,7 @@ export const LOOP_NUMBER_FIELDS: Record<LoopNumberKey, LoopNumberField> = {
   autonomyConjectures: { defaultValue: 0, range: [0, 20], group: 'autonomy', label: 'Conjectures to explore', hint: 'Conjectures the agent may take up as goals of its own, best first, once your goals are proved or nothing else is left that it can do. 0 means it never explores; it still recommends them at hand-back. Taking up a conjecture that gets past a set-aside result counts as a goal reassessment instead.' },
   routeWidth: { defaultValue: 3, range: [0, 8], group: 'routes', label: 'Routes per round', hint: 'Routes planned side by side for a main result, each in its own direction (yours first, when you have some). 0: one proof attempt after another, as before.' },
   maxLiveRoutes: { defaultValue: 3, range: [1, 8], group: 'routes', label: 'Routes worked on at once', hint: 'Routes to one result kept going together; the most promising ones go first, the rest wait until one fails.' },
+  parallelWorkers: { defaultValue: 1, range: [1, 6], group: 'routes', label: 'Results worked on at once', hint: 'Workers proving, reducing, or checking different results at the same time, each with its own subagent. Faster, at a burst of tokens; 1 works on one result at a time, as before.' },
   routeRounds: { defaultValue: 2, range: [1, 10], group: 'routes', label: 'Rounds of routes', hint: 'Rounds of new routes for one result, once every route so far failed, before the loop asks you for a direction.' },
   studyAhead: { defaultValue: 0, range: [0, 50], group: 'teaching', unit: 'results', label: 'How far the loop may get ahead of you', hint: 'Verified results you have not studied yet (with the teach skill, or marked in Results) before the loop waits for you instead of starting new proofs. 0 means it never waits; working on its own ignores this.' },
 };
