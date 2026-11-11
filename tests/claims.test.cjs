@@ -82,6 +82,12 @@ test('two collaborators: the loop claims what it starts, shares it at once, and 
   // Bob's loop fetches Alice's claim and passes over the first theorem.
   assert.equal((await bob.core.next()).stage, 'plan');
   assert.equal(bob.core.current.current.assetId, 'second_theorem');
+  // The Team page's summary: who holds what, which claim is this machine's, and when each was last active.
+  const team = await bob.core.teamSummary();
+  assert.equal(team.me, 'bob@example.edu');
+  assert.deepEqual(team.claims.map((claim) => [claim.key, claim.by, claim.mine]).sort(), [['first_theorem', 'alice@example.edu', false], ['second_theorem', 'bob@example.edu', true]]);
+  assert.ok(team.lastSeen['alice@example.edu'] && team.lastSeen['bob@example.edu']);
+  assert.equal(team.shareClaims, 'auto');
   // Stopping releases Alice's claims: Bob's loop may take the first theorem afterwards.
   await alice.core.stop();
   await alice.core.refreshClaims(true);

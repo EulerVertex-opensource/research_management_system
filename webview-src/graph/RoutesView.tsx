@@ -12,7 +12,7 @@ import { useTechnical } from '../technical';
  */
 
 export const ROUTE_STATE_LABEL: Record<RouteView['state'], string> = {
-  live: 'Being worked on', reduced: 'Needs only its lemmas', suspended: 'Waits on a set-aside lemma', frozen: 'Waits its turn',
+  live: 'Open', reduced: 'Needs only its lemmas', suspended: 'Waits on a set-aside lemma', frozen: 'Waits its turn',
   dead: 'Ruled out', failed: 'Failed', won: 'Proved the result', superseded: 'Set aside: another route won', abandoned: 'Dropped',
 };
 
@@ -247,7 +247,7 @@ export function RouteLegend() {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', padding: '7px 14px', borderTop: `1px solid ${COLOR.border}`, fontSize: 11, color: COLOR.muted, alignItems: 'center' }}>
       <span>◇ a route: ✓ its step from the lemmas holds, … written, — not yet</span>
-      {item(COLOR.active, 'being worked on')}
+      {item(COLOR.active, 'open')}
       {item(COLOR.approved, 'proved the result')}
       {item(COLOR.error, 'failed or ruled out', true)}
       {item(COLOR.muted, 'waits its turn', true)}

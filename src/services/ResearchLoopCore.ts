@@ -2919,6 +2919,24 @@ export class ResearchLoopCore {
     return held;
   }
 
+  /** Who works on what, for the dashboard's Team page: live claims, owners, and when each collaborator was last active. */
+  async teamSummary(): Promise<import('../models/graph').TeamView> {
+    const me = await this.me();
+    const machine = await this.machine();
+    const claims = await this.claims();
+    const owners = requiredResults(await this.files.readFile(this.paths.projectMd).catch(() => '')).filter((item) => item.owner).map((item) => ({ id: item.id, owner: item.owner! }));
+    const lastSeen: Record<string, string> = {};
+    const seen = (who: unknown, at: unknown) => { if (typeof who === 'string' && typeof at === 'string' && at > (lastSeen[who] ?? '')) lastSeen[who] = at; };
+    for (const { record } of await this.logRecords()) seen(record.performed_by, record.created_at);
+    for (const event of await this.claimEvents()) seen(event.by, event.at);
+    let fetchedAt: string | undefined;
+    try { fetchedAt = (JSON.parse(await this.files.readFile(ResearchLoopCore.CLAIMS_OTHERS)) as { fetchedAt?: string }).fetchedAt; } catch { /* never fetched */ }
+    return {
+      me, shareClaims: (await this.loopSettings()).rigor.shareClaims, owners, lastSeen, ...(fetchedAt ? { fetchedAt } : {}),
+      claims: claims.map((claim) => ({ ...claim, mine: claim.by === me && claim.machine === machine })),
+    };
+  }
+
   /** The unit a stage works on, as claims and batches name it. */
   private stageKey(stage: LoopStage, current: LoopState['current']): string | undefined {
     if ((stage === 'reduce' || stage === 'verify_reduction') && current.planId) return `plan:${current.planId}`;

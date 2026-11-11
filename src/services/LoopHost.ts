@@ -599,6 +599,7 @@ export class LoopHost implements vscode.Disposable {
     const events = this.core ? await this.core.recentEvents(80, isTimelineEvent) : [];
     const recheck = this.core ? await this.core.recheckFlags() : {};
     const payload = await collectGraphPayload(this.files, paths, nodes, state, events, recheck);
+    if (this.core) { try { payload.team = await this.core.teamSummary(); } catch { /* no identity yet: the Team page says so */ } }
     const loopSettings = (await readLoopSettings(this.files)).settings;
     payload.autoMode = loopSettings.autoApprove.enabled || loopSettings.autonomy.enabled;
     if (this.core && state) {
@@ -647,6 +648,12 @@ export class LoopHost implements vscode.Disposable {
         const live = this.dashboardAnswers.get(request.questionId);
         if (live) live({ decision: 'answer', text: request.text.trim() });
         else await this.withCore((core) => core.answerQuestion(request.questionId, 'answer', request.text.trim(), 'dashboard'));
+        this.stateChanged.fire();
+        return;
+      }
+      case 'claims': {
+        if (request.op === 'refresh') await this.withCore((core) => core.refreshClaims(true));
+        else await this.withCore((core) => core.releaseClaims([request.key]));
         this.stateChanged.fire();
         return;
       }

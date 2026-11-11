@@ -646,3 +646,37 @@ test('routes: the payload carries each route with its state and work left; the R
   assert.match(card, /See them side by side/);
   assert.doesNotMatch(card, /Proof attempts:/, 'routes replace the attempt count');
 });
+
+test('the Team page: one card per collaborator with what they own, hold, and created; open routes nobody holds', () => {
+  const { TeamPage } = load('../webview-src/graph/TeamPage.tsx', ['react']);
+  const node = (id, title, progress = 'working') => ({ id, title, progress, progressLabel: progress, kind: 'asset', type: 'lemma', status: 'draft', flags: [], blocks: [], counts: { plans: 0, failedPlans: 0, pendingPlans: 0, ideas: 0, remarks: 0 } });
+  const route = (planId, title, createdBy, extra = {}) => ({ planId, title, target: 'main', origin: 'agent', state: 'live', reduction: 'none', lemmas: ['decay'], settledLemmas: 0, left: 2, createdBy, ...extra });
+  const payload = {
+    required: ['main'], loop: { status: 'running', stage: 'reduce' }, nodes: [node('main', 'Main theorem'), node('decay', 'Decay rate')], edges: [], attention: [], sections: [], coverage: [], history: [],
+    routes: [route('r1', 'via energy decay', 'bob@example.edu', { claimedBy: 'you' }), route('r2', 'via blow-up', 'alice@example.edu', { claimedBy: 'alice@example.edu' }), route('r3', 'a direct try', 'alice@example.edu')],
+    team: {
+      me: 'bob@example.edu', shareClaims: 'auto', fetchedAt: '2026-11-10T09:00:00Z', owners: [{ id: 'main', owner: 'alice@example.edu' }],
+      lastSeen: { 'alice@example.edu': '2026-11-10T08:00:00Z', 'bob@example.edu': '2026-11-10T09:00:00Z' },
+      claims: [
+        { key: 'plan:r1', by: 'bob@example.edu', machine: 'm1', since: '2026-11-10T08:30:00Z', until: '2026-11-11T08:30:00Z', mine: true },
+        { key: 'plan:r2', by: 'alice@example.edu', machine: 'm2', since: '2026-11-10T07:00:00Z', until: '2026-11-11T07:00:00Z', mine: false },
+        { key: 'decay', by: 'alice@example.edu', machine: 'm2', since: '2026-11-10T07:10:00Z', until: '2026-11-11T07:10:00Z', mine: false },
+      ],
+    },
+  };
+  const noop = () => undefined;
+  const html = renderToStaticMarkup(React.createElement(TeamPage, { payload, onAction: noop, onShowInResults: noop, onOpenSettings: noop }));
+  assert.match(html, /Team · 2/);
+  assert.match(html, /Claims shared at once/);
+  // You first, with your claim releasable; Alice owns the main theorem and holds a route and a lemma.
+  assert.ok(html.indexOf('bob@example.edu') < html.indexOf('alice@example.edu'));
+  assert.match(html, /working on 1/);
+  assert.match(html, /working on 2/);
+  assert.match(html, /★ Main theorem/);
+  assert.match(html, /the route <b>via blow-up<\/b> to/);
+  assert.equal((html.match(/>Release</g) ?? []).length, 1, 'only your own claims can be released');
+  // A copy is offered for Alice's open routes, never for your own.
+  assert.equal((html.match(/Run a copy ↗/g) ?? []).length, 2);
+  // Alice's direct try is open and nobody holds it.
+  assert.match(html, /Open routes nobody is working on · 1[\s\S]*a direct try/);
+});

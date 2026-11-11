@@ -18,6 +18,7 @@ import { ASSET_TYPES, ASSET_TYPE_LIST } from '../src/domain/nodeKinds';
 import type { GraphAction, GraphPayload } from '../src/models/graph';
 import { OverviewPage } from './graph/OverviewPage';
 import { NeedsYouPage } from './graph/NeedsYouPage';
+import { TeamPage } from './graph/TeamPage';
 import { ProgressView } from './graph/ProgressView';
 import { ActivityPage, buttonStyle } from './graph/AttentionList';
 import type { UsageState } from './graph/UsageCard';
@@ -193,7 +194,7 @@ const initialState: State = {
 };
 
 /** Views drawn from the research overview payload. */
-const GRAPH_VIEWS: SidebarView[] = ['graph', 'needs', 'results', 'activity', 'manuscript'];
+const GRAPH_VIEWS: SidebarView[] = ['graph', 'needs', 'results', 'team', 'activity', 'manuscript'];
 const PASTE_KEY = /Mac/i.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
 
 function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -845,6 +846,8 @@ export function App() {
             state.graph
               ? <ProgressView payload={state.graph} options={resultsOptions} onOptions={setResultsOptions} selectedId={resultsSelected} onSelect={setResultsSelected} onNavigate={openNodeById} onAction={graphAction} />
               : <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Loading the results…</div>
+          ) : state.activeView === 'team' ? (
+            <TeamPage payload={state.graph} onAction={graphAction} onShowInResults={showInResults} onOpenSettings={() => handleSetView('settings')} />
           ) : state.activeView === 'activity' ? (
             <ActivityPage entries={state.graph?.history} onShow={showInResults} usage={usage} usageSpan={usageSpan} onUsageSpan={setUsageSpan} />
           ) : state.activeView === 'settings' ? (

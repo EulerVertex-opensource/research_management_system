@@ -92,6 +92,9 @@ export type GraphAction =
   | { action: 'openTex'; section: string; line?: number }
   /** Agent work stays in the chat: the extension copies the prompt and opens the chat. */
   | { action: 'agent'; prompt: string }
+  /** Claims (who works on what): fetch collaborators' claims now, or release one of this machine's. */
+  | { action: 'claims'; op: 'refresh' }
+  | { action: 'claims'; op: 'release'; key: string }
   /** Loop controls the researcher may use from the dashboard. */
   | { action: 'loop'; op: 'start' | 'resume' | 'extend' | 'openChat' }
   | { action: 'syncPull' }
@@ -243,6 +246,24 @@ export interface RouteView {
   supersededBy?: string;
 }
 
+/** One live claim: a unit (`plan:<id>` for a route, else a result ID) a collaborator's loop holds. */
+export interface TeamClaimView { key: string; by: string; machine: string; since: string; until: string; mine: boolean }
+
+/** Who works on what in a shared project, for the Team page. */
+export interface TeamView {
+  /** This collaborator (git email, or the configured sync identity). */
+  me: string;
+  /** How this machine's claims are shared: with each publish, or at once on the claims branch. */
+  shareClaims: 'publish' | 'auto';
+  claims: TeamClaimView[];
+  /** Main results with an owner, who commits routes into them. */
+  owners: Array<{ id: string; owner: string }>;
+  /** The latest record (decision, handoff, claim) each collaborator left. */
+  lastSeen: Record<string, string>;
+  /** When collaborators' claims were last fetched here. */
+  fetchedAt?: string;
+}
+
 export interface GraphPayload {
   generatedAt: string;
   required: string[];
@@ -266,4 +287,6 @@ export interface GraphPayload {
   study?: { behind: number; total: number };
   /** Every route to every result (parallel routes), oldest first. */
   routes?: RouteView[];
+  /** Collaborators and what each works on. */
+  team?: TeamView;
 }

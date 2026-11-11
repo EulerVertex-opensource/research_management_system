@@ -1,11 +1,11 @@
 import React from 'react';
 import type { SyncBadge } from '../../src/models/sync';
 
-export type SidebarView = 'project' | 'graph' | 'needs' | 'results' | 'activity' | 'papers' | 'assets' | 'definitions' | 'library' | 'ideas' | 'remarks' | 'plans' | 'manuscript' | 'settings';
+export type SidebarView = 'project' | 'graph' | 'needs' | 'results' | 'team' | 'activity' | 'papers' | 'assets' | 'definitions' | 'library' | 'ideas' | 'remarks' | 'plans' | 'manuscript' | 'settings';
 
 // 'graph' is the Overview tab; the id is kept for saved state and the extension's "show the Overview" message.
 const GROUPS: { title: string; items: { id: SidebarView; label: string }[] }[] = [
-  { title: 'Work', items: [{ id: 'graph', label: 'Overview' }, { id: 'needs', label: 'Needs you' }, { id: 'results', label: 'Results' }, { id: 'activity', label: 'Activity' }] },
+  { title: 'Work', items: [{ id: 'graph', label: 'Overview' }, { id: 'needs', label: 'Needs you' }, { id: 'results', label: 'Results' }, { id: 'team', label: 'Team' }, { id: 'activity', label: 'Activity' }] },
   { title: 'Research', items: [{ id: 'definitions', label: 'Definitions' }, { id: 'library', label: 'Library' }, { id: 'assets', label: 'Assets' }, { id: 'ideas', label: 'Ideas' }, { id: 'remarks', label: 'Remarks' }, { id: 'plans', label: 'Plans' }] },
   { title: 'Writing', items: [{ id: 'papers', label: 'Papers' }, { id: 'manuscript', label: 'Manuscript' }] },
 ];
