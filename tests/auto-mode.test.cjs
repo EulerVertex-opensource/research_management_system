@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 const { searchNothing, writeRound } = require('./search-fixtures.cjs');
 
 function load(file) {
@@ -421,7 +422,7 @@ test('failed-plan limit and iteration cap come from the loop settings', async ()
   assert.equal(override.core.current.autopilot.iterationCap, 2);
 });
 
-const nodeChecks = (f) => [...f.map.entries()].filter(([file]) => file.startsWith('research/decisions/')).map(([, raw]) => matter(raw)).filter((item) => item.data.kind === 'node_check');
+const nodeChecks = (f) => decisionDocs(f.map).filter((item) => item.data.kind === 'node_check');
 
 /** Goals approved, main_theorem scaffolded with the given files, sources done: up to the first next. */
 async function driveToSelect(f, scaffold) {

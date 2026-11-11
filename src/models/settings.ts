@@ -57,6 +57,8 @@ export const RIGOR_OPTIONS = {
   reviewRoutes: ['main', 'off'],
   /** A lemma inside a route that is stuck: ask the researcher (as before), or first try a round of routes for it. */
   lemmaRoutes: ['off', 'on'],
+  /** What this collaborator works on (their claims): shared with each publish, or at once on the claims branch (no research files). */
+  shareClaims: ['publish', 'auto'],
 } as const;
 export type RigorKey = keyof typeof RIGOR_OPTIONS;
 export const RIGOR_KEYS = Object.keys(RIGOR_OPTIONS) as RigorKey[];

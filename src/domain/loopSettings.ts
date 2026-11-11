@@ -22,7 +22,7 @@ export const DEFAULT_AUTONOMY: AutonomyPolicy = { enabled: false };
 export const RIGOR_GROUP: Record<RigorKey, 'checks' | 'away' | 'routes'> = {
   refuteSearch: 'checks', verifyProofs: 'checks', agreeDefinitions: 'checks', onDependencyChange: 'checks', verifyExtracted: 'checks',
   missingDefinitions: 'away', whenStuck: 'away', unansweredQuestions: 'away',
-  reviewRoutes: 'routes', lemmaRoutes: 'routes',
+  reviewRoutes: 'routes', lemmaRoutes: 'routes', shareClaims: 'routes',
 };
 export const CHECK_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'checks');
 export const AWAY_KEYS = RIGOR_KEYS.filter((key) => RIGOR_GROUP[key] === 'away');
@@ -34,7 +34,7 @@ export const RIGOR_PRESETS: Record<'careful' | 'fast', CheckPolicy> = {
   careful: { refuteSearch: 'all', verifyProofs: 'agent', agreeDefinitions: 'main', onDependencyChange: 'revert', verifyExtracted: 'agent' },
   fast: { refuteSearch: 'main', verifyProofs: 'off', agreeDefinitions: 'off', onDependencyChange: 'flag', verifyExtracted: 'off' },
 };
-export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait', reviewRoutes: 'main', lemmaRoutes: 'off' };
+export const DEFAULT_RIGOR: RigorPolicy = { ...RIGOR_PRESETS.careful, missingDefinitions: 'wait', whenStuck: 'park', unansweredQuestions: 'wait', reviewRoutes: 'main', lemmaRoutes: 'off', shareClaims: 'publish' };
 
 /** The preset a policy's checks match, or `custom`. */
 export function rigorPreset(policy: RigorPolicy): 'careful' | 'fast' | 'custom' {
@@ -72,6 +72,7 @@ export const RIGOR_FIELDS: { [K in RigorKey]: RigorField & { options: Record<(ty
   whenStuck: { label: 'When a result is stuck and you give no direction', hint: 'After the failed-attempt limit, or when a construction search runs out.', options: { park: 'Set it aside', retry: 'Agent tries one new approach itself' } },
   reviewRoutes: { label: 'Review route maps', hint: 'Before the routes to a main result are worked on, you see them side by side, with the lemmas they share, and approve, drop, or add routes. Off: the loop starts on them at once.', options: { main: 'Before working on them', off: 'Don’t ask me' } },
   lemmaRoutes: { label: 'When a lemma in a route is stuck', hint: 'A lemma normally gets one proof attempt after another. On: once its attempts run out, the loop first plans several routes to it before asking you.', options: { off: 'Ask me', on: 'Try several routes first' } },
+  shareClaims: { label: 'Tell collaborators what you work on', hint: 'The loop claims the route or result it works on, so a collaborator’s loop works on something else. At once: the loop pushes only its claims, on a branch of their own (research-claims), never research files. With each publish: claims travel when you publish.', options: { publish: 'When I publish', auto: 'At once (claims only)' } },
   unansweredQuestions: { label: 'When a question goes unanswered', hint: 'After the question timeout.', options: { wait: 'The loop waits for me', default: 'The agent goes on with its default' } },
 };
 

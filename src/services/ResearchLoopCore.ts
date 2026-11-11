@@ -12,6 +12,7 @@ import {
   proofDigest, proofText, researchDigest, sharedFolders, statementDigest, statementIncomplete, validateResearchFile,
 } from './ResearchLoopModel';
 import { STATE_LOCK_PATH, StateLockOptions, acquireStateLock } from './StateLock';
+import { ActiveClaim, ClaimEvent, ClaimTransport, DEFAULT_LEASE_HOURS, GitClaimTransport, claimHolders, parseClaimLines } from './Claims';
 import { CONJECTURE_TYPE, INACTIVE_STATUSES, IdeaKind, PROMOTED_TYPES, PROVABLE_TYPES, REUSABLE_IDEA_KINDS, WARNING_SECTION, toIdeaKind } from '../domain/nodeKinds';
 import { ideaUsage, promotionCandidates, triedRecords, usageLine } from '../domain/ideaUsage';
 import { RankedConjecture, describeConjectures, rankConjectures } from '../domain/conjectures';
@@ -23,11 +24,11 @@ import {
   CandidateInfo, NEGATED_CONCLUSION, RoundInfo, SearchMode, SearchProgress, TriedIdea, assignDirections, candidateChecks, checkSections, parseCandidate, parseRound, renderBoard, roundDigest, searchProgress, specProperties, triedOutcome,
 } from '../domain/search';
 import { normalizeContextBudgets, normalizeSyncConfig } from './ProjectPathsCore';
-import { projectSection, requiredAssetIds } from '../domain/project';
+import { projectSection, requiredAssetIds, requiredResults } from '../domain/project';
 import { duplicateIds, isCited } from '../domain/schema';
 import { appendToSection, hasSection, sectionContent, statementPart, stripManagedBlocks, verdictOutcome } from '../domain/sections';
 import { ProofRevision, REVISIONS_DIR, withProof } from '../domain/revisions';
-import { ProofGraph, ProofNumbers, ROUTE_DIRECTIONS, RouteInfo, applyBeam, isActiveRoute, isOpenRoute, isRoutePlan, mostProvingStep, reductionDigest, routeInfo, routeLemmas, routeMapCovered, routeMapDigest, routeMapEntries, splitRoutes } from '../domain/routes';
+import { ProofGraph, ProofNumbers, ROUTE_DIRECTIONS, RouteInfo, applyBeam, withWinners, isActiveRoute, isOpenRoute, isRoutePlan, mostProvingStep, reductionDigest, routeInfo, routeLemmas, routeMapCovered, routeMapDigest, routeMapEntries, splitRoutes } from '../domain/routes';
 import type { RouteOrigin, RouteRound, RouteSlot } from '../domain/routeSchema';
 import { understandingParts } from '../domain/understanding';
 import { layoutReport } from '../domain/layout';
@@ -37,7 +38,8 @@ import { RemarkInput, Remarks } from './Remarks';
 import { Remark, RemarkFrom, isRemarkChecked, remarkReferenceProblems } from '../domain/remarks';
 import {
   CheckInfo, DecisionExtra, DecisionInfo, DecisionKind, Provenance, checkMarkdown, sortDecisions, decisionId, decisionMarkdown, deriveChangesRequested, deriveParked,
-  failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, stamp, stampSearchRecord,
+  failuresSinceDirection, handoffMarkdown, latestDirection, parseCheck, parseDecision, parseHandoff, safeIdPart, stamp, stampSearchRecord,
+  IdeaUpdate, LOG_EXTENSION, decisionFromRecord, decisionRecord, handoffFromRecord, handoffRecord, ideaUpdatesOf, logFileName, logLine, overlayIdea, parseLog,
 } from './ResearchRecords';
 import {
   ContextManifest, ContextNode, ContextSources, DEFAULT_CONTEXT_BUDGETS, RenderedContext, assetClosure, definitionClosure, hasContextPack, planContext, projectPart, renderContext, renderShow,
@@ -58,6 +60,8 @@ export interface CoreOptions {
   iterationCap?: number;
   /** Git for base-commit tracking and provenance; without it the loop works as before. */
   git?: LoopGit;
+  /** Where collaborators' claims come from (tests inject one); defaults to the claims branch over git. */
+  claimTransport?: ClaimTransport;
   /** Who performs researcher actions on this machine; defaults to sync.identity, then git user.email. */
   identity?: string;
   extensionVersion?: string;
@@ -139,7 +143,9 @@ export class ResearchLoopCore {
     this.extensionVersion = options.extensionVersion;
     this.contextBudgets = options.contextBudgets;
     this.stateLock = options.stateLock;
+    this.claimTransportOption = options.claimTransport;
   }
+  private claimTransportOption?: ClaimTransport;
 
   /**
    * Run `action` as the only writer of the loop state: take the cross-process state lock, load the
@@ -441,6 +447,8 @@ export class ResearchLoopCore {
     if (stage !== 'waiting') delete state.waitingOn;
     const inputs = await this.freezeInputs(stage, state.current);
     if (inputs) state.current.inputs = inputs; else delete state.current.inputs;
+    const key = this.stageKey(stage, state.current);
+    if (key) await this.claim([key]);
     await this.takeSnapshot();
     // The log line goes first and state.json last, so state.json is the commit point: when this throws, the
     // stage on disk has not moved and the caller may retry (at worst the log shows the stage line twice).
@@ -559,6 +567,7 @@ export class ResearchLoopCore {
 
   async stop(): Promise<void> {
     const state = this.require();
+    await this.releaseClaims();
     state.status = 'stopped';
     state.pendingQuestion = undefined;
     state.lock = undefined;
@@ -1387,17 +1396,52 @@ export class ResearchLoopCore {
     }
     const provenance = await this.provenance();
     const id = decisionId(kind, target, provenance, this.shortId());
-    await this.writeOwned(`${this.shared.decisions}/${id}.md`, decisionMarkdown(kind, target, text, provenance, extra));
+    await this.appendLog(decisionRecord(id, kind, target, text, provenance, extra));
     return id;
   }
 
+  /** This collaborator's log for this month on this machine: the only log this machine writes. */
+  private async logFile(): Promise<string> {
+    return `${this.shared.log}/${logFileName((await this.provenance()).performed_by, this.now(), await this.machine())}`;
+  }
+
+  private async appendLog(record: Record<string, unknown>): Promise<string> {
+    const file = await this.logFile();
+    const text = await this.files.readFile(file).catch(() => '');
+    await this.writeOwned(file, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${logLine(record)}\n`);
+    return file;
+  }
+
+  /** Every collaborator's log records, with the file each came from. */
+  private async logRecords(): Promise<Array<{ file: string; record: Record<string, any> }>> {
+    const records: Array<{ file: string; record: Record<string, any> }> = [];
+    for (const file of await this.files.listFiles(this.shared.log, LOG_EXTENSION)) for (const record of parseLog(await this.files.readFile(file).catch(() => ''))) records.push({ file, record });
+    return records;
+  }
+
+  /** Decisions from every log, and from decision files written before the logs (until migrated). */
   async decisions(): Promise<DecisionInfo[]> {
     const result: DecisionInfo[] = [];
     for (const file of await this.files.listFiles(this.shared.decisions)) {
       const info = parseDecision(path.posix.basename(file, '.md'), await this.files.readFile(file).catch(() => ''));
       if (info) result.push(info);
     }
+    for (const { record } of await this.logRecords()) {
+      const info = record.type === 'decision' ? decisionFromRecord(record) : undefined;
+      if (info) result.push(info);
+    }
     return result;
+  }
+
+  /** Record a change to an idea: the idea's file stays as it was written, and readers apply the update over it. */
+  private async updateIdea(ideaId: string, update: IdeaUpdate, note: string): Promise<void> {
+    await this.writeDecision('idea_update', ideaId, note, { idea: update });
+  }
+
+  /** An idea's text with every update applied. */
+  private async readIdea(ideaId: string): Promise<string> {
+    const raw = await this.files.readFile(`${this.paths.ideas}/${ideaId}.md`);
+    return overlayIdea(raw, ideaUpdatesOf(await this.decisions()).get(ideaId));
   }
 
   async checks(): Promise<CheckInfo[]> {
@@ -1578,8 +1622,7 @@ export class ResearchLoopCore {
   private async closeTriedIdeas(assetId: string, search: SearchRound, digest: string): Promise<void> {
     const progress = await this.searchProgressFor(assetId);
     for (const slot of search.slots) {
-      const file = `${this.paths.ideas}/${slot.direction}.md`;
-      const raw = await this.files.readFile(file).catch(() => '');
+      const raw = await this.readIdea(slot.direction).catch(() => '');
       if (!raw) continue;
       const parsed = parseMarkdown(raw);
       if (parsed.data.type !== 'idea' || parsed.data.status === 'archived') continue;
@@ -1587,8 +1630,7 @@ export class ResearchLoopCore {
       if (records.some((record) => record.target === assetId && record.round === search.round)) continue;
       const written = progress.candidates.filter((item) => item.round === search.round && item.slot === slot.slot);
       const outcome = triedOutcome(written, slot.direction);
-      parsed.data.tried_in = [...records, { target: assetId, round: search.round, slot: slot.slot, statement_digest: digest, outcome }];
-      await this.writeOwned(file, stringifyMarkdown(appendToSection(parsed.content, 'Tried', `- Search round ${search.round} for ${assetId} (slot ${slot.slot}): ${outcome}`), parsed.data));
+      await this.updateIdea(slot.direction, { tried: { target: assetId, round: search.round, slot: slot.slot, statement_digest: digest, outcome }, heading: 'Tried', text: `- Search round ${search.round} for ${assetId} (slot ${slot.slot}): ${outcome}` }, `Tried in search round ${search.round} for ${assetId}: ${outcome}`);
       await this.event('idea_tried', { ideaId: slot.direction, assetId, round: search.round, outcome });
     }
   }
@@ -1869,7 +1911,7 @@ export class ResearchLoopCore {
    * not changed, so it stays open for other results (where it was used is derived from the plans).
    */
   async convertIdea(ideaId: string, assetId: string, goal: string, steps: string, verification: string): Promise<string> {
-    const ideaRaw = await this.files.readFile(`${this.paths.ideas}/${ideaId}.md`);
+    const ideaRaw = await this.readIdea(ideaId);
     const idea = parseMarkdown(ideaRaw).data;
     if (idea.type !== 'idea') throw new Error('Source must be an idea.');
     if (idea.status === 'refuted') throw new Error(`${ideaId} was refuted (see its ## Refutation); a plan cannot rest on it.`);
@@ -1892,8 +1934,7 @@ export class ResearchLoopCore {
    * resolved (where it was tried is recorded per result).
    */
   async resolveIdea(ideaId: string, resolvedBy: string, note?: string): Promise<void> {
-    const file = `${this.paths.ideas}/${ideaId}.md`;
-    const parsed = parseMarkdown(await this.files.readFile(file));
+    const parsed = parseMarkdown(await this.readIdea(ideaId));
     if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
     if (parsed.data.status === 'resolved' && parsed.data.resolved_by === resolvedBy) return;
     const kind = toIdeaKind(parsed.data.idea_kind);
@@ -1902,10 +1943,7 @@ export class ResearchLoopCore {
       throw new Error(`A plan uses the ${kind} ${ideaId} without using it up: list it in the plan's inspired_by, and it stays open for other results. ${kind === 'observation' ? 'To settle it, promote it to a lemma (idea promote) or refute it (idea refute).' : 'If it cannot work in general, mark it obstructed (idea obstruct).'}`);
     }
     if (kind === 'observation' && !(await findNodeFile(this.files, this.paths, 'asset', resolvedBy))) throw new Error(`An observation is resolved only by the lemma it became: use idea promote, or idea refute when it is false.`);
-    parsed.data.status = 'resolved';
-    parsed.data.resolved_by = resolvedBy;
-    const content = note ? `${parsed.content.trimEnd()}\n\n## Resolution\n\n${note}\n` : parsed.content;
-    await this.files.writeFile(file, stringifyMarkdown(content, parsed.data));
+    await this.updateIdea(ideaId, { status: 'resolved', resolved_by: resolvedBy, ...(note ? { heading: 'Resolution', text: note } : {}) }, `Resolved by ${resolvedBy}${note ? `: ${note}` : ''}`);
     await this.event('idea_resolved', { ideaId, resolvedBy });
   }
 
@@ -1916,8 +1954,7 @@ export class ResearchLoopCore {
    * which is the researcher's call. The loop proves the lemma like any other draft result.
    */
   async promoteIdea(ideaId: string, options: { id: string; statement: string; title?: string; type?: string; into?: string[]; usesDefinitions?: string[] }): Promise<{ assetId: string; into: string[] }> {
-    const file = `${this.paths.ideas}/${ideaId}.md`;
-    const parsed = parseMarkdown(await this.files.readFile(file));
+    const parsed = parseMarkdown(await this.readIdea(ideaId));
     if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
     const kind = toIdeaKind(parsed.data.idea_kind);
     if (!REUSABLE_IDEA_KINDS.has(kind)) throw new Error(`Only an observation or an approach is promoted to a lemma; ${ideaId} is a ${kind}.`);
@@ -1960,16 +1997,14 @@ export class ResearchLoopCore {
    * reason is kept, and similar results see it so they do not try the same thing.
    */
   async markIdea(ideaId: string, status: 'refuted' | 'obstructed', reason: string): Promise<void> {
-    const file = `${this.paths.ideas}/${ideaId}.md`;
-    const parsed = parseMarkdown(await this.files.readFile(file));
+    const parsed = parseMarkdown(await this.readIdea(ideaId));
     if (parsed.data.type !== 'idea') throw new Error(`${ideaId} is not an idea.`);
     const kind = toIdeaKind(parsed.data.idea_kind);
     const expected = status === 'refuted' ? 'observation' : 'approach';
     if (kind !== expected) throw new Error(`Only an ${expected} is ${status}; ${ideaId} is a ${kind}.`);
     if (parsed.data.status !== 'draft') throw new Error(`${ideaId} is ${parsed.data.status}; only an open idea is ${status}.`);
     if (!reason.trim()) throw new Error(`--reason is required: ${status === 'refuted' ? 'the counterexample or the argument that it is false' : 'why the approach cannot work in general'}.`);
-    parsed.data.status = status;
-    await this.files.writeFile(file, stringifyMarkdown(appendToSection(parsed.content, WARNING_SECTION[status], reason.trim()), parsed.data));
+    await this.updateIdea(ideaId, { status, heading: WARNING_SECTION[status], text: reason.trim() }, `${status}: ${reason.trim()}`);
     await this.event(`idea_${status}`, { ideaId });
   }
 
@@ -1985,11 +2020,10 @@ export class ResearchLoopCore {
 
   /** Question ideas left by an unanswered question, resolved once the researcher answers it. */
   private async resolveQuestionIdeas(questionId: string, lateAnswer?: string, decisionId?: string): Promise<void> {
-    for (const file of await this.files.listFiles(this.paths.ideas)) {
-      let data: Record<string, any>;
-      try { data = parseMarkdown(await this.files.readFile(file)).data; } catch { continue; }
+    for (const idea of (await this.collect(this.paths.ideas)).values()) {
+      const data = idea.data;
       if (data.question_id !== questionId || data.status !== 'draft') continue;
-      const id = path.posix.basename(file, '.md');
+      const id = idea.id;
       const by = decisionId ?? await this.writeDecision('answer', Array.isArray(data.related_assets) && data.related_assets[0] ? String(data.related_assets[0]) : 'project', `${String(data.title ?? '')}\n\n${lateAnswer ?? ''}`);
       await this.resolveIdea(id, by, lateAnswer ? `Answered by the researcher: ${lateAnswer}` : undefined);
     }
@@ -1999,8 +2033,10 @@ export class ResearchLoopCore {
 
   private async collect(folder: string): Promise<Map<string, AssetInfo>> {
     const nodes = new Map<string, AssetInfo>();
+    // Ideas are read with their updates applied (status, resolution, added sections, tries).
+    const updates = folder === this.paths.ideas ? ideaUpdatesOf(await this.decisions()) : undefined;
     for (const file of await this.files.listFiles(folder)) {
-      const raw = await this.files.readFile(file);
+      const raw = updates ? overlayIdea(await this.files.readFile(file), updates.get(path.posix.basename(file, '.md'))) : await this.files.readFile(file);
       const location = locateNodeFile(file, this.paths);
       const library = location?.origin === 'library' ? { origin: 'library' as const, collection: location.collection } : {};
       try { const parsed = parseMarkdown(raw); nodes.set(path.posix.basename(file, '.md'), { id: path.posix.basename(file, '.md'), file, raw, data: parsed.data, body: parsed.content, ...library }); } catch { /* skipped here; next() stops while one exists (unparsableNodes) */ }
@@ -2578,8 +2614,10 @@ export class ResearchLoopCore {
   }
 
   /** `skip`: results another worker of a batch already has; selection passes over them. */
-  private async selectOnce(skip: ReadonlySet<string> = new Set()): Promise<Selection> {
+  private async selectOnce(skipped: ReadonlySet<string> = new Set()): Promise<Selection> {
     const state = this.require();
+    // What collaborators hold is passed over like what another worker of a batch has.
+    const skip: ReadonlySet<string> = new Set([...skipped, ...await this.heldByOthers()]);
     const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
     const approvals = (await this.approvals()).records;
     const required = requiredAssetIds(project);
@@ -2741,7 +2779,7 @@ export class ResearchLoopCore {
     for (const id of order) {
       if (routing && routed.has(id) && !routeOnly.has(id)) {
         const selection = await this.routeSelection(id, routing);
-        if (selection === 'reselect') return this.selectOnce(skip);
+        if (selection === 'reselect') return this.selectOnce(skipped);
         if (selection) { candidate = selection; break; }
         continue;
       }
@@ -2783,6 +2821,111 @@ export class ResearchLoopCore {
       ...missingDefinitions.map((id): WaitingReason => ({ kind: 'missing_definition', target: id, detail: order.find((asset) => (assets.get(asset)?.data.uses_definitions ?? []).includes(id)) })),
     ];
     return { stage: 'waiting', reason: reasons.join('; ') || 'nothing actionable', waitingOn };
+  }
+
+  // ---------- claims: who works on what, across collaborators ----------
+
+  private static readonly CLAIMS_MINE = `${STATE_DIR}/claims.jsonl`;
+  private static readonly CLAIMS_OTHERS = `${STATE_DIR}/claims-others.json`;
+  private static readonly MACHINE = `${STATE_DIR}/machine.json`;
+
+  /** A random ID for this machine (kept locally), so one collaborator on two machines does not collide with themself. */
+  private async machine(): Promise<string> {
+    try { const id = JSON.parse(await this.files.readFile(ResearchLoopCore.MACHINE)).id; if (typeof id === 'string' && id) return id; } catch { /* first use */ }
+    const id = this.id().replace(/-/g, '').slice(0, 8);
+    await this.files.writeFile(ResearchLoopCore.MACHINE, JSON.stringify({ id }) + '\n');
+    return id;
+  }
+
+  private async claimFileName(): Promise<string> { return `${safeIdPart(await this.me())}__${await this.machine()}.jsonl`; }
+
+  private async claimTransport(): Promise<ClaimTransport | undefined> {
+    if (this.claimTransportOption) return this.claimTransportOption;
+    if (!this.git) return undefined;
+    const name = await this.claimFileName();
+    return (this.claimTransportOption = new GitClaimTransport(this.git, async () => normalizeSyncConfig((await this.projectConfig()).sync).remote, name, () => this.me()));
+  }
+
+  private async myClaimText(): Promise<string> { return this.files.readFile(ResearchLoopCore.CLAIMS_MINE).catch(() => ''); }
+
+  /** Every claim event known here: this machine's own, and collaborators' as last fetched. */
+  async claimEvents(): Promise<ClaimEvent[]> {
+    let others: string[] = [];
+    try { others = (JSON.parse(await this.files.readFile(ResearchLoopCore.CLAIMS_OTHERS)) as { texts?: string[] }).texts ?? []; } catch { /* none fetched yet */ }
+    return [...parseClaimLines(await this.myClaimText()), ...others.flatMap(parseClaimLines)];
+  }
+
+  /** Units held now, each by its earliest live claim. */
+  async claims(): Promise<ActiveClaim[]> { return [...claimHolders(await this.claimEvents(), this.now()).values()]; }
+
+  /** Units a collaborator (or this collaborator on another machine) holds: selection passes over them. */
+  private async heldByOthers(): Promise<Set<string>> {
+    const me = await this.me();
+    const machine = await this.machine();
+    return new Set((await this.claims()).filter((claim) => claim.by !== me || claim.machine !== machine).map((claim) => claim.key));
+  }
+
+  /** Fetch collaborators' claims (at most every two minutes unless forced). */
+  async refreshClaims(force = false): Promise<void> {
+    const transport = await this.claimTransport();
+    if (!transport) return;
+    let fetchedAt = '';
+    try { fetchedAt = (JSON.parse(await this.files.readFile(ResearchLoopCore.CLAIMS_OTHERS)) as { fetchedAt?: string }).fetchedAt ?? ''; } catch { /* never */ }
+    if (!force && fetchedAt && Date.parse(this.now()) - Date.parse(fetchedAt) < 120_000) return;
+    try {
+      const texts = await transport.fetch();
+      await this.files.writeFile(ResearchLoopCore.CLAIMS_OTHERS, JSON.stringify({ fetchedAt: this.now(), texts }) + '\n');
+    } catch (error) { await this.event('claims_fetch_failed', { error: error instanceof Error ? error.message : String(error) }); }
+  }
+
+  /** Push this machine's claims to the claims branch; false when it could not now (no remote, offline). */
+  async shareClaims(): Promise<boolean> {
+    const transport = await this.claimTransport();
+    if (!transport) return false;
+    try { return await transport.push(await this.myClaimText()); } catch { return false; }
+  }
+
+  /**
+   * Claim units this loop starts work on (a renewal only once half the lease has passed), and share
+   * them at once when the researcher allowed it.
+   */
+  private async claim(keys: string[]): Promise<void> {
+    if (!keys.length) return;
+    const me = await this.me();
+    const machine = await this.machine();
+    const mine = parseClaimLines(await this.myClaimText());
+    const now = this.now();
+    const fresh = (key: string) => {
+      const last = mine.filter((event) => event.key === key).pop();
+      return last?.op === 'claim' && Date.parse(now) - Date.parse(last.at) < (last.lease_hours * 3600_000) / 2;
+    };
+    const lines = keys.filter((key) => !fresh(key)).map((key) => JSON.stringify({ key, by: me, machine, op: 'claim', at: now, lease_hours: DEFAULT_LEASE_HOURS } satisfies ClaimEvent));
+    if (!lines.length) return;
+    const text = await this.myClaimText();
+    await this.files.writeFile(ResearchLoopCore.CLAIMS_MINE, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${lines.join('\n')}\n`);
+    if ((await this.loopSettings()).rigor.shareClaims === 'auto' && !(await this.shareClaims())) await this.event('claims_not_shared', { keys });
+  }
+
+  /** Release this machine's claims (all, or the given units). */
+  async releaseClaims(keys?: string[]): Promise<string[]> {
+    const me = await this.me();
+    const machine = await this.machine();
+    const held = (await this.claims()).filter((claim) => claim.by === me && claim.machine === machine && (!keys || keys.includes(claim.key))).map((claim) => claim.key);
+    if (!held.length) return [];
+    const now = this.now();
+    const text = await this.myClaimText();
+    await this.files.writeFile(ResearchLoopCore.CLAIMS_MINE, `${text}${held.map((key) => JSON.stringify({ key, by: me, machine, op: 'release', at: now, lease_hours: DEFAULT_LEASE_HOURS } satisfies ClaimEvent)).join('\n')}\n`);
+    if ((await this.loopSettings()).rigor.shareClaims === 'auto') await this.shareClaims();
+    return held;
+  }
+
+  /** The unit a stage works on, as claims and batches name it. */
+  private stageKey(stage: LoopStage, current: LoopState['current']): string | undefined {
+    if ((stage === 'reduce' || stage === 'verify_reduction') && current.planId) return `plan:${current.planId}`;
+    if (stage === 'verify_node') return current.node?.id;
+    if (ROUTE_STAGES.has(stage)) return current.route?.target ?? current.assetId;
+    if (['plan', 'execute', 'verify_proof', 'search', 'search_summary', 'verify_counterexample', 'verify_construction'].includes(stage)) return current.assetId;
+    return undefined;
   }
 
   // ---------- batches: several results worked on at once ----------
@@ -2851,6 +2994,7 @@ export class ResearchLoopCore {
       const inputs = await this.freezeInputs(item.stage, this.itemCurrent(item, state.current));
       if (inputs) item.inputs = inputs;
     }
+    await this.claim(items.map((item) => item.planId && (item.stage === 'reduce' || item.stage === 'verify_reduction') ? `plan:${item.planId}` : item.assetId));
     await this.save();
     await this.event('batch_started', { items: items.map((item) => ({ item: item.item, stage: item.stage, assetId: item.assetId })) });
     return true;
@@ -2936,7 +3080,10 @@ export class ResearchLoopCore {
    * whose lemma is gone is dead, not a reason to scaffold.
    */
   private async routeClosure(roots: string[], base: ReturnType<typeof assetClosure>, assets: Map<string, AssetInfo>): Promise<ReturnType<typeof assetClosure>> {
-    const open = (await this.routePlans()).filter((plan) => plan.data.status === 'pending');
+    const plans = await this.routePlans();
+    const won = new Set(plans.filter((plan) => plan.data.status === 'succeeded').map((plan) => String(plan.data.target_asset)));
+    // Once a route won, the result's other routes are superseded (derived): their lemmas leave the scope.
+    const open = plans.filter((plan) => plan.data.status === 'pending' && !won.has(String(plan.data.target_asset)));
     if (!open.length) return base;
     const extra: string[] = [];
     let closure = base;
@@ -2967,6 +3114,52 @@ export class ResearchLoopCore {
   /** The stage after a result survived its counterexample search: its routes (through selection), or a plan. */
   private async afterSurvived(assetId: string): Promise<[LoopStage, Partial<LoopState['current']>]> {
     return await this.willRoute(assetId) ? ['select', { assetId: undefined, counterexampleId: undefined, planId: undefined }] : ['plan', { counterexampleId: undefined, planId: await this.pendingPlan(assetId) }];
+  }
+
+  /** This collaborator's identity (git email, or the configured sync identity). */
+  private async me(): Promise<string> { return (await this.provenance()).performed_by; }
+
+  /** A route belongs to whoever created it; one written before routes had creators belongs to everyone. */
+  private isMineRoute(data: Record<string, any>, me: string): boolean {
+    return typeof data.created_by !== 'string' || !data.created_by || data.created_by === me;
+  }
+
+  /** The owner of a result, who commits routes into it: from required_results, else the asset's own `owner`; undefined is anyone. */
+  private async ownerOf(id: string, assets?: Map<string, AssetInfo>): Promise<string | undefined> {
+    const fromProject = requiredResults(await this.files.readFile(this.paths.projectMd).catch(() => '')).find((item) => item.id === id)?.owner;
+    if (fromProject) return fromProject;
+    const owner = (assets ?? await this.collectKind('asset')).get(id)?.data.owner;
+    return typeof owner === 'string' && owner.trim() ? owner.trim() : undefined;
+  }
+
+  /** Stamp who created a plan the loop just accepted (a route, a plan, a copy), so collaborators know whose it is. */
+  private async stampCreator(file: string, extra: Record<string, unknown> = {}): Promise<void> {
+    const parsed = parseMarkdown(await this.files.readFile(file));
+    if (typeof parsed.data.created_by !== 'string') parsed.data.created_by = await this.me();
+    Object.assign(parsed.data, extra);
+    await this.writeOwned(file, stringifyMarkdown(parsed.content, parsed.data));
+  }
+
+  /**
+   * Copy a collaborator's open route to work on it yourself: the copy is a new route of yours with the
+   * same lemmas (so a lemma is still proved once, whoever claims it) and no reduction yet. The result's
+   * owner may commit either route; nothing needs merging. Only when the researcher asks.
+   */
+  async copyRoute(planId: string): Promise<string> {
+    const source = (await this.routePlans()).find((plan) => plan.id === planId);
+    if (!source) throw new Error(`${planId} is not a route.`);
+    if (source.data.status !== 'pending') throw new Error(`${planId} is ${source.data.status}; only an open route is copied.`);
+    const me = await this.me();
+    if (this.isMineRoute(source.data, me)) throw new Error(`${planId} is your own route already; the loop works on it as it is.`);
+    const slug = safeIdPart(me.split('@')[0]).slice(0, 16) || 'me';
+    let id = `${planId}_copy_${slug}`.slice(0, 110);
+    for (let n = 2; await this.files.exists(`${this.paths.plans}/${id}.md`); n++) id = `${planId}_copy_${slug}_${n}`.slice(0, 115);
+    const data: Record<string, any> = { ...source.data, status: 'pending', origin: 'copy', copied_from: planId, created_by: me, title: `${String(source.data.title ?? planId)} (copy)` };
+    for (const key of ['reduction_digest', 'reduction_verified_digest', 'reduction_inputs', 'reduction_checked', 'forked_from', 'superseded_by', 'proof_digest', 'statement_digest', 'dependency_digests', 'verified_proof_digest']) delete data[key];
+    const content = source.body.replace(/^## (Reduction|Reduction verdict|Earlier reduction verdict|Failure|Progress|Outcome|Dropped|Abandoned)[ \t]*\r?\n[\s\S]*?(?=^## |(?![\s\S]))/gm, '').trimEnd() + '\n';
+    await this.writeOwned(`${this.paths.plans}/${id}.md`, stringifyMarkdown(content, data));
+    await this.event('route_copied', { planId: id, from: planId, target: source.data.target_asset });
+    return `${planId} copied to ${id}, a route of yours to ${String(source.data.target_asset)} with the same lemmas. Continue with ${LOOP_COMMAND} next.`;
   }
 
   /** Whether a result has routes, whatever their state. */
@@ -3003,8 +3196,8 @@ export class ResearchLoopCore {
     const retired = (id: string) => !assets.has(id) || ['deprecated', 'archived'].includes(assets.get(id)!.data.status);
     const plans = await this.plans();
     const failed = (id: string) => plans.filter((plan) => plan.data.target_asset === id && plan.data.status === 'failed').length;
-    const raw = plans.filter((plan) => isRoutePlan(plan.data))
-      .map((plan) => routeInfo(this.currentReductionPlan(plan, assets), (id) => ({ settled: settled.has(id), refuted: refuted(id), inactive: retired(id), parked: Boolean(state.parked[id]) })));
+    const raw = withWinners(plans.filter((plan) => isRoutePlan(plan.data))
+      .map((plan) => routeInfo(this.currentReductionPlan(plan, assets), (id) => ({ settled: settled.has(id), refuted: refuted(id), inactive: retired(id), parked: Boolean(state.parked[id]) }))));
     const graphOf = (routes: RouteInfo[]): ProofGraph => ({
       settled: (id) => settled.has(id),
       dead: (id) => retired(id) || refuted(id),
@@ -3044,7 +3237,16 @@ export class ResearchLoopCore {
       rounds.set(node, this.routeRequest(node, last, ctx.decisions) || used < settings.routeRounds ? 'round' : 'stuck');
     }
     const actionable = (node: string) => !skip.has(node) && (ctx.work.has(node) || (ctx.routed.has(node) && rounds.has(node) && rounds.get(node) !== 'waiting'));
-    const step = mostProvingStep(id, ctx.graph, actionable, (candidate) => (candidate.kind === 'reduce' || candidate.kind === 'verify_reduction') && skip.has(`plan:${candidate.planId}`));
+    // A collaborator's route is reduced by its creator (copy it to work on it yourself); a complete route is committed by the result's owner.
+    const me = await this.me();
+    const theirs = new Set(plans.filter((plan) => !this.isMineRoute(plan.data, me)).map((plan) => plan.id));
+    const owners = new Map<string, string | undefined>();
+    for (const route of ctx.routes) if (!owners.has(route.target)) owners.set(route.target, await this.ownerOf(route.target));
+    const step = mostProvingStep(id, ctx.graph, actionable, (candidate) => {
+      if (candidate.kind === 'reduce' || candidate.kind === 'verify_reduction') return skip.has(`plan:${candidate.planId}`) || theirs.has(candidate.planId);
+      if (candidate.kind === 'commit') { const owner = owners.get(candidate.target); return Boolean(owner) && owner !== me; }
+      return false;
+    });
     if (!step) return undefined;
     switch (step.kind) {
       case 'asset': {
@@ -3115,15 +3317,8 @@ export class ResearchLoopCore {
     else delete plan.data.verified_proof_digest;
     const outcome = `The reduction is now the proof of ${target} (under ## Proof)${lemmas.length ? `; it rests on ${lemmas.join(', ')}, now in its depends_on` : ''}.`;
     await this.writeOwned(planFile, stringifyMarkdown(`${plan.content.trimEnd()}\n\n## Outcome\n\n${outcome}\n`, plan.data));
-    const superseded: string[] = [];
-    for (const other of await this.routePlans()) {
-      if (other.id === planId || other.data.target_asset !== target || other.data.status !== 'pending') continue;
-      const parsed = parseMarkdown(other.raw);
-      parsed.data.status = 'superseded';
-      parsed.data.superseded_by = planId;
-      await this.writeOwned(other.file, stringifyMarkdown(parsed.content, parsed.data));
-      superseded.push(other.id);
-    }
+    // The other open routes are superseded by derivation (withWinners): their files, perhaps a collaborator's, stay untouched.
+    const superseded = (await this.routePlans()).filter((other) => other.id !== planId && other.data.target_asset === target && other.data.status === 'pending').map((other) => other.id);
     // The route map is settled with the route chosen: nothing of it waits for review any more.
     const state = this.require();
     state.approvalQueue = state.approvalQueue.filter((item) => !(item.kind === 'routes' && item.target === target));
@@ -3266,6 +3461,7 @@ export class ResearchLoopCore {
     const plan = (await this.routePlans()).find((item) => item.id === planId);
     if (!plan) throw new Error(`${planId} is not a route.`);
     if (plan.data.status !== 'pending') throw new Error(`${planId} is ${plan.data.status}, not open.`);
+    if (!this.isMineRoute(plan.data, await this.me())) throw new Error(`${planId} is ${String(plan.data.created_by)}'s route; you drop only your own (a result's owner simply commits another route).`);
     if (!reason.trim()) throw new Error('Say why with --reason.');
     await this.dropRouteFile(plan, reason.trim());
     if (this.state?.current.planId === planId) await this.setStage('select', { assetId: undefined, planId: undefined });
@@ -3297,7 +3493,11 @@ export class ResearchLoopCore {
     const users = [...assets.values()].filter((node) => Array.isArray(node.data.depends_on) && node.data.depends_on.includes(dup)).map((node) => node.id);
     if (users.length) throw new Error(`${dup} is in the depends_on of ${users.join(', ')}; only a lemma that routes alone use can be merged away.`);
     const changed: string[] = []; const abandoned: string[] = [];
-    for (const plan of (await this.routePlans()).filter((item) => item.data.status === 'pending' && routeLemmas(item.data).includes(dup))) {
+    const me = await this.me();
+    const using = (await this.routePlans()).filter((item) => item.data.status === 'pending' && routeLemmas(item.data).includes(dup));
+    const theirs = using.filter((item) => !this.isMineRoute(item.data, me));
+    if (theirs.length) throw new Error(`${dup} is used by ${theirs.map((item) => `${item.id} (${String(item.data.created_by)})`).join(', ')}, a collaborator's route you do not change: record ${LOOP_COMMAND} route imply ${keep} ${dup} instead, if one implies the other.`);
+    for (const plan of using) {
       const parsed = parseMarkdown(plan.raw);
       if (parsed.data.target_asset === keep || assetClosure([keep], assets).order.includes(String(parsed.data.target_asset))) {
         parsed.data.status = 'abandoned';
@@ -3335,7 +3535,7 @@ export class ResearchLoopCore {
     if (await this.files.exists(file)) throw new Error(`${id} exists already.`);
     const title = String(from.data.title ?? strong);
     const body = `\n## Goal\n\nTarget: [${weak}](../assets/${weak}.md)\n\n## Route\n\n- ${strong}: ${note?.trim() || `it implies ${weak} directly.`}\n\n## Plan\n\n1. [ ] Derive ${weak} from ${strong}.\n\n## Verification\n\nThe derivation gives the exact statement of ${weak}.\n`;
-    await this.writeOwned(file, stringifyMarkdown(body, { type: 'plan', title: `Route to ${weak} from ${title}`, status: 'pending', target_asset: weak, route_lemmas: [strong], route_title: `from ${title}`, origin: 'agent', route_round: (await this.lastRouteRound(weak)) + 1, inspired_by: [], tags: ['route'] }));
+    await this.writeOwned(file, stringifyMarkdown(body, { type: 'plan', title: `Route to ${weak} from ${title}`, status: 'pending', target_asset: weak, route_lemmas: [strong], route_title: `from ${title}`, origin: 'agent', route_round: (await this.lastRouteRound(weak)) + 1, created_by: await this.me(), inspired_by: [], tags: ['route'] }));
     await this.event('route_implied', { strong, weak, planId: id });
     return `${weak} gets the route ${id} from ${strong}: proving ${strong} now serves every route that needs ${weak}.`;
   }
@@ -3425,7 +3625,7 @@ export class ResearchLoopCore {
   /** The researcher asks for a conjecture idea to be made precise, or a conjecture to be searched, whatever the settings allow. */
   async requestConjecture(id: string): Promise<string> {
     const state = this.require();
-    const idea = await this.files.readFile(`${this.paths.ideas}/${id}.md`).catch(() => '');
+    const idea = await this.readIdea(id).catch(() => '');
     const asset = idea ? '' : await this.files.readFile(`${this.paths.assets}/${id}.md`).catch(() => '');
     const data = idea ? parseMarkdown(idea).data : asset ? parseMarkdown(asset).data : undefined;
     if (!data) throw new Error(`Unknown idea or conjecture ${id}.`);
@@ -3708,6 +3908,13 @@ export class ResearchLoopCore {
     // A batch is reported in full first, whatever one of its items raised.
     if (state.stage === 'batch' && !state.current.batch?.items.some((item) => !item.done)) await this.setStage('select', { assetId: undefined, planId: undefined });
     if (state.pendingQuestion && state.stage !== 'batch') return this.result(`Question ${state.pendingQuestion.id} (${state.pendingQuestion.kind}) is waiting for the researcher: ${state.pendingQuestion.prompt}`);
+    if ((await this.loopSettings()).rigor.shareClaims === 'auto') await this.refreshClaims();
+    // A collaborator's earlier claim on what this stage works on wins: let it go and choose again.
+    const held = this.stageKey(state.stage, state.current);
+    if (held && (await this.heldByOthers()).has(held)) {
+      await this.event('claim_lost', { key: held, stage: state.stage });
+      await this.setStage('select', { assetId: undefined, planId: undefined });
+    }
     // Selection reads nodes leniently and skips a file it cannot parse; deciding on that view would treat an existing result as missing.
     const unparsable = await this.unparsableNodes();
     if (unparsable.length) return this.result(`These research files do not parse, so the loop cannot tell what they hold:\n${unparsable.map((problem) => `- ${problem}`).join('\n')}\nFix them (keep their IDs; run research-maintenance validate), then run next. Do not re-create them under new IDs.`);
@@ -3739,13 +3946,15 @@ export class ResearchLoopCore {
     // A node check whose target no longer waits for auto mode (approved meanwhile, changed, or held for the researcher) is dropped.
     if (state.stage === 'verify_node' && !(state.current.node && await this.needsNodeCheck(state.current.node))) recompute = true;
     if (state.stage === 'conjecture') {
-      const idea = state.current.ideaId ? await this.files.readFile(`${this.paths.ideas}/${state.current.ideaId}.md`).catch(() => '') : '';
+      const idea = state.current.ideaId ? await this.readIdea(state.current.ideaId).catch(() => '') : '';
       let draft = false;
       try { draft = Boolean(idea) && parseMarkdown(idea).data.status === 'draft'; } catch { /* unreadable: choose again */ }
       if (!draft) recompute = true;
     }
     // Between stages, a rewording from the teaching chat goes first: its check is short and the researcher is waiting on it.
     if (recompute && await this.startRevision()) recompute = false;
+    // Before choosing new work, see what collaborators hold right now (claims shared at once only).
+    if (recompute && (await this.loopSettings()).rigor.shareClaims === 'auto') await this.refreshClaims(true);
     const chosen = recompute ? await this.computeSelection() : undefined;
     // With several workers allowed, independent results are worked on side by side.
     if (chosen && await this.startBatch(chosen)) recompute = false;
@@ -4161,6 +4370,7 @@ export class ResearchLoopCore {
     const shared = this.shared;
     for (const folder of [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, shared.checks, shared.candidates, shared.decisions, shared.handoffs, ...await libraryFolders(this.files, this.paths)]) for (const file of await this.files.listFiles(folder)) await add(file);
     for (const file of [this.paths.projectMd, this.paths.paperIndex, this.paths.bibliography, ...await approvalFiles(this.files, this.paths.researchRoot)]) await add(file);
+    for (const file of await this.files.listFiles(shared.log, LOG_EXTENSION)) await add(file);
     return map;
   }
 
@@ -4219,7 +4429,7 @@ export class ResearchLoopCore {
     for (const file of [...added, ...modified]) {
       if (isApprovalPath(this.paths.researchRoot, file)) { problems.push(`${file}: approval records were modified; only the researcher may approve. Restore it with git.`); continue; }
       const folder = path.posix.dirname(file);
-      if (folder === folders.decisions || folder === folders.handoffs) { problems.push(`${file}: decisions and handoffs are written only by the loop. Restore it with git.`); continue; }
+      if (folder === folders.decisions || folder === folders.handoffs || folder === this.shared.log) { problems.push(`${file}: decisions, handoffs, and the record logs are written only by the loop. Restore it with git.`); continue; }
       // The library is curated alongside the research at any stage; git keeps its history, and an edit to an approved result reverts it to draft.
       const inLibrary = isLibraryPath(file, this.paths);
       if (!inLibrary && !allowedFiles.has(file) && !allowedFolders.has(folder)) { problems.push(`${file}: not writable during stage ${stage}.`); continue; }
@@ -4530,11 +4740,7 @@ export class ResearchLoopCore {
         }
         if (report.outcome !== 'complete') throw new Error('route outcome must be complete, none, or question.');
         if (!written.length) throw new Error('No route was written: write at least one, or report none --summary "<why no route is in sight>".');
-        for (const file of written) {
-          const parsed = parseMarkdown(await this.files.readFile(file));
-          parsed.data.route_round = round.round;
-          await this.writeOwned(file, stringifyMarkdown(parsed.content, parsed.data));
-        }
+        for (const file of written) await this.stampCreator(file, { route_round: round.round });
         await this.event('routes_proposed', { target: round.target, round: round.round, routes: written.map((file) => path.posix.basename(file, '.md')) });
         return finish(`${written.length} route(s) to ${round.target} recorded. Next: merge them with the other routes and known results.`, 'route_merge', { route: round });
       }
@@ -4616,9 +4822,7 @@ export class ResearchLoopCore {
         if (report.outcome === 'none') {
           if (created.length) throw new Error(`report none writes no conjecture; remove ${created.join(', ')} or report complete --asset <id>.`);
           if (!report.summary.trim()) throw new Error('Say in --summary why the idea cannot be made a precise conjecture now.');
-          const file = `${this.paths.ideas}/${ideaId}.md`;
-          const parsed = parseMarkdown(await this.files.readFile(file));
-          await this.writeOwned(file, stringifyMarkdown(`${parsed.content.trimEnd()}\n\n## Not yet a conjecture\n\n${report.summary.trim()}\n`, parsed.data));
+          await this.updateIdea(ideaId, { heading: 'Not yet a conjecture', text: report.summary.trim() }, `Not yet a conjecture: ${report.summary.trim()}`);
           return finish(`The idea ${ideaId} stays an idea, with your note. Continue with next.`, 'select', { ideaId: undefined });
         }
         if (report.outcome !== 'complete') throw new Error('conjecture outcome must be complete --asset <id>, none, or question.');
@@ -4728,6 +4932,7 @@ export class ResearchLoopCore {
         if (!planId) throw new Error('Planning did not produce a plan; pass --plan <id>.');
         const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
         if (plan.data.type !== 'plan' || plan.data.status !== 'pending' || plan.data.target_asset !== assetId) throw new Error(`${planId} must be a pending plan targeting ${assetId}.`);
+        if (newPlans.length) await this.stampCreator(`${this.paths.plans}/${planId}.md`);
         const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
         state.current.statementDigest = statementDigest(assetRaw);
@@ -4950,7 +5155,20 @@ export class ResearchLoopCore {
       const info = parseHandoff(await this.files.readFile(file).catch(() => ''));
       if (info) handoffs.push({ file, ...info });
     }
+    for (const { file, record } of await this.logRecords()) {
+      const info = handoffFromRecord(record);
+      if (info) handoffs.push({ file: `${file}#${info.id}`, performedBy: info.performedBy, createdAt: info.createdAt, workingOn: info.workingOn });
+    }
     return handoffs.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).pop();
+  }
+
+  /** The latest handoff as the researcher reads it. */
+  async latestHandoffText(): Promise<string | undefined> {
+    const latest = await this.latestHandoff();
+    if (!latest) return undefined;
+    const [file, id] = latest.file.split('#');
+    if (!id) return this.files.readFile(file).catch(() => undefined);
+    return (parseLog(await this.files.readFile(file).catch(() => '')).find((record) => record.id === id)?.markdown as string | undefined);
   }
 
   /** Write a handoff that tells the next collaborator what was done, what waits, and where to continue. */
@@ -4975,8 +5193,9 @@ export class ResearchLoopCore {
       for (const [id, info] of Object.entries(state.parked)) pending.push(`${id} parked (${info.reason})${info.note ? `: ${info.note}` : ''}`);
     }
     const next = !state ? `Start the loop: ${LOOP_COMMAND} start --provider claude|codex` : state.stage === 'waiting' ? `Waiting on the researcher: ${state.lastError ?? 'see Pending'}` : `Stage ${state.stage}${state.current.assetId ? ` for ${state.current.assetId}` : ''}${state.current.planId ? ` (plan ${state.current.planId})` : ''}: ${this.instruction(state).split('\n')[0]}`;
-    const file = `${this.shared.handoffs}/handoff_${stamp(provenance.created_at)}_${this.shortId()}.md`;
-    await this.writeOwned(file, handoffMarkdown({ provenance, stage: state?.stage, workingOn: state?.current.assetId ? [state.current.assetId] : [], completed, pending, next, note }));
+    const id = `handoff_${stamp(provenance.created_at)}_${this.shortId()}`;
+    const log = await this.appendLog(handoffRecord(id, { provenance, stage: state?.stage, workingOn: state?.current.assetId ? [state.current.assetId] : [], completed, pending, next, note }));
+    const file = `${log}#${id}`;
     await this.event('handoff', { file });
     return file;
   }

@@ -49,6 +49,9 @@ export interface RouteInfo {
   death?: RouteDeath;
   suspendedBy?: string[];
   supersededBy?: string;
+  /** Who created the route (`created_by`); routes are worked on by their creator, and others copy them. */
+  createdBy?: string;
+  copiedFrom?: string;
 }
 
 /** Digest of a route's `## Reduction`, stamped by the loop when the reduction is reported and when it is verified. */
@@ -76,6 +79,8 @@ export function routeInfo(plan: RoutePlanInput, lemma: (id: string) => RouteLemm
     title: typeof plan.data.route_title === 'string' && plan.data.route_title.trim() ? plan.data.route_title.trim() : plan.id,
     origin: (ROUTE_ORIGINS as readonly string[]).includes(plan.data.origin) ? plan.data.origin : 'agent',
     ...(typeof plan.data.forked_from === 'string' ? { forkedFrom: plan.data.forked_from } : {}),
+    ...(typeof plan.data.created_by === 'string' ? { createdBy: plan.data.created_by } : {}),
+    ...(typeof plan.data.copied_from === 'string' ? { copiedFrom: plan.data.copied_from } : {}),
     lemmas,
     state: 'live',
     reduction,
@@ -94,6 +99,16 @@ export function routeInfo(plan: RoutePlanInput, lemma: (id: string) => RouteLemm
   const parked = statuses.filter(([, status]) => status.parked && !status.settled).map(([id]) => id);
   if (parked.length) return { ...info, state: 'suspended', suspendedBy: parked };
   return { ...info, state: reduction === 'verified' ? 'reduced' : 'live' };
+}
+
+/**
+ * Once one route to a result won, its other open routes are superseded: derived here, so the winner's
+ * commit never writes into other collaborators' route files.
+ */
+export function withWinners(routes: RouteInfo[]): RouteInfo[] {
+  const winners = new Map(routes.filter((route) => route.state === 'won').map((route) => [route.target, route.planId]));
+  return routes.map((route) => (winners.has(route.target) && route.state !== 'won' && route.state !== 'failed' && route.state !== 'abandoned' && route.state !== 'superseded'
+    ? { ...route, state: 'superseded', supersededBy: winners.get(route.target) } : route));
 }
 
 /** Routes still being worked on (not frozen, suspended, dead, or finished). */
@@ -219,7 +234,11 @@ export function mostProvingStep(goal: string, graph: ProofGraph, actionable: (id
       }
       const open = route.lemmas.filter((lemma) => !graph.settled(lemma))
         .sort((a, b) => (share.get(b) ?? 0) - (share.get(a) ?? 0) || numbers.ofAsset(a) - numbers.ofAsset(b));
-      if (!open.length) { if (route.reduction === 'verified') return { kind: 'commit', planId: route.planId, target: id }; continue; }
+      if (!open.length) {
+        // Committing is the result's owner's (a batch or another collaborator may pass it over).
+        if (route.reduction === 'verified') { const step: RouteStep = { kind: 'commit', planId: route.planId, target: id }; if (!blocked(step)) return step; }
+        continue;
+      }
       for (const lemma of open) { const step = descend(lemma, inner); if (step) return step; }
     }
     return undefined;
@@ -231,10 +250,13 @@ export function mostProvingStep(goal: string, graph: ProofGraph, actionable: (id
 
 type LemmaRaw = (id: string) => string | undefined;
 
-/** Digest of one route as the researcher reviews it: its lemmas, its `## Route`, and each lemma's statement (not its reduction). */
+/**
+ * Digest of one route as the researcher reviews it: its lemmas, its `## Route`, and each lemma's
+ * statement (not its reduction, nor its file name, so a collaborator's copy of a route is the route).
+ */
 export function routeDigest(route: RoutePlanInput, lemmaRaw: LemmaRaw): string {
   const lemmas = [...routeLemmas(route.data)].sort();
-  return sha([route.id, lemmas.join(','), normalizeProse(sectionContent(route.content, 'Route')), ...lemmas.map((id) => { const raw = lemmaRaw(id); return `${id}:${raw ? statementDigest(raw) : 'missing'}`; })].join('\n'));
+  return sha([lemmas.join(','), normalizeProse(sectionContent(route.content, 'Route')), ...lemmas.map((id) => { const raw = lemmaRaw(id); return `${id}:${raw ? statementDigest(raw) : 'missing'}`; })].join('\n'));
 }
 
 const openRoutes = (routes: RoutePlanInput[]) => routes.filter((route) => isRoutePlan(route.data) && route.data.status === 'pending');
@@ -259,7 +281,8 @@ export function routeMapEntries(routes: RoutePlanInput[], lemmaRaw: LemmaRaw): R
  */
 export function routeMapCovered(approved: { statement?: string; routes: Record<string, string> }, goalRaw: string, routes: RoutePlanInput[], lemmaRaw: LemmaRaw): boolean {
   if (approved.statement !== statementDigest(goalRaw)) return false;
-  return openRoutes(routes).every((route) => approved.routes[route.id] === routeDigest(route, lemmaRaw));
+  const reviewed = new Set(Object.values(approved.routes));
+  return openRoutes(routes).every((route) => reviewed.has(routeDigest(route, lemmaRaw)));
 }
 
 // ---------- rounds of routes ----------

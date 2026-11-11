@@ -232,7 +232,7 @@ export function SettingsView({ settings, result, onSave, onNavigate, showTechnic
           {FIELD_GROUPS.map((group) => (
             <React.Fragment key={group}>
               {LOOP_FIELD_GROUPS[group] && <Divider label={LOOP_FIELD_GROUPS[group]} />}
-              {group === 'routes' && ROUTE_KEYS.map((key) => rigorField(key, Number(loop.routeWidth) === 0))}
+              {group === 'routes' && ROUTE_KEYS.map((key) => rigorField(key, key !== 'shareClaims' && Number(loop.routeWidth) === 0))}
               {LOOP_NUMBER_KEYS.filter((key) => LOOP_NUMBER_FIELDS[key].group === group).map((key) => numberField(key))}
             </React.Fragment>
           ))}

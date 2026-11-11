@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { logFileName, logLine, parseLog } from './ResearchRecords';
 import { ProjectPaths } from '../models/types';
 import { LoopFiles, researchDigest, sharedFolders, statementDigest } from './ResearchLoopModel';
 import { parseMarkdown } from './Frontmatter';
@@ -180,7 +181,51 @@ export async function migrationReasons(files: LoopFiles, paths: ProjectPaths): P
       if (LEGACY_SOURCE_LINE.test(raw)) reasons.add('source.kind self_proved');
     }
   }
+  const shared = sharedFolders(paths.researchRoot);
+  if ((await files.listFiles(shared.decisions).catch(() => [] as string[])).length || (await files.listFiles(shared.handoffs).catch(() => [] as string[])).length) reasons.add('decision and handoff files to fold into the record logs');
+  if ((await files.listFiles(legacyCandidates(paths)).catch(() => [] as string[])).length) reasons.add('search candidates tracked by git (they are local working files now)');
   return [...reasons];
+}
+
+/** Where search candidates lived before they became local working files. */
+const legacyCandidates = (paths: ProjectPaths) => paths.researchRoot === '.' ? 'candidates' : path.posix.join(paths.researchRoot, 'candidates');
+
+/**
+ * Fold decision and handoff files into the record logs (one per collaborator and month, machine
+ * `migrated`), oldest first, and move search candidates out of git. Nothing is lost: each record
+ * keeps its ID, author, time, and text.
+ */
+async function foldRecordsIntoLogs(files: LoopFiles, paths: ProjectPaths, report: MigrationReport): Promise<void> {
+  const shared = sharedFolders(paths.researchRoot);
+  const logs = new Map<string, Array<Record<string, unknown>>>();
+  const remove: string[] = [];
+  for (const [folder, type] of [[shared.decisions, 'decision'], [shared.handoffs, 'handoff']] as const) {
+    for (const { file, raw } of await readAll(files, folder)) {
+      let parsed: { data: Record<string, any>; content: string };
+      try { parsed = parseMarkdown(raw); } catch { report.review.push(`${file}: does not parse; left in place.`); continue; }
+      const { title: _title, ...data } = parsed.data;
+      const record = type === 'decision' ? { ...data, type, id: idOf(file), text: parsed.content.trim() } : { ...data, type, id: idOf(file), markdown: raw };
+      const name = logFileName(String(data.performed_by ?? 'unknown'), String(data.created_at ?? '0000-00'), 'migrated');
+      logs.set(name, [...(logs.get(name) ?? []), record]);
+      remove.push(file);
+    }
+  }
+  for (const [name, records] of logs) {
+    const file = `${shared.log}/${name}`;
+    const existing = await files.readFile(file).catch(() => '');
+    const known = new Set(parseLog(existing).map((record) => record.id));
+    const lines = records.filter((record) => !known.has(String(record.id))).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).map(logLine);
+    if (lines.length) await files.writeFile(file, `${existing}${lines.join('\n')}\n`);
+  }
+  for (const file of remove) { if (files.deleteFile) await files.deleteFile(file); else await files.writeFile(file, ''); }
+  if (remove.length) report.notes.push(`Folded ${remove.length} decision and handoff file(s) into ${logs.size} record log(s) in ${shared.log}/; each keeps its ID, author, and time.`);
+  let moved = 0;
+  for (const { file, raw } of await readAll(files, legacyCandidates(paths))) {
+    await files.writeFile(`${shared.candidates}/${path.posix.basename(file)}`, raw);
+    if (files.deleteFile) await files.deleteFile(file); else await files.writeFile(file, '');
+    moved++;
+  }
+  if (moved) report.notes.push(`Moved ${moved} search candidate(s) to ${shared.candidates}/ (local, not shared); the round records keep what the searches found.`);
 }
 
 async function moveDefinitionsOutOfAssets(files: LoopFiles, paths: ProjectPaths, report: MigrationReport): Promise<void> {
@@ -508,6 +553,7 @@ export async function migrateProject(files: LoopFiles, paths: ProjectPaths, opti
   await upgradeNodes(files, paths, report);
   await upgradeProject(files, paths, report);
   await carryDigests(files, paths, before, carry, report);
+  await foldRecordsIntoLogs(files, paths, report);
   report.review.push(...ideaPlanProblems((await readAll(files, paths.assets)).map(({ file, raw }) => ({ filePath: file, raw })), [...await readAll(files, paths.ideas), ...await readAll(files, paths.plans)].map(({ file, raw }) => ({ filePath: file, raw }))));
   return report;
 }

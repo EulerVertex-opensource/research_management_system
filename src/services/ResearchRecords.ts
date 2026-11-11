@@ -14,7 +14,11 @@ export interface Provenance { performed_by: string; created_at: string; base_com
  * `route_request`: the researcher asked for a round of routes to a result (a fork names the settled result to start from);
  * `route_drop`: the researcher dropped a route (target: its plan); `route_merge`: what merging a round of routes decided.
  */
-export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check' | 'proof_check' | 'extraction_check' | 'route_request' | 'route_drop' | 'route_merge';
+/** `idea_update`: an idea's status, its resolution, a section added to it, or where it was tried; ideas themselves are never rewritten. */
+export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check' | 'proof_check' | 'extraction_check' | 'route_request' | 'route_drop' | 'route_merge' | 'idea_update';
+
+/** One change to an idea, applied over its file when it is read. */
+export interface IdeaUpdate { status?: string; resolved_by?: string; heading?: string; text?: string; tried?: Record<string, unknown> }
 
 export interface DecisionInfo {
   id: string;
@@ -36,6 +40,8 @@ export interface DecisionInfo {
   routeRound?: number;
   /** route_request: the settled result a forked round starts from. */
   fork?: string;
+  /** idea_update: the change to the idea (target). */
+  idea?: IdeaUpdate;
   /** proof_check: the statement it was checked against, and the statements of the dependencies and definitions it read. */
   statementDigest?: string;
   dependencyDigests?: Record<string, string>;
@@ -60,10 +66,10 @@ export function decisionId(kind: DecisionKind, target: string, provenance: Prove
   return `decision_${stamp(provenance.created_at)}_${kind}_${safeIdPart(target)}_${suffix}`;
 }
 
-export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number; routeRound?: number; fork?: string; statementDigest?: string; dependencyDigests?: Record<string, string> }
+export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number; routeRound?: number; fork?: string; idea?: IdeaUpdate; statementDigest?: string; dependencyDigests?: Record<string, string> }
 
 export function decisionMarkdown(kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: DecisionExtra = {}): string {
-  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check', proof_check: 'Independent proof check', extraction_check: 'Extraction coverage check', route_request: 'Routes requested', route_drop: 'Route dropped', route_merge: 'Routes merged' };
+  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check', proof_check: 'Independent proof check', extraction_check: 'Extraction coverage check', route_request: 'Routes requested', route_drop: 'Route dropped', route_merge: 'Routes merged', idea_update: 'Idea updated' };
   return stringifyMarkdown(`\n${text.trim() || '(no text)'}\n`, clean({
     type: 'decision', title: `${titles[kind]}: ${target}`, kind, target, reason: extra.reason,
     failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound, route_round: extra.routeRound, fork: extra.fork,
@@ -74,9 +80,15 @@ export function decisionMarkdown(kind: DecisionKind, target: string, text: strin
 export function parseDecision(id: string, raw: string): DecisionInfo | undefined {
   let data: Record<string, any>; let content: string;
   try { ({ data, content } = parseMarkdown(raw)); } catch { return undefined; }
+  return decisionFromData(id, data, content.trim());
+}
+
+/** A decision from its fields: a decision file's frontmatter and body, or a record in a log. */
+export function decisionFromData(id: string, data: Record<string, any>, text: string): DecisionInfo | undefined {
   if (data.type !== 'decision' || typeof data.kind !== 'string' || typeof data.target !== 'string') return undefined;
   return {
-    id, kind: data.kind as DecisionKind, target: data.target, text: content.trim(), createdAt: String(data.created_at ?? ''), performedBy: data.performed_by,
+    id, kind: data.kind as DecisionKind, target: data.target, text,
+    idea: data.idea && typeof data.idea === 'object' && !Array.isArray(data.idea) ? data.idea as IdeaUpdate : undefined, createdAt: String(data.created_at ?? ''), performedBy: data.performed_by,
     reason: typeof data.reason === 'string' ? data.reason : undefined,
     failedPlansAtDirection: Array.isArray(data.failed_plans_at_direction) ? data.failed_plans_at_direction.map(String) : undefined,
     digest: typeof data.digest === 'string' ? data.digest : undefined,
@@ -174,4 +186,87 @@ export function parseHandoff(raw: string): { performedBy?: string; createdAt?: s
   try { data = parseMarkdown(raw).data; } catch { return undefined; }
   if (data.type !== 'handoff') return undefined;
   return { performedBy: data.performed_by, createdAt: data.created_at, workingOn: Array.isArray(data.working_on) ? data.working_on.map(String) : [] };
+}
+
+// ---------- the record log ----------
+
+/**
+ * Bookkeeping records (decisions, handoffs, idea updates) live in append-only JSON-lines logs, one
+ * per collaborator, month, and machine (`<user>__<YYYY-MM>__<machine>.jsonl`): each file has a single
+ * writer, so collaborators' logs never conflict, and a project keeps a handful of files instead of
+ * one per record. Readers merge every log and sort by time.
+ */
+export const LOG_EXTENSION = '.jsonl';
+
+export function logFileName(identity: string, createdAt: string, machine: string): string {
+  return `${safeIdPart(identity)}__${createdAt.slice(0, 7)}__${machine}${LOG_EXTENSION}`;
+}
+
+export function parseLog(text: string): Array<Record<string, any>> {
+  const records: Array<Record<string, any>> = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try { const record = JSON.parse(line); if (record && typeof record === 'object' && typeof record.type === 'string' && typeof record.id === 'string') records.push(record); } catch { /* a torn line: skipped */ }
+  }
+  return records;
+}
+
+export function logLine(record: Record<string, unknown>): string { return JSON.stringify(clean(record)); }
+
+export function decisionRecord(id: string, kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: DecisionExtra = {}): Record<string, unknown> {
+  return clean({
+    type: 'decision', id, kind, target, text: text.trim() || '(no text)', reason: extra.reason,
+    failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound, route_round: extra.routeRound, fork: extra.fork, idea: extra.idea,
+    statement_digest: extra.statementDigest, dependency_digests: extra.dependencyDigests, ...provenance,
+  });
+}
+
+export function decisionFromRecord(record: Record<string, any>): DecisionInfo | undefined {
+  return decisionFromData(String(record.id), record, String(record.text ?? ''));
+}
+
+export interface HandoffInfo { id: string; performedBy?: string; createdAt?: string; workingOn: string[] }
+
+export function handoffRecord(id: string, input: HandoffInput): Record<string, unknown> {
+  // The handoff as the researcher reads it travels with the record (`research-loop handoff --latest` prints it).
+  return clean({ type: 'handoff', id, loop_stage: input.stage, working_on: input.workingOn, completed: input.completed, pending: input.pending, next: input.next, note: input.note, markdown: handoffMarkdown(input), ...input.provenance });
+}
+
+export function handoffFromRecord(record: Record<string, any>): HandoffInfo | undefined {
+  if (record.type !== 'handoff') return undefined;
+  return { id: String(record.id), performedBy: record.performed_by, createdAt: record.created_at, workingOn: Array.isArray(record.working_on) ? record.working_on.map(String) : [] };
+}
+
+/** An idea as its updates leave it: status and resolution set, sections appended, tries recorded. */
+export function applyIdeaUpdates(data: Record<string, any>, content: string, updates: IdeaUpdate[]): { data: Record<string, any>; content: string } {
+  const next = { ...data };
+  let body = content;
+  for (const update of updates) {
+    if (update.status) next.status = update.status;
+    if (update.resolved_by) next.resolved_by = update.resolved_by;
+    if (update.tried) next.tried_in = [...(Array.isArray(next.tried_in) ? next.tried_in : []), update.tried];
+    if (update.heading && update.text) {
+      const heading = `## ${update.heading}`;
+      body = new RegExp(`^${heading}[ \\t]*$`, 'm').test(body)
+        ? body.replace(new RegExp(`(^${heading}[ \\t]*\\r?\\n[\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm'), (section) => `${section.trimEnd()}\n${update.text}\n\n`)
+        : `${body.trimEnd()}\n\n${heading}\n\n${update.text}\n`;
+    }
+  }
+  return { data: next, content: body };
+}
+
+/** The idea updates in a set of decisions, per idea, oldest first. */
+export function ideaUpdatesOf(decisions: DecisionInfo[]): Map<string, IdeaUpdate[]> {
+  const updates = new Map<string, IdeaUpdate[]>();
+  for (const decision of sortDecisions(decisions)) if (decision.kind === 'idea_update' && decision.idea) updates.set(decision.target, [...(updates.get(decision.target) ?? []), decision.idea]);
+  return updates;
+}
+
+/** An idea file's text with its updates applied. */
+export function overlayIdea(raw: string, updates: IdeaUpdate[] | undefined): string {
+  if (!updates?.length) return raw;
+  let parsed: { data: Record<string, any>; content: string };
+  try { parsed = parseMarkdown(raw); } catch { return raw; }
+  const { data, content } = applyIdeaUpdates(parsed.data, parsed.content, updates);
+  return stringifyMarkdown(content, data);
 }

@@ -116,6 +116,7 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
           <span>{kindLabel(node.type)}{node.origin === 'library' ? ' · known result' : node.cited ? ' · cited' : ''}{technical && <span style={{ fontFamily: 'var(--vscode-editor-font-family, monospace)' }}> · {node.id}</span>}</span>
           {node.progressDetail && <span style={{ color: node.progress === 'done' || node.progress === 'waiting' ? COLOR.muted : style.color }}>{node.progressDetail}</span>}
           {node.closure && <span>{node.closure.done} of {node.closure.total} parts done</span>}
+          {node.claimedBy && node.progress !== 'done' && <span style={{ color: COLOR.active }}>{node.claimedBy === 'you' ? 'Your loop is on it' : `${node.claimedBy} is on it`}</span>}
         </div>
       </div>
       {open && (

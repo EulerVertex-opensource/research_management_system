@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -48,7 +49,7 @@ function fixture(settingsText = settings(), initial = {}) {
   return { files, core, map: files.map };
 }
 
-const decisions = (f, kind) => [...f.map.entries()].filter(([file]) => file.startsWith('research/decisions/')).map(([, raw]) => matter(raw)).filter((item) => !kind || item.data.kind === kind);
+const decisions = (f, kind) => decisionDocs(f.map).filter((item) => !kind || item.data.kind === kind);
 const status = (f, file) => matter(f.map.get(file)).data.status;
 const events = (f, type) => (f.map.get('.research-assistant-loop/events.jsonl') ?? '').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.type === type);
 

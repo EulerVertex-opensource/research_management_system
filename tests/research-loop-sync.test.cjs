@@ -26,7 +26,7 @@ const theorem = (statement = 'For every weak solution u, u = u.', extra = {}) =>
 const definition = (text = 'A weak solution is a distribution satisfying the equation.', status = 'approved') => matter.stringify(`\n${text}\n`, { type: 'definition', title: 'Weak solution', status, depends_on: [], tags: [] });
 const { candidate, roundRecord } = require('./search-fixtures.cjs');
 /** One refute worker's result for round 1: a failed candidate and the round record. */
-const SEARCH_FILES = { 'research/candidates/cand_main_theorem_r1_s1_constants.md': candidate(), 'research/checks/search_main_theorem_r1_constants.md': roundRecord('main_theorem', 'Constant solutions satisfy the equation trivially.') };
+const SEARCH_FILES = { 'research-local/candidates/cand_main_theorem_r1_s1_constants.md': candidate(), 'research/checks/search_main_theorem_r1_constants.md': roundRecord('main_theorem', 'Constant solutions satisfy the equation trivially.') };
 const approval = (kind, target, raw) => JSON.stringify({ kind, target, digest: researchDigest(raw, kind), approvedAt: '2026-09-01T00:00:00Z', source: 'test', ...(kind === 'project' ? {} : { statement: statementDigest(raw) }) }, null, 2) + '\n';
 
 function git(dir, ...args) {
@@ -84,7 +84,8 @@ test('sync pull summarizes collaborators\' research, invalidates stale approvals
     alice.write('research/approvals/assets/main_theorem.json', approval('asset', 'main_theorem', approvedTheorem));
     alice.commit('approve theorem');
     alice.git('push', '-q');
-    assert.equal(bob.run(['sync', 'pull']).status, 0);
+    const firstPull = bob.run(['sync', 'pull']);
+    assert.equal(firstPull.status, 0, firstPull.stdout + firstPull.stderr);
     alice.write('research/definitions/weak_solution.md', definition('A weak solution is an H^1 function satisfying the equation.'));
     alice.commit('tighten weak solution');
     alice.git('push', '-q');
@@ -98,9 +99,11 @@ test('sync pull summarizes collaborators\' research, invalidates stale approvals
     assert.equal(state.parked.main_theorem.reason, 'assumption A3 unclear');
     assert.equal(state.status, 'running');
     assert.equal(JSON.parse(bob.read('.research-assistant-loop/sync.json')).phase, 'idle');
-    const decisions = fs.readdirSync(path.join(bob.dir, 'research/decisions'));
-    assert.ok(decisions.some((file) => file.includes('_parked_main_theorem_')));
-    assert.match(bob.read(`research/decisions/${decisions[0]}`), /performed_by: alice@example.edu/);
+    // Alice's decisions came in her own record log.
+    const logs = fs.readdirSync(path.join(bob.dir, 'research/log'));
+    assert.ok(logs.some((file) => file.startsWith('alice_example_edu__')));
+    const records = logs.flatMap((file) => bob.read(`research/log/${file}`).split('\n').filter(Boolean).map((line) => JSON.parse(line)));
+    assert.ok(records.some((record) => record.kind === 'parked' && record.target === 'main_theorem' && record.performed_by === 'alice@example.edu'));
   } finally { t.cleanup(); }
 });
 
@@ -126,7 +129,7 @@ test('a raw git pull during a stage is not attributed to the agent; sync pull --
     const again = bob.run(['report', 'searched', '--summary', 'No counterexample']);
     assert.equal(again.status, 0, again.stderr);
     assert.equal(bob.state().stage, 'plan');
-    assert.equal(matter(bob.read('research/candidates/cand_main_theorem_r1_s1_constants.md')).data.performed_by, 'bob@example.edu');
+    assert.equal(matter(bob.read('research-local/candidates/cand_main_theorem_r1_s1_constants.md')).data.performed_by, 'bob@example.edu');
     const checkFile = fs.readdirSync(path.join(bob.dir, 'research/checks')).find((file) => file.startsWith('check_main_theorem_'));
     assert.match(bob.read(`research/checks/${checkFile}`), /Constant solutions satisfy the equation trivially/);
     const stamped = matter(bob.read(`research/checks/${checkFile}`)).data;
@@ -213,8 +216,9 @@ test('prepare checks sources and approvals; publish needs the researcher\'s conf
     assert.match(prepared.stdout, /Ready to share/);
     assert.match(prepared.stdout, /WARN Upstream has no newer commits/);
     assert.match(prepared.stdout, /New draft lemma cited_lemma/);
-    const handoff = prepared.stdout.match(/Handoff written: (\S+)/)[1];
-    assert.match(bob.read(handoff), /type: handoff/);
+    // The handoff is a record in Bob's log (log file#record id).
+    const [log, handoff] = prepared.stdout.match(/Handoff written: (\S+)/)[1].split('#');
+    assert.ok(bob.read(log).split('\n').filter(Boolean).map((line) => JSON.parse(line)).some((record) => record.type === 'handoff' && record.id === handoff));
 
     const refused = bob.run(['sync', 'publish']);
     assert.equal(refused.status, 1);
@@ -239,7 +243,7 @@ test('prepare checks sources and approvals; publish needs the researcher\'s conf
     assert.match(published.stdout, /Integrated origin\/main before pushing/);
     assert.match(published.stdout, /Published [0-9a-f]{8} to origin main/);
     const message = git(t.origin, 'log', '-1', '--format=%B', 'main');
-    assert.match(message, /Research-Handoff: research\/handoffs\/handoff_/);
+    assert.match(message, /Research-Handoff: research\/log\/bob_example_edu__\d{4}-\d{2}__[a-z0-9]+\.jsonl#handoff_/);
     const shipped = git(t.origin, 'show', '--name-only', '--format=', 'main').split('\n');
     assert.ok(shipped.includes('research/assets/cited_lemma.md'));
     assert.ok(!shipped.includes('notes.txt'));

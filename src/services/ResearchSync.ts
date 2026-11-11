@@ -8,7 +8,7 @@ import { parseMarkdown } from './Frontmatter';
 import { LoopGit, NameStatus } from './LoopGit';
 import { LoopFiles, SYNC_PATH } from './ResearchLoopModel';
 import { ResearchLoopCore } from './ResearchLoopCore';
-import { parseHandoff } from './ResearchRecords';
+import { handoffFromRecord, parseHandoff, parseLog } from './ResearchRecords';
 import { summarizeResearchChanges } from './SyncSummary';
 import { isCited } from '../domain/schema';
 import { listNodeFiles } from '../domain/registry';
@@ -104,7 +104,7 @@ export class ResearchSync {
     const shared = this.core.shared;
     const research = paths.researchRoot !== '.' ? [paths.researchRoot] : [
       paths.projectMd, paths.paperIndex, paths.assets, paths.definitions, paths.ideas, paths.plans, paths.remarks, paths.library, paths.papers, paths.writingRoot,
-      shared.checks, shared.candidates, shared.decisions, shared.handoffs, shared.approvals, legacyApprovalsPath(paths.researchRoot), packageFolder(paths),
+      shared.checks, shared.decisions, shared.handoffs, shared.log, shared.approvals, legacyApprovalsPath(paths.researchRoot), packageFolder(paths),
     ];
     const manuscript = [paths.mainTex, paths.bibliography, ...paths.macroFiles, ...(paths.notations ? [paths.notations] : []), paths.sections];
     const candidates = [...new Set([...research, ...manuscript, paths.config, '.gitattributes', ...this.config.include])];
@@ -250,9 +250,18 @@ export class ResearchSync {
     const me = await this.identity();
     const workingOn = this.core.current?.current.assetId;
     for (const change of changes) {
-      if (change.status !== 'A' || path.posix.dirname(change.path) !== this.core.shared.handoffs) continue;
-      const handoff = parseHandoff(await this.files.readFile(change.path).catch(() => ''));
-      if (handoff && handoff.performedBy !== me && workingOn && handoff.workingOn.includes(workingOn)) warnings.push(`${handoff.performedBy} was also working on ${workingOn} (${change.path}); coordinate before continuing on it.`);
+      if (change.status === 'A' && path.posix.dirname(change.path) === this.core.shared.handoffs) {
+        const handoff = parseHandoff(await this.files.readFile(change.path).catch(() => ''));
+        if (handoff && handoff.performedBy !== me && workingOn && handoff.workingOn.includes(workingOn)) warnings.push(`${handoff.performedBy} was also working on ${workingOn} (${change.path}); coordinate before continuing on it.`);
+      }
+      if (path.posix.dirname(change.path) === this.core.shared.log && change.status !== 'D') {
+        // Handoffs new in a collaborator's log.
+        const seen = new Set(parseLog((await this.git.showFile(preHead, change.path)) ?? '').map((record) => record.id));
+        for (const record of parseLog(await this.files.readFile(change.path).catch(() => '')).filter((item) => !seen.has(item.id))) {
+          const handoff = handoffFromRecord(record);
+          if (handoff && handoff.performedBy !== me && workingOn && handoff.workingOn.includes(workingOn)) warnings.push(`${handoff.performedBy} was also working on ${workingOn} (handoff ${handoff.id}); coordinate before continuing on it.`);
+        }
+      }
     }
     let next: string | undefined;
     if (this.core.current) {
@@ -267,6 +276,8 @@ export class ResearchSync {
       }
     }
     await this.saveRecord({ phase: 'idle', lastPull: { head, at: new Date().toISOString(), remote }, prepared: undefined, lastPublish: record.lastPublish });
+    // Collaborators' claims come with their research.
+    await this.core.refreshClaims(true);
     if (!summary.length) summary.push(changes.length ? 'Only non-research files changed.' : 'No research files changed.');
     return { status: 'pulled', summary, problems, warnings, next };
   }
@@ -420,6 +431,8 @@ export class ResearchSync {
     }
     await this.saveRecord({ phase: 'idle', lastPull: record.lastPull, lastPublish: { commit, at: new Date().toISOString(), remotes: pushed } });
     await this.core.event('published', { commit, remotes: pushed });
+    // What this collaborator works on travels with the research they publish.
+    if (await this.core.shareClaims()) pushed.push(`${remote} research-claims`);
     return { status: 'published', commit, pushed, warnings, summary: [...summary, `Published ${commit.slice(0, 8)} to ${pushed.join(' and ')}.`] };
   }
 

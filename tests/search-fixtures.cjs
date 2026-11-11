@@ -18,7 +18,7 @@ let serial = 0;
 function writeRound(f, { target = 'main_theorem', status = 'failed', record } = {}) {
   const search = f.core.current.current.search;
   const slug = `t${++serial}`;
-  for (const slot of search.slots) f.map.set(`research/candidates/cand_${target}_r${search.round}_s${slot.slot}_${slug}.md`, candidate(target, status));
+  for (const slot of search.slots) f.map.set(`research-local/candidates/cand_${target}_r${search.round}_s${slot.slot}_${slug}.md`, candidate(target, status));
   if (record ?? search.slots.length === 1) f.map.set(`research/checks/search_${target}_r${search.round}_${slug}.md`, roundRecord(target));
   return slug;
 }

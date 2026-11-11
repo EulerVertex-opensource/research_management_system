@@ -60,10 +60,12 @@ const USAGE = `Usage: research-loop <command> [options]
   report <${REPORT_OUTCOMES.join('|')}> --summary "..." [--plan ID] [--asset ID] [--counterexample ID] [--question "..."] [--assumed-definitions a,b] [--confirm] [--item N]
   search status <asset>   (the object-search board: obstructions, near-misses, directions tried)
   search request <asset> [--rounds N]   (only when the researcher asks: more counterexample search, even on a checked asset)
+  claim list [--json] | claim release <unit,...>|--all | claim share   (what each collaborator's loop works on: a route plan:<id>, or a result)
   route status <result> [--json]   (the routes to a result: state, reduction, lemmas settled, work left)
   route request <result> [--note "..."]   (only when the researcher asks: a round of routes to a result)
   route fork <proved result> --toward <result> [--note "..."]   (only when the researcher asks: routes that start from a proved result)
-  route drop <route plan> --reason "..."   (only when the researcher asks: drop one route)
+  route copy <route plan>   (only when the researcher asks: a copy of a collaborator's route, to work on it yourself)
+  route drop <route plan> --reason "..."   (only when the researcher asks: drop one of your routes)
   route merge <dup> --into <keep> | route imply <stronger> <weaker> [--note "..."] | route distinct <a> <b> --note "..."   (stage route_merge only)
   teach list [--json]   (verified results, those new to the researcher first, each after what it rests on)
   teach pack <id>   (the material for teaching one verified result)
@@ -955,16 +957,28 @@ async function main(): Promise<void> {
       }
       throw new Error('search status|request <asset>');
     }
+    case 'claim': {
+      if (sub === 'list' || !sub) {
+        await core.refreshClaims(true);
+        const claims = await core.claims();
+        out(json ? claims : claims.length ? claims.map((claim) => `- ${claim.key}: ${claim.by} since ${claim.since} (until ${claim.until})`).join('\n') : 'No claims.');
+        return;
+      }
+      if (sub === 'release') { const released = await core.releaseClaims(args.flags.all === true ? undefined : ids(text(third, 'unit'))); out(released.length ? `Released ${released.join(', ')}.` : 'Nothing of yours to release.'); return; }
+      if (sub === 'share') { out(await core.shareClaims() ? 'Claims shared.' : 'Claims could not be shared now (no remote, or offline).'); return; }
+      throw new Error('claim list|release <unit>|--all|share');
+    }
     case 'route': {
       const note = typeof args.flags.note === 'string' ? args.flags.note : undefined;
       if (sub === 'status') { const status = await core.routeStatus(text(third, 'result')); out(json ? status : status.text); return; }
       if (sub === 'request') { out(await core.requestRoutes(text(third, 'result'), undefined, note)); await core.touch(session); return; }
       if (sub === 'fork') { out(await core.requestRoutes(text(args.flags.toward, 'toward'), text(third, 'proved result'), note)); await core.touch(session); return; }
+      if (sub === 'copy') { out(await core.copyRoute(text(third, 'route'))); await core.touch(session); return; }
       if (sub === 'drop') { out(await core.dropRoute(text(third, 'route'), text(args.flags.reason, 'reason'))); await core.touch(session); return; }
       if (sub === 'merge') { out(await core.mergeRouteLemma(text(third, 'dup'), text(args.flags.into, 'into'))); await core.touch(session); return; }
       if (sub === 'imply') { out(await core.implyRouteLemma(text(third, 'stronger'), text(args.positional[3], 'weaker'), note)); await core.touch(session); return; }
       if (sub === 'distinct') { out(await core.distinctRouteLemmas(text(third, 'a'), text(args.positional[3], 'b'), text(args.flags.note, 'note'))); await core.touch(session); return; }
-      throw new Error('route status|request|fork|drop|merge|imply|distinct');
+      throw new Error('route status|request|fork|copy|drop|merge|imply|distinct');
     }
     case 'teach': {
       const teaching = new Teaching(new NodeLoopFiles(root), await loadProjectPaths(root));
@@ -999,6 +1013,7 @@ async function main(): Promise<void> {
       throw new Error('teach list|pack <id>|mark <id> --level L --interactive|revise <id> --file F|style [--add "rule"]');
     }
     case 'handoff': {
+      if (args.flags.latest === true) { out((await core.latestHandoffText()) ?? 'No handoff yet.'); return; }
       const file = await core.writeHandoff(typeof args.flags.note === 'string' ? args.flags.note : undefined);
       out(json ? { file } : `Wrote ${file}. Share it with sync prepare, then the researcher publishes.`);
       return;

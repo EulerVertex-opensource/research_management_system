@@ -302,7 +302,7 @@ export function preToolUseDecision(paths: ProjectPaths, input: HookInput, root?:
     if (shellWrites && (under(target, approvalsFile, root) || target.endsWith('/approvals.json') || under(target, shared.approvals, root) || under(target, STATE_DIR, root))) {
       return { deny: true, reason: `Research loop: ${target} is written only by the researcher through the extension. Approvals are never set by the agent.` };
     }
-    if (shellWrites && (under(target, shared.decisions, root) || under(target, shared.handoffs, root))) {
+    if (shellWrites && (under(target, shared.decisions, root) || under(target, shared.handoffs, root) || under(target, shared.log, root))) {
       return { deny: true, reason: `Research loop: ${target} is a shared decision or handoff record written only by the loop (${LOOP_COMMAND} park/unpark/handoff, or the researcher's answers).` };
     }
     if (paths.remarks && under(target, paths.remarks, root) && (shellWrites || !isShell)) {

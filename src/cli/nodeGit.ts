@@ -7,12 +7,13 @@ import { GitResult, GitRunner, LoopGit } from '../services/LoopGit';
 export class NodeGitRunner implements GitRunner {
   constructor(private readonly root: string) {}
 
-  run(args: string[]): Promise<GitResult> {
+  run(args: string[], input?: string): Promise<GitResult> {
     return new Promise((resolve) => {
-      execFile('git', args, { cwd: this.root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (error, stdout, stderr) => {
+      const child = execFile('git', args, { cwd: this.root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (error, stdout, stderr) => {
         const code = error ? (typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === 'number' ? (error as unknown as { code: number }).code : 1) : 0;
         resolve({ code, stdout: String(stdout), stderr: String(stderr) || (error && !stderr ? error.message : '') });
       });
+      if (input !== undefined) child.stdin?.end(input);
     });
   }
 

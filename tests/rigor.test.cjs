@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -57,7 +58,7 @@ async function driveToSelection(f, scaffold) {
   return f.core.next();
 }
 
-const decisions = (f) => [...f.map.entries()].filter(([file]) => file.startsWith('research/decisions/')).map(([, raw]) => matter(raw).data);
+const decisions = (f) => decisionData(f.map);
 
 // ---------- settings ----------
 

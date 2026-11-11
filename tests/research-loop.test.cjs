@@ -6,6 +6,7 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 const { searchNothing, writeRound } = require('./search-fixtures.cjs');
 
 function load(file) {
@@ -379,7 +380,7 @@ test('a researcher direction is a decision, not also an idea', async () => {
   const ideasBefore = [...f.map.keys()].filter((file) => file.startsWith('research/ideas/')).length;
   await f.core.answerQuestion(question.id, 'answer', 'Try induction on n.', 'test');
   assert.equal([...f.map.keys()].filter((file) => file.startsWith('research/ideas/')).length, ideasBefore);
-  assert.ok([...f.map.entries()].some(([file, raw]) => file.startsWith('research/decisions/') && /kind: direction/.test(raw) && /Try induction on n\./.test(raw)));
+  assert.ok(decisionData(f.map).some((record) => record.kind === 'direction' && /Try induction on n\./.test(record.text)));
   assert.equal(f.core.current.stage, 'plan');
 });
 
@@ -391,10 +392,10 @@ test('an unanswered question becomes a question idea that a late answer resolves
   const [ideaFile] = [...f.map.keys()].filter((file) => file.startsWith('research/ideas/'));
   assert.deepEqual([matter(f.map.get(ideaFile)).data.idea_kind, matter(f.map.get(ideaFile)).data.status], ['question', 'draft']);
   await f.core.answerQuestion(question.id, 'answer', 'Yes, for the limit argument.', 'test');
-  const resolved = matter(f.map.get(ideaFile));
+  const resolved = matter(ideaRaw(f.map, path.posix.basename(ideaFile, '.md')));
   assert.equal(resolved.data.status, 'resolved');
   assert.match(resolved.data.resolved_by, /^decision_/);
-  assert.ok(f.map.has(`research/decisions/${resolved.data.resolved_by}.md`));
+  assert.ok(decisionData(f.map).some((record) => record.id === resolved.data.resolved_by));
   assert.match(resolved.content, /## Resolution\n\nAnswered by the researcher: Yes, for the limit argument\./);
 });
 
@@ -439,14 +440,14 @@ test('an idea stays open after conversion to a linked executable plan, so other 
   const f = fixture({ 'research/assets/main_theorem.md': asset(), 'research/assets/second_theorem.md': asset() });
   const ideaId = await f.core.saveIdea('Try reflexivity', 'A possibly useful observation.', ['main_theorem']);
   const planId = await f.core.convertIdea(ideaId, 'main_theorem', 'Prove reflexivity', 'Check the assumptions\nApply equality', 'Verify each equality step');
-  const idea = matter(f.map.get(`research/ideas/${ideaId}.md`));
+  const idea = matter(ideaRaw(f.map, ideaId));
   assert.deepEqual([idea.data.type, idea.data.status, idea.data.resolved_by], ['idea', 'draft', undefined]);
   const parsed = matter(f.map.get(`research/plans/${planId}.md`));
   assert.deepEqual(parsed.data.inspired_by, [ideaId]);
   assert.match(parsed.content, /2\. \[ \] Apply equality/);
   // The same idea serves a second result; where it was used is derived from the plans.
   const second = await f.core.convertIdea(ideaId, 'second_theorem', 'Prove it the same way', 'Apply equality', 'Check it');
-  assert.equal(matter(f.map.get(`research/ideas/${ideaId}.md`)).data.status, 'draft');
+  assert.equal(matter(ideaRaw(f.map, ideaId)).data.status, 'draft');
   assert.match(await f.core.show(ideaId), new RegExp(`Used by plans: ${[planId, second].sort().map((id) => `${id} for \\w+ \\(pending\\)`).join(', ')}`));
   assert.match(await f.core.ideaUsageReport(), new RegExp(`${ideaId} \\(approach, draft\\): used for (main|second)_theorem \\(pending\\), (main|second)_theorem \\(pending\\)`));
   // A plan never resolves an approach.
@@ -468,7 +469,7 @@ test('an observation plans for two results rely on is suggested for promotion, a
   assert.deepEqual([lemma.data.type, lemma.data.status, lemma.data.title], ['lemma', 'draft', 'Squares are nonnegative']);
   assert.match(lemma.content, /## Statement\n\nFor every real x, x\^2 >= 0\./);
   for (const id of ['main_theorem', 'second_theorem']) assert.ok(matter(f.map.get(`research/assets/${id}.md`)).data.depends_on.includes('square_nonneg'));
-  const idea = matter(f.map.get(`research/ideas/${ideaId}.md`));
+  const idea = matter(ideaRaw(f.map, ideaId));
   assert.deepEqual([idea.data.status, idea.data.resolved_by], ['resolved', 'square_nonneg']);
   assert.match(idea.content, /## Resolution\n\nPromoted to the lemma square_nonneg/);
   assert.doesNotMatch(await f.core.ideaUsageReport(), /Observations to promote/);
@@ -482,10 +483,10 @@ test('a refuted observation and an obstructed approach keep their reason; a refu
   await assert.rejects(f.core.markIdea(observation, 'refuted', ' '), /reason/);
   await f.core.markIdea(observation, 'refuted', '(-1)^n is bounded and does not converge.');
   await f.core.markIdea(approach, 'obstructed', 'The statement is not monotone in n.');
-  const refuted = matter(f.map.get(`research/ideas/${observation}.md`));
+  const refuted = matter(ideaRaw(f.map, observation));
   assert.equal(refuted.data.status, 'refuted');
   assert.match(refuted.content, /## Refutation\n\n\(-1\)\^n is bounded/);
-  assert.match(f.map.get(`research/ideas/${approach}.md`), /status: obstructed[\s\S]*## Obstruction\n\nThe statement is not monotone/);
+  assert.match(ideaRaw(f.map, approach), /status: obstructed[\s\S]*## Obstruction\n\nThe statement is not monotone/);
   await assert.rejects(f.core.convertIdea(observation, 'main_theorem', 'g', 's', 'v'), /refuted/);
   assert.deepEqual((await f.core.validateWorkspace()).problems.filter((line) => /idea_/.test(line)), []);
 });

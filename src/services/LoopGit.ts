@@ -6,7 +6,8 @@
 
 export interface GitResult { code: number; stdout: string; stderr: string }
 export interface GitRunner {
-  run(args: string[]): Promise<GitResult>;
+  /** `input`: written to git's stdin (plumbing such as hash-object --stdin and mktree). */
+  run(args: string[], input?: string): Promise<GitResult>;
   /** Whether a path (absolute, or relative to the work tree) exists; used for git's internal state files. */
   exists(file: string): Promise<boolean>;
 }
@@ -15,7 +16,7 @@ export interface NameStatus { status: string; path: string; from?: string }
 export class LoopGit {
   constructor(private readonly runner: GitRunner) {}
 
-  run(args: string[]): Promise<GitResult> { return this.runner.run(args); }
+  run(args: string[], input?: string): Promise<GitResult> { return this.runner.run(args, input); }
 
   /** Run and throw with git's own message on failure. */
   async must(args: string[]): Promise<string> {

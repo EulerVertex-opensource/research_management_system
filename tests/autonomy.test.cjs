@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -65,7 +66,7 @@ async function fail(f, id, difference = '') {
   return f.core.report({ outcome: 'failed', summary: 'Obstructed' });
 }
 
-const decisions = (f) => [...f.map.entries()].filter(([file]) => file.startsWith('research/decisions/')).map(([, raw]) => matter(raw).data);
+const decisions = (f) => decisionData(f.map);
 
 test('autonomous mode settings: off by default, fail closed, patched and validated', () => {
   assert.equal(DEFAULT_LOOP_SETTINGS.autonomy.enabled, false);
@@ -84,7 +85,7 @@ test('autonomous mode never asks: a question is kept as an idea and the agent go
   const { message } = await f.core.report({ outcome: 'question', summary: 'Which induction?', question: 'Induct on n or on 2n? By default I induct on n.' });
   assert.match(message, /Go on with the default you stated/);
   assert.equal(f.core.current.pendingQuestion, undefined);
-  const ideas = [...f.map.entries()].filter(([file]) => file.startsWith('research/ideas/')).map(([, raw]) => matter(raw));
+  const ideas = [...f.map.keys()].filter((file) => file.startsWith('research/ideas/')).map((file) => matter(ideaRaw(f.map, path.posix.basename(file, '.md'))));
   assert.ok(ideas.some((idea) => idea.data.idea_kind === 'question' && /Autonomous mode/.test(idea.content)));
   assert.match((await f.core.next()).instruction, /Autonomous mode \(set by the researcher\)/);
 });
@@ -170,7 +171,7 @@ test('setting a result aside leaves nothing to do alone: the loop hands back wit
   const next = await f.core.next();
   assert.match(next.instruction, /Autonomous run finished: nothing is left that it can do on its own/);
   assert.equal(f.core.current.status, 'paused');
-  assert.ok([...f.map.keys()].some((file) => file.startsWith('research/handoffs/')), 'a handoff for the researcher');
+  assert.ok(handoffTexts(f.map).length, 'a handoff for the researcher');
   const health = computeLoopHealth({ state: f.core.current, nodes: [], edges: [], required: [], now: new Date().toISOString() });
   assert.match(health.headline, /autonomous run is over/);
   assert.equal(stopDecision(f.core.current, { session_id: 's' }, undefined).block, false);
@@ -300,7 +301,7 @@ test('with results set aside, the agent reassesses the goals itself: it adds a w
   await f.core.next();
   const last = await setAside(f, 'special_case', 'attempt_s1');
   assert.match(last.instruction, /Autonomous run finished: nothing is left/);
-  assert.match([...f.map.entries()].filter(([file]) => file.startsWith('research/handoffs/')).map(([, raw]) => raw).join('\n'), /reassessed what the goals still need 2 time\(s\)/);
+  assert.match(handoffTexts(f.map).join('\n'), /reassessed what the goals still need 2 time\(s\)/);
 });
 
 async function addWeakerGoal(f, deps = []) {
@@ -465,6 +466,6 @@ test('autonomous mode checks a library result against its source before using it
   f.map.set(SETTINGS, JSON.stringify({ version: 1, routeWidth: 0, rigor: { refuteSearch: 'off', verifyProofs: 'off' }, autonomy: { enabled: true }, autonomyRevisions: 0 }));
   const handed = await f.core.next();
   assert.match(handed.instruction, /approved on an independent agent's check alone/);
-  const handoff = [...f.map.entries()].find(([file]) => file.startsWith('research/handoffs/'))[1];
+  const handoff = handoffTexts(f.map)[0];
   assert.match(handoff, /Approved on an independent agent's check alone; worth your review:\n- Results taken from a source \(checked against it\): lib_known/);
 });

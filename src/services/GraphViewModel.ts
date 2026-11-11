@@ -1,7 +1,8 @@
 import { ProjectPaths, ResearchNode } from '../models/types';
 import { CoverageCell, CoverageRow, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, RouteView, SectionView, isPrerequisiteEdge } from '../models/graph';
-import { ProofNumbers, applyBeam, isRoutePlan, routeInfo } from '../domain/routes';
+import { ProofNumbers, applyBeam, isRoutePlan, routeInfo, withWinners } from '../domain/routes';
 import { readLoopSettings } from './LoopSettingsStore';
+import { claimHolders, parseClaimLines } from './Claims';
 import { buildGraph, nodeKey } from '../domain/graph';
 import { nodeKindOf } from '../domain/nodeKinds';
 import { requiredAssetIds } from '../domain/project';
@@ -44,6 +45,8 @@ export interface GraphInputs {
   remarks?: Record<string, number>;
   /** Routes worked on at once per result (the researcher's setting); the rest show as waiting their turn. */
   maxLiveRoutes?: number;
+  /** Who holds each unit now (claims): a route as `plan:<id>`, a result by its ID; 'you' for this machine. */
+  claims?: Record<string, string>;
 }
 
 const RESEARCH_KINDS = new Set(['asset', 'definition']);
@@ -267,6 +270,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     }
   }
   const history = buildHistory(input.events ?? [], (id) => byId.get(id)?.title ?? id, (id) => byId.get(id)?.type ?? '');
+  for (const node of nodes) if (input.claims?.[node.id]) node.claimedBy = input.claims[node.id];
   const routes = routeViews(plans, nodes, (id) => (refutedBy.get(id) ?? []).some((example) => example.status === 'approved'), (id) => Boolean(state?.parked[id]), input.maxLiveRoutes ?? 3);
 
   return {
@@ -277,7 +281,7 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     ...(state ? { loop: { status: state.status, stage: state.stage, ...(state.current.assetId ? { assetId: state.current.assetId } : {}) } } : {}),
     ...(manuscript ? { manuscriptState: manuscript.impact.state } : {}),
     nodes, edges, attention, sections, coverage, health, history,
-    ...(routes.length ? { routes } : {}),
+    ...(routes.length ? { routes: routes.map((route) => (input.claims?.[`plan:${route.planId}`] ? { ...route, claimedBy: input.claims[`plan:${route.planId}`] } : route)) } : {}),
   };
 }
 
@@ -287,7 +291,7 @@ function routeViews(plans: ResearchNode[], nodes: GraphNodeView[], refuted: (id:
   const settled = (id: string) => byId.get(id)?.progress === 'done';
   const retired = (id: string) => !byId.has(id) || ['deprecated', 'archived'].includes(byId.get(id)!.status);
   const routePlans = plans.filter((plan) => isRoutePlan(plan as unknown as Record<string, any>));
-  const raw = routePlans.map((plan) => routeInfo({ id: plan.id, data: plan as unknown as Record<string, any>, content: plan.body }, (id) => ({ settled: settled(id), refuted: refuted(id), inactive: retired(id), parked: parked(id) })));
+  const raw = withWinners(routePlans.map((plan) => routeInfo({ id: plan.id, data: plan as unknown as Record<string, any>, content: plan.body }, (id) => ({ settled: settled(id), refuted: refuted(id), inactive: retired(id), parked: parked(id) }))));
   const graphOf = (routes: typeof raw) => ({
     settled, dead: (id: string) => retired(id) || refuted(id), deps: () => [] as string[],
     routes: (id: string) => routes.filter((route) => route.target === id), leafCost: () => 1,
@@ -334,6 +338,18 @@ export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths,
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
     state, agent, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck, remarks,
     maxLiveRoutes: (await readLoopSettings(files)).settings.maxLiveRoutes,
+    claims: await readClaims(files, new Date().toISOString()),
   });
+}
+
+/** Who holds what, from this machine's claims and collaborators' as last fetched. */
+async function readClaims(files: LoopFiles, now: string): Promise<Record<string, string>> {
+  let machine = '';
+  try { machine = String(JSON.parse(await files.readFile('.research-assistant-loop/machine.json')).id ?? ''); } catch { /* no claims yet */ }
+  let others: string[] = [];
+  try { others = (JSON.parse(await files.readFile('.research-assistant-loop/claims-others.json')) as { texts?: string[] }).texts ?? []; } catch { /* none fetched */ }
+  const mine = await files.readFile('.research-assistant-loop/claims.jsonl').catch(() => '');
+  const holders = claimHolders([...parseClaimLines(mine), ...others.flatMap(parseClaimLines)], now);
+  return Object.fromEntries([...holders].map(([key, claim]) => [key, claim.machine === machine ? 'you' : claim.by]));
 }
 

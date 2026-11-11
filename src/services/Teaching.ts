@@ -1,4 +1,6 @@
 import * as path from 'path';
+import { readDecisions, readIdeaUpdates } from './RecordReader';
+import { overlayIdea } from './ResearchRecords';
 import { ProjectPaths } from '../models/types';
 import { parseMarkdown } from './Frontmatter';
 import { EVENTS_PATH, LoopFiles, dashboardLinkPath, isApproved, proofDigest, sharedFolders, statementDigest, writeDashboardLinks } from './ResearchLoopModel';
@@ -88,13 +90,7 @@ export class Teaching {
 
   /** Independent checks of proofs as written, oldest first. */
   private async proofChecks(): Promise<DecisionInfo[]> {
-    const folder = sharedFolders(this.paths.researchRoot).decisions;
-    const checks: DecisionInfo[] = [];
-    for (const file of await this.files.listFiles(folder).catch(() => [] as string[])) {
-      const info = parseDecision(path.posix.basename(file, '.md'), await this.files.readFile(file).catch(() => ''));
-      if (info?.kind === 'proof_check') checks.push(info);
-    }
-    return sortDecisions(checks);
+    return sortDecisions((await readDecisions(this.files, this.paths.researchRoot)).filter((info) => info.kind === 'proof_check'));
   }
 
   /**
@@ -260,8 +256,9 @@ export class Teaching {
 
   private async openIdeas(id: string): Promise<Array<{ id: string; title: string; kind: string; status: string; origin?: string; summary: string }>> {
     const ideas = [];
+    const updates = await readIdeaUpdates(this.files, this.paths.researchRoot);
     for (const file of await this.files.listFiles(this.paths.ideas)) {
-      const raw = await this.files.readFile(file).catch(() => '');
+      const raw = overlayIdea(await this.files.readFile(file).catch(() => ''), updates.get(path.posix.basename(file, '.md')));
       let parsed;
       try { parsed = parseMarkdown(raw); } catch { continue; }
       const data = parsed.data;

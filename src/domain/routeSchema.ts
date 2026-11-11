@@ -5,7 +5,8 @@ import { hasSectionContent } from './sections';
  * for its digests, because the schema reaches the webview through domain/schema.ts.
  */
 
-export const ROUTE_ORIGINS = ['researcher', 'agent', 'fork'] as const;
+/** `copy`: another collaborator's route, copied to be worked on by whoever copied it (`copied_from`). */
+export const ROUTE_ORIGINS = ['researcher', 'agent', 'fork', 'copy'] as const;
 export type RouteOrigin = (typeof ROUTE_ORIGINS)[number];
 
 /** One worker of a round of routes: the direction it plans in, and whose it is. */
@@ -43,6 +44,7 @@ export function routePlanProblems(id: string, data: Record<string, any>, content
     if (typeof data.forked_from !== 'string' || !data.forked_from) problems.push(`${id}: a forked route names the result it starts from in forked_from.`);
     else if (!lemmas.includes(data.forked_from)) problems.push(`${id}: a forked route uses the result it starts from: list ${data.forked_from} in route_lemmas.`);
   } else if (data.forked_from !== undefined) problems.push(`${id}: forked_from belongs to a route with origin fork.`);
+  if (data.origin === 'copy' && (typeof data.copied_from !== 'string' || !data.copied_from)) problems.push(`${id}: a copied route names the route it copies in copied_from.`);
   if (data.status === 'superseded' && (typeof data.superseded_by !== 'string' || !data.superseded_by)) problems.push(`${id}: a superseded route names the route that won in superseded_by.`);
   if ((data.status === 'pending' || data.status === 'failed') && !hasSectionContent(content, 'Route')) problems.push(`${id}: a route needs ## Route: one line per lemma, saying what it gives the reduction.`);
   if (data.reduction_digest !== undefined && !hasSectionContent(content, 'Reduction')) problems.push(`${id}: reduction_digest without a ## Reduction.`);

@@ -1,4 +1,6 @@
 import * as path from 'path';
+import { readIdeaUpdates } from './RecordReader';
+import { overlayIdea } from './ResearchRecords';
 import { parseMarkdown, stringifyMarkdown } from './Frontmatter';
 import { ResearchNode, NodeType, ResearchStatus, NodeFrontmatter, ProjectPaths, RemarkView } from '../models/types';
 import { Remarks } from './Remarks';
@@ -91,10 +93,12 @@ export class NodeIndexService {
 
     const folders = [this.paths.assets, this.paths.definitions, this.paths.ideas, this.paths.plans, ...await libraryFolders(this.fileService, this.paths)];
     const raws = new Map<string, string>();
+    // Ideas show with their updates applied (status, resolution, added sections), as the loop reads them.
+    const updates = await readIdeaUpdates(this.fileService, this.paths.researchRoot).catch(() => new Map());
     for (const folder of folders) {
       for (const filePath of await this.fileService.listFiles(folder, '.md')) {
         try {
-          const raw = await this.fileService.readFile(filePath);
+          const raw = folder === this.paths.ideas ? overlayIdea(await this.fileService.readFile(filePath), updates.get(path.posix.basename(filePath, '.md'))) : await this.fileService.readFile(filePath);
           const node = parseNode(filePath, raw);
           if (!node) continue;
           const location = locateNodeFile(filePath, this.paths);

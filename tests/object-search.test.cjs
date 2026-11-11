@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 const { candidate, roundRecord, writeRound, searchNothing } = require('./search-fixtures.cjs');
 
 function load(file) {
@@ -62,7 +63,7 @@ const groupCandidate = (status = 'failed', checks = status === 'failed' ? { P1: 
 /** Every slot of the current construct round writes one candidate; the first slot's may survive. */
 function writeConstructRound(f, { survivor = false } = {}) {
   const search = f.core.current.current.search;
-  for (const slot of search.slots) f.map.set(`research/candidates/cand_main_theorem_r${search.round}_s${slot.slot}_g${++counter}.md`, groupCandidate(survivor && slot.slot === 1 ? 'survived' : 'failed'));
+  for (const slot of search.slots) f.map.set(`research-local/candidates/cand_main_theorem_r${search.round}_s${slot.slot}_g${++counter}.md`, groupCandidate(survivor && slot.slot === 1 ? 'survived' : 'failed'));
   if (search.slots.length === 1) f.map.set(`research/checks/search_main_theorem_r${search.round}_g${++counter}.md`, roundRecord('main_theorem', 'Every cyclic group is abelian.'));
 }
 async function approveSpecification(f) {
@@ -73,7 +74,7 @@ async function approveSpecification(f) {
 }
 
 const node = (id, raw, folder) => { const parsed = matter(raw); return { id, file: `${folder}/${id}.md`, data: parsed.data, body: parsed.content }; };
-const stamped = (id, raw, fields) => node(id, matter.stringify(matter(raw).content, { ...matter(raw).data, statement_digest: 'd1', ...fields }), 'research/candidates');
+const stamped = (id, raw, fields) => node(id, matter.stringify(matter(raw).content, { ...matter(raw).data, statement_digest: 'd1', ...fields }), 'research-local/candidates');
 
 // ---------- settings ----------
 
@@ -179,17 +180,17 @@ test('width 2: one pack per slot, one candidate set per slot, a summary, then th
   assert.equal(JSON.parse(f.map.get('.research-assistant-loop/context/current.json')).packs.length, 2);
 
   // A slot that was not assigned, and a third candidate beyond the per-worker limit, are refused.
-  f.map.set('research/candidates/cand_main_theorem_r1_s3_x.md', candidate());
+  f.map.set('research-local/candidates/cand_main_theorem_r1_s3_x.md', candidate());
   await assert.rejects(f.core.report({ outcome: 'searched', summary: 'x' }), /slot 3 was not assigned/);
-  f.map.delete('research/candidates/cand_main_theorem_r1_s3_x.md');
-  for (const slug of ['a', 'b', 'c', 'd']) f.map.set(`research/candidates/cand_main_theorem_r1_s1_${slug}.md`, candidate());
+  f.map.delete('research-local/candidates/cand_main_theorem_r1_s3_x.md');
+  for (const slug of ['a', 'b', 'c', 'd']) f.map.set(`research-local/candidates/cand_main_theorem_r1_s1_${slug}.md`, candidate());
   await assert.rejects(f.core.report({ outcome: 'searched', summary: 'x' }), /slot 1 wrote 4 candidates; at most 3/);
-  for (const slug of ['b', 'c', 'd']) f.map.delete(`research/candidates/cand_main_theorem_r1_s1_${slug}.md`);
-  f.map.set('research/candidates/cand_main_theorem_r1_s2_a.md', candidate());
+  for (const slug of ['b', 'c', 'd']) f.map.delete(`research-local/candidates/cand_main_theorem_r1_s1_${slug}.md`);
+  f.map.set('research-local/candidates/cand_main_theorem_r1_s2_a.md', candidate());
 
   await f.core.report({ outcome: 'searched', summary: 'Two failed candidates' });
   assert.equal(f.core.current.stage, 'search_summary');
-  const stampedCandidate = matter(f.map.get('research/candidates/cand_main_theorem_r1_s2_a.md')).data;
+  const stampedCandidate = matter(f.map.get('research-local/candidates/cand_main_theorem_r1_s2_a.md')).data;
   assert.deepEqual([stampedCandidate.round, stampedCandidate.slot, stampedCandidate.direction, stampedCandidate.mode], [1, 2, 'small_cases', 'refute']);
   const summary = await f.core.next();
   assert.equal(summary.brief.worker, 'light');
@@ -226,7 +227,7 @@ test('a survivor rejected by independent verification stays as a near-miss and t
   const exampleFile = `research/assets/${counterexampleId}.md`;
   f.map.set(exampleFile, f.map.get(exampleFile).replace('status: draft', 'status: archived') + '\n## Verdict\n\nrejected: 0 = 0 holds.\n');
   await f.core.report({ outcome: 'rejected', summary: 'Not a counterexample' });
-  const archived = matter(f.map.get(`research/candidates/${round.candidateId}.md`));
+  const archived = matter(f.map.get(`research-local/candidates/${round.candidateId}.md`));
   assert.equal(archived.data.status, 'archived');
   assert.match(archived.content, /Rejected by independent verification: rejected: 0 = 0 holds\./);
   assert.equal(f.core.current.stage, 'search');
@@ -240,13 +241,13 @@ test('a survivor rejected by independent verification stays as a near-miss and t
 test('search validation: names, targets, NOT check, round record, and no edits to existing files', async () => {
   const f = fixture();
   await driveToSearch(f);
-  f.map.set('research/candidates/zero.md', candidate());
+  f.map.set('research-local/candidates/zero.md', candidate());
   f.map.set('research/checks/search_main_theorem_r1_x.md', roundRecord());
   await assert.rejects(f.core.report({ outcome: 'searched', summary: 'x' }), /must be named cand_main_theorem_r1_s<slot>_<slug>/);
-  f.map.delete('research/candidates/zero.md');
-  f.map.set('research/candidates/cand_main_theorem_r1_s1_a.md', candidate('main_theorem', 'failed', { H1: 'fail' }));
+  f.map.delete('research-local/candidates/zero.md');
+  f.map.set('research-local/candidates/cand_main_theorem_r1_s1_a.md', candidate('main_theorem', 'failed', { H1: 'fail' }));
   await assert.rejects(f.core.report({ outcome: 'searched', summary: 'x' }), /needs the check NOT/);
-  f.map.set('research/candidates/cand_main_theorem_r1_s1_a.md', candidate());
+  f.map.set('research-local/candidates/cand_main_theorem_r1_s1_a.md', candidate());
   f.map.set('research/assets/main_theorem.md', asset('For every natural number n, n + 0 = n.'));
   await assert.rejects(f.core.report({ outcome: 'searched', summary: 'x' }), /main_theorem\.md: not writable during stage search/);
   f.map.set('research/assets/main_theorem.md', asset());
@@ -323,9 +324,9 @@ test('construct search: checks are the specification properties; a verified surv
   assert.match(next.instruction, /Run 2 subagents in parallel/);
   assert.match(next.instruction, /checks \{P1, P2 \(every property of the specification\)/);
   assert.match(f.map.get('.research-assistant-loop/context/search-1.md'), /Find an object with every property of the specification of main_theorem \(checks P1, P2\)/);
-  f.map.set(`research/candidates/cand_main_theorem_r1_s1_bad.md`, groupCandidate('failed', { P1: 'pass', NOT: 'fail' }));
+  f.map.set(`research-local/candidates/cand_main_theorem_r1_s1_bad.md`, groupCandidate('failed', { P1: 'pass', NOT: 'fail' }));
   await assert.rejects(f.core.report({ outcome: 'searched', summary: 'x' }), /checks must be exactly the specification's properties P1, P2; missing P2; unknown NOT/);
-  f.map.delete(`research/candidates/cand_main_theorem_r1_s1_bad.md`);
+  f.map.delete(`research-local/candidates/cand_main_theorem_r1_s1_bad.md`);
   writeConstructRound(f, { survivor: true });
   await f.core.report({ outcome: 'searched', summary: 'S3 survives' });
   assert.equal(f.core.current.stage, 'verify_construction');
@@ -335,7 +336,7 @@ test('construct search: checks are the specification properties; a verified surv
   const pack = f.map.get('.research-assistant-loop/context/current.md');
   assert.match(pack, /The symmetric group S3\./);
   assert.doesNotMatch(pack, /\(12\)\(13\) differs/);
-  const file = `research/candidates/${candidateId}.md`;
+  const file = `research-local/candidates/${candidateId}.md`;
   f.map.set(file, f.map.get(file) + '\n## Verdict\n\nconfirmed\n\n### P1\n\nS3 has 6 elements.\n');
   await assert.rejects(f.core.report({ outcome: 'confirmed', summary: 'x' }), /needs a ### section with the argument for P2/);
   f.map.set(file, f.map.get(file) + '\n### P2\n\n(12)(13) = (132) but (13)(12) = (123).\n');
@@ -356,7 +357,7 @@ test('a verified construction is approved like a verified proof when auto mode c
   assert.equal((await driveToSearch(f, construction())).stage, 'search');
   writeConstructRound(f, { survivor: true });
   await f.core.report({ outcome: 'searched', summary: 'S3 survives' });
-  const file = `research/candidates/${f.core.current.current.search.candidateId}.md`;
+  const file = `research-local/candidates/${f.core.current.current.search.candidateId}.md`;
   f.map.set(file, f.map.get(file) + '\n## Verdict\n\nconfirmed\n\n### P1\n\nS3 has 6 elements.\n\n### P2\n\n(12)(13) = (132) but (13)(12) = (123).\n');
   await f.core.report({ outcome: 'confirmed', summary: 'Verified' });
   await f.core.next();
@@ -367,7 +368,7 @@ test('a verified construction is approved like a verified proof when auto mode c
   await driveToSearch(g, construction());
   writeConstructRound(g, { survivor: true });
   await g.core.report({ outcome: 'searched', summary: 'S3 survives' });
-  const gFile = `research/candidates/${g.core.current.current.search.candidateId}.md`;
+  const gFile = `research-local/candidates/${g.core.current.current.search.candidateId}.md`;
   g.map.set(gFile, g.map.get(gFile) + '\n## Verdict\n\nconfirmed\n\n### P1\n\nS3 has 6 elements.\n\n### P2\n\n(12)(13) = (132) but (13)(12) = (123).\n');
   await g.core.report({ outcome: 'confirmed', summary: 'Verified' });
   g.map.set('research/assets/main_theorem.md', g.map.get('research/assets/main_theorem.md') + '\nAn extra unchecked step.\n');
@@ -381,7 +382,7 @@ test('a rejected construction stays as a near-miss for the repair direction', as
   await approveSpecification(f);
   writeConstructRound(f, { survivor: true });
   await f.core.report({ outcome: 'searched', summary: 'S3 survives' });
-  const file = `research/candidates/${f.core.current.current.search.candidateId}.md`;
+  const file = `research-local/candidates/${f.core.current.current.search.candidateId}.md`;
   f.map.set(file, f.map.get(file) + '\n## Verdict\n\nrejected: the check of P2 used the wrong product.\n');
   await f.core.report({ outcome: 'rejected', summary: 'Not verified' });
   assert.equal(matter(f.map.get(file)).data.status, 'archived');
@@ -390,7 +391,7 @@ test('a rejected construction stays as a near-miss for the repair direction', as
   assert.equal(round.round, 2);
   assert.deepEqual(round.slots.map((slot) => slot.direction), ['repair_near_miss']);
   await f.core.next();
-  assert.match(f.map.get('.research-assistant-loop/context/search-1.md'), /### candidate cand_main_theorem_r1_s1_g\d+ — research\/candidates\/[\s\S]*The symmetric group S3/);
+  assert.match(f.map.get('.research-assistant-loop/context/search-1.md'), /### candidate cand_main_theorem_r1_s1_g\d+ — research-local\/candidates\/[\s\S]*The symmetric group S3/);
 });
 
 test('construct limits ask the researcher; a direction resets them, silence parks the asset', async () => {
@@ -446,10 +447,10 @@ test('a test-case idea a round tried records its outcome for that result, shows 
   const round = f.core.current.current.search;
   assert.equal(round.slots[0].direction, first);
   await f.core.next();
-  f.map.set(`research/candidates/cand_main_theorem_r${round.round}_s1_log.md`, groupCandidate('failed'));
+  f.map.set(`research-local/candidates/cand_main_theorem_r${round.round}_s1_log.md`, groupCandidate('failed'));
   f.map.set(`research/checks/search_main_theorem_r${round.round}_a.md`, roundRecord());
   await f.core.report({ outcome: 'searched', summary: 'fails P2' });
-  const idea = matter(f.map.get(`research/ideas/${first}.md`));
+  const idea = matter(ideaRaw(f.map, first));
   // Trying it for this result does not use it up: it stays open, with one record per result.
   assert.equal(idea.data.status, 'draft');
   assert.equal(idea.data.resolved_by, undefined);
@@ -476,11 +477,11 @@ test('a test case tried for one result is still tried for another result it rela
   const round = f.core.current.current.search;
   assert.equal(round.slots[0].direction, shared);
   await f.core.next();
-  f.map.set(`research/candidates/cand_main_theorem_r${round.round}_s1_s3.md`, groupCandidate('failed'));
+  f.map.set(`research-local/candidates/cand_main_theorem_r${round.round}_s1_s3.md`, groupCandidate('failed'));
   f.map.set(`research/checks/search_main_theorem_r${round.round}_a.md`, roundRecord());
   await f.core.report({ outcome: 'searched', summary: 'S3 fails here' });
   assert.notEqual(f.core.current.current.search?.slots[0].direction, shared, 'not assigned again for main_theorem');
-  const idea = matter(f.map.get(`research/ideas/${shared}.md`));
+  const idea = matter(ideaRaw(f.map, shared));
   assert.equal(idea.data.status, 'draft');
   assert.deepEqual(idea.data.tried_in.map((item) => item.target), ['main_theorem']);
   // For the other result it is untried, so its search takes it up first.
@@ -514,7 +515,7 @@ test('a researcher-requested search reopens a checked asset, shows failed proofs
   await assert.rejects(f.core.requestSearch('main_theorem', 99), /--rounds must be a whole number from 1 to 10/);
   const message = await f.core.requestSearch('main_theorem');
   assert.match(message, /Requested 1 more round\(s\)/);
-  assert.ok([...f.map.keys()].some((file) => /research\/decisions\/decision_.*_search_request_main_theorem_/.test(file)));
+  assert.ok(decisionData(f.map).some((record) => record.kind === 'search_request' && record.target === 'main_theorem'));
   assert.equal(f.core.current.stage, 'select');
   assert.equal((await f.core.next()).stage, 'search');
   const round = f.core.current.current.search;

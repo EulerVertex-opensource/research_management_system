@@ -11,7 +11,8 @@ import type { ProjectSummary, ResearchNode } from '../models/types';
  * Scope and Assumptions.
  */
 
-export interface RequiredResult { id: string; role?: string }
+/** `owner`: the collaborator (git email) who commits routes into this result and approves it; anyone when unset. */
+export interface RequiredResult { id: string; role?: string; owner?: string }
 
 /** Body sections of a schema-2 project. */
 export const PROJECT_SECTIONS = ['Main Problem', 'Scope and Assumptions', 'Intended Contribution', 'Background'] as const;
@@ -58,7 +59,8 @@ export function requiredResults(raw: string): RequiredResult[] {
       if (typeof item === 'string') return ID.test(item) ? [{ id: item }] : [];
       if (item && typeof item === 'object' && typeof (item as RequiredResult).id === 'string' && ID.test((item as RequiredResult).id)) {
         const role = (item as RequiredResult).role;
-        return [{ id: (item as RequiredResult).id, ...(typeof role === 'string' && role.trim() ? { role: role.trim() } : {}) }];
+        const owner = (item as RequiredResult).owner;
+        return [{ id: (item as RequiredResult).id, ...(typeof role === 'string' && role.trim() ? { role: role.trim() } : {}), ...(typeof owner === 'string' && owner.trim() ? { owner: owner.trim() } : {}) }];
       }
       return [];
     });

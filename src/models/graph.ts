@@ -38,6 +38,8 @@ export interface GraphNodeView {
   definitions: string[];
   /** `remarks`: active remarks on it (annotations; see domain/remarks.ts). */
   counts: { plans: number; failedPlans: number; pendingPlans: number; ideas: number; remarks: number };
+  /** The collaborator whose claim holds this result's proof work now ('you' for this machine). */
+  claimedBy?: string;
   /** For a definition: assumption or convention when it is one (definition_kind). */
   definitionKind?: 'assumption' | 'convention';
   /** Manuscript sections whose brief presents this node. */
@@ -224,8 +226,12 @@ export interface RouteView {
   planId: string;
   title: string;
   target: string;
-  origin: 'researcher' | 'agent' | 'fork';
+  origin: 'researcher' | 'agent' | 'fork' | 'copy';
   forkedFrom?: string;
+  createdBy?: string;
+  copiedFrom?: string;
+  /** The collaborator whose claim holds the route now, when it is not the viewer. */
+  claimedBy?: string;
   state: 'live' | 'reduced' | 'suspended' | 'dead' | 'failed' | 'won' | 'superseded' | 'abandoned' | 'frozen';
   reduction: 'none' | 'written' | 'verified' | 'failed';
   lemmas: string[];

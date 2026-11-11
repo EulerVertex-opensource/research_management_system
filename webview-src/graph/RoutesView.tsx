@@ -21,7 +21,7 @@ export const ROUTE_STATE_COLOR: Record<RouteView['state'], string> = {
   dead: COLOR.error, failed: COLOR.error, won: COLOR.approved, superseded: COLOR.inactive, abandoned: COLOR.inactive,
 };
 
-const ORIGIN_LABEL: Record<RouteView['origin'], string> = { researcher: 'yours', agent: 'agent', fork: 'fork' };
+const ORIGIN_LABEL: Record<RouteView['origin'], string> = { researcher: 'yours', agent: 'agent', fork: 'fork', copy: 'copy' };
 const REDUCTION_MARK: Record<RouteView['reduction'], { mark: string; hint: string }> = {
   none: { mark: '—', hint: 'The step from the lemmas to the result is not written yet' },
   written: { mark: '…', hint: 'The step from the lemmas is written; an independent check is next' },
@@ -67,7 +67,7 @@ function LemmaChip({ node, id, shared, onSelect }: { node?: GraphNodeView; id: s
   return (
     <button onClick={() => onSelect(id)} title={node ? `${node.title}: ${node.progressLabel}` : id}
       style={{ fontSize: 11.5, padding: '1px 8px', borderRadius: 10, cursor: 'pointer', color: 'var(--vscode-foreground)', border: `1px ${style.dashed ? 'dashed' : 'solid'} ${style.color}`, background: tint(style.color, 12), maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-      {node?.progress === 'done' ? '✓ ' : ''}{node?.title ?? id}{shared ? ' · shared' : ''}
+      {node?.progress === 'done' ? '✓ ' : ''}{node?.title ?? id}{shared ? ' · shared' : ''}{node?.claimedBy && node.progress !== 'done' ? ` · ${node.claimedBy === 'you' ? 'you' : node.claimedBy.split('@')[0]}` : ''}
     </button>
   );
 }
@@ -84,7 +84,8 @@ export function RouteRow({ route, payload, shared, onSelect, actions }: { route:
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 11, fontWeight: 600, color: '#fff', background: color, borderRadius: 8, padding: '0 7px' }}>{ROUTE_STATE_LABEL[route.state]}</span>
         <span style={{ fontSize: 13, fontWeight: 600 }}>{route.title}</span>
-        <span style={{ fontSize: 11, color: COLOR.muted }}>{ORIGIN_LABEL[route.origin]}{route.forkedFrom ? ` from ${title(route.forkedFrom)}` : ''}{technical ? ` · ${route.planId}` : ''}</span>
+        <span style={{ fontSize: 11, color: COLOR.muted }}>{ORIGIN_LABEL[route.origin]}{route.forkedFrom ? ` from ${title(route.forkedFrom)}` : ''}{route.copiedFrom ? ` of ${route.copiedFrom}` : ''}{route.createdBy && route.claimedBy !== 'you' ? ` · by ${route.createdBy.split('@')[0]}` : ''}{technical ? ` · ${route.planId}` : ''}</span>
+        {route.claimedBy && isOpen(route) && <span style={{ fontSize: 11, color: COLOR.active }} title="This collaborator's loop holds the route now">on it: {route.claimedBy === 'you' ? 'you' : route.claimedBy.split('@')[0]}</span>}
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center', fontSize: 11.5, color: COLOR.muted }}>
           <span title={REDUCTION_MARK[route.reduction].hint}>step from lemmas {REDUCTION_MARK[route.reduction].mark}</span>
           {route.lemmas.length > 0 && <span>lemmas {route.settledLemmas}/{route.lemmas.length}</span>}
@@ -121,11 +122,17 @@ export function RouteList({ payload, target, onSelect, onAction }: { payload: Gr
   const open = routes.filter((route) => isOpen(route) || route.state === 'won');
   const closed = routes.filter((route) => !open.includes(route));
   const loopOn = payload.loop?.status === 'running' || payload.loop?.status === 'paused';
+  // Several collaborators' routes: anyone may run a copy of another's route (its creator reduces the original).
+  const team = new Set((payload.routes ?? []).map((route) => route.createdBy).filter(Boolean)).size > 1;
+  const copyPrompt = (route: RouteView) => `Run a copy of the route "${route.title}" to ${title}: run research-loop route copy ${route.planId}, then continue the loop.`;
   return (
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto', height: '100%', boxSizing: 'border-box' }}>
       {open.map((route) => (
         <RouteRow key={route.planId} route={route} payload={payload} shared={shared} onSelect={onSelect}
-          actions={loopOn && isOpen(route) ? <button style={{ ...buttonStyle('secondary'), padding: '0 8px' }} title="Copies an instruction and opens the agent chat" onClick={() => onAction({ action: 'agent', prompt: dropPrompt(route, title) })}>Drop ↗</button> : undefined} />
+          actions={loopOn && isOpen(route) ? <>
+            {team && <button style={{ ...buttonStyle('secondary'), padding: '0 8px' }} title="A route of yours with the same lemmas; copies an instruction and opens the agent chat" onClick={() => onAction({ action: 'agent', prompt: copyPrompt(route) })}>Run a copy ↗</button>}
+            <button style={{ ...buttonStyle('secondary'), padding: '0 8px' }} title="Copies an instruction and opens the agent chat" onClick={() => onAction({ action: 'agent', prompt: dropPrompt(route, title) })}>Drop ↗</button>
+          </> : undefined} />
       ))}
       {closed.length > 0 && (
         <details>

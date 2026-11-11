@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 
 function load(file) {
   const built = esbuild.buildSync({ entryPoints: [path.resolve(__dirname, file)], bundle: true, write: false, platform: 'node', format: 'cjs', mainFields: ['module', 'main'] });
@@ -130,7 +131,7 @@ test('routes, merge, reduction first, shared lemma, commit: the winning route be
   assert.equal(read(f, 'research/assets/energy_estimate.md').data.status, 'archived');
   assert.equal(read(f, 'research/assets/energy_estimate.md').data.merged_into, 'energy_bound');
   await f.core.report({ outcome: 'complete', summary: 'The energy estimate is the energy bound.' });
-  assert.ok([...f.map.keys()].some((file) => file.startsWith('research/decisions/') && file.includes('route_merge')));
+  assert.ok(decisionData(f.map).some((record) => record.kind === 'route_merge'));
   // The cheaper route goes first, and its reduction before its lemmas.
   assert.equal((await f.core.next()).stage, 'reduce');
   assert.equal(f.core.current.current.planId, 'route_main_theorem_r1_s1_energy');
@@ -151,8 +152,10 @@ test('routes, merge, reduction first, shared lemma, commit: the winning route be
   const won = read(f, planFile('route_main_theorem_r1_s1_energy'));
   assert.equal(won.data.status, 'succeeded');
   assert.match(won.content, /## Outcome/);
-  assert.equal(read(f, planFile('route_main_theorem_r1_s2_compact')).data.status, 'superseded');
-  assert.equal(read(f, planFile('route_main_theorem_r1_s2_compact')).data.superseded_by, 'route_main_theorem_r1_s1_energy');
+  // The other route is superseded by derivation: its file (perhaps a collaborator's) is left untouched.
+  assert.equal(read(f, planFile('route_main_theorem_r1_s2_compact')).data.status, 'pending');
+  const after = (await f.core.routeStatus('main_theorem')).routes.find((item) => item.planId === 'route_main_theorem_r1_s2_compact');
+  assert.deepEqual([after.state, after.supersededBy], ['superseded', 'route_main_theorem_r1_s1_energy']);
   assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'asset' && item.target === 'main_theorem'), 'the committed proof goes to review');
   await approve(f, 'asset', 'energy_bound');
   await approve(f, 'asset', 'main_theorem');
@@ -220,7 +223,9 @@ test('the route map waits for the researcher when they review maps; a failed rou
   assert.equal((await f.core.next()).stage, 'reduce');
   assert.equal(f.core.current.current.planId, 'route_main_theorem_r1_s1_energy');
   // A route the researcher adds later is a change to the map: reviewed again.
-  f.map.set(planFile('route_main_theorem_r1_s9_late'), route('main_theorem', ['energy_bound'], { route_title: 'a late route' }));
+  // (A route with the same lemmas and ## Route would be a copy, covered by the review already.)
+  f.map.set('research/assets/decay.md', result('decay', 'The solution decays.'));
+  f.map.set(planFile('route_main_theorem_r1_s9_late'), route('main_theorem', ['decay'], { route_title: 'a late route' }));
   f.core.current.stage = 'select';
   assert.equal((await f.core.next()).stage, 'waiting');
   assert.ok(f.core.current.approvalQueue.some((item) => item.kind === 'routes' && item.target === 'main_theorem'));
@@ -236,7 +241,7 @@ test('asking for other routes drops the open ones and makes the researcher\'s wo
   const request = f.core.current.approvalQueue.find((item) => item.kind === 'routes');
   await f.core.resolveApproval(request.id, 'changes_requested', 'Use the maximum principle instead.', 'test');
   assert.equal(read(f, planFile('route_main_theorem_r1_s1_direct')).data.status, 'abandoned');
-  assert.ok([...f.map.keys()].some((file) => file.includes('route_drop')));
+  assert.ok(decisionData(f.map).some((record) => record.kind === 'route_drop'));
   assert.equal((await f.core.next()).stage, 'route');
   await f.core.answerQuestion(f.core.current.pendingQuestion.id, 'skip', '', 'test');
   await f.core.next();
@@ -568,4 +573,42 @@ test('a budget used up mid-batch ends the autonomous run only once the batch is 
   assert.equal(f.core.current.status, 'paused', 'the run ends once the batch is reported');
   assert.ok(f.core.current.autonomy.handedOverAt);
   assert.notEqual(two.stage, 'batch');
+});
+
+test('collaborators: a route is reduced by its creator, others copy it; the owner of the result commits; merges and drops touch only your own routes', async () => {
+  const f = fixture({ routeWidth: 1 });
+  await driveToRoutes(f);
+  await roundSlots(f);
+  f.map.set('research/assets/energy_bound.md', result('energy_bound', 'The energy is bounded.'));
+  f.map.set(planFile('route_main_theorem_r1_s1_energy'), route('main_theorem', ['energy_bound']));
+  await f.core.report({ outcome: 'complete', summary: 'One route' });
+  const me = read(f, planFile('route_main_theorem_r1_s1_energy')).data.created_by;
+  assert.ok(me, 'the loop stamps who created the route');
+  await f.core.report({ outcome: 'complete', summary: 'Nothing to merge' });
+  // Alice's route arrives through a sync: this loop does not reduce it.
+  f.map.set(planFile('route_main_theorem_r1_alice'), route('main_theorem', [], { created_by: 'alice@example.edu', route_title: 'Alice direct', route_round: 1 }));
+  assert.equal((await f.core.next()).stage, 'reduce');
+  assert.equal(f.core.current.current.planId, 'route_main_theorem_r1_s1_energy', 'Alice\'s cheaper route is hers to reduce');
+  await assert.rejects(f.core.dropRoute('route_main_theorem_r1_alice', 'not mine'), /alice@example.edu's route/);
+  // Copying it gives a route of mine with the same lemmas and no reduction; a copy of a reviewed route needs no new review.
+  f.map.set(planFile('route_main_theorem_r1_alice'), withReduction(f.map.get(planFile('route_main_theorem_r1_alice')), 'Alice\'s argument.'));
+  assert.match(await f.core.copyRoute('route_main_theorem_r1_alice'), /copied to route_main_theorem_r1_alice_copy_/);
+  const copyFile = [...f.map.keys()].find((file) => file.includes('route_main_theorem_r1_alice_copy_'));
+  const copy = read(f, copyFile);
+  assert.deepEqual([copy.data.origin, copy.data.copied_from, copy.data.created_by, copy.data.route_lemmas], ['copy', 'route_main_theorem_r1_alice', me, []]);
+  assert.doesNotMatch(copy.content, /## Reduction/);
+  // Only the owner commits: with Bob as the owner of the main theorem, my complete route waits for him.
+  f.map.set(paths.projectMd, project.replace('    role: the central claim\n', '    role: the central claim\n    owner: bob@example.edu\n'));
+  await f.core.adoptExistingApprovals();
+  f.core.current.stage = 'select';
+  const plan = path.posix.basename(copyFile, '.md');
+  assert.equal((await f.core.next()).stage, 'reduce');
+  assert.equal(f.core.current.current.planId, plan);
+  f.map.set(copyFile, withReduction(f.map.get(copyFile)));
+  await f.core.report({ outcome: 'proved', summary: 'Reduced' });
+  const next = await f.core.next();
+  assert.notEqual(read(f, 'research/assets/main_theorem.md').content.includes('## Proof'), true, 'not committed: Bob owns the result');
+  const status = await f.core.routeStatus('main_theorem');
+  assert.match(status.text, /0 step\(s\) left|reduced/);
+  assert.ok(next.stage);
 });

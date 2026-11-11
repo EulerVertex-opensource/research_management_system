@@ -259,8 +259,8 @@ This directory is the version-controlled source of truth for Research Assistant.
 - \`${paths.writingOutline}\` orders manuscript sections; \`${paths.writingSections}/\` contains section briefs. LaTeX section files remain the manuscript source of truth.
 - \`${paths.paperIndex}\` indexes cited papers; \`${paths.papers}/\` contains shared metadata and working transcriptions.
 - \`${shared.checks}/\` records falsification checks (what was tried against which statement, and what was not covered) and the summary of each object-search round (obstructions, limitations).
-- \`${shared.candidates}/\` holds object-search candidates: each object a worker proposed for a counterexample or construction, with a pass/fail verdict per property, so collaborators and later rounds do not repeat them.
-- \`${shared.decisions}/\` records researcher decisions (new directions, change requests, parked results); \`${shared.handoffs}/\` says where work stopped and what comes next.
+- \`${shared.candidates}/\` (local, not shared) holds object-search candidates while a search runs; the round records in \`${shared.checks}/\` keep what collaborators need.
+- \`${shared.log}/\` holds the record logs, one append-only JSON-lines file per collaborator, month, and machine: researcher decisions (new directions, change requests, parked results), idea updates, and handoffs (\`research-loop handoff --latest\` prints the latest). Each file has one writer, so collaborators' logs never conflict.
 - \`${shared.approvals}/\` holds one approval record per approved result; approvals are made only by a researcher in VS Code.
 
 Nothing else belongs here: nodes sit directly in their folders (group them with tags), with no subfolders, new folders, or index, README, or overview notes. Files elsewhere are never read by the dashboard or the loop; \`research-maintenance validate\` and \`sync prepare\` report them.

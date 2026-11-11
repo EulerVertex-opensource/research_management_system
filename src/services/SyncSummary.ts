@@ -3,6 +3,7 @@ import { ProjectPaths } from '../models/types';
 import { parseMarkdown } from './Frontmatter';
 import { NameStatus } from './LoopGit';
 import { SharedFolders, statementDigest } from './ResearchLoopModel';
+import { parseLog } from './ResearchRecords';
 import { hasSection, sectionContent } from '../domain/sections';
 import { locateNodeFile } from '../domain/registry';
 
@@ -68,6 +69,15 @@ export async function summarizeResearchChanges(changes: NameStatus[], context: S
     } else if (folder === shared.candidates) {
       if (change.status === 'A') lines.push(`Search candidate ${name} for ${String(now?.data.target_asset ?? '?')}: ${String(now?.data.status ?? '')}${sectionContent(now?.content ?? '', 'Failure') ? ` — ${firstLine(sectionContent(now!.content, 'Failure'))}` : ''}.`);
       else if (now?.data.status === 'archived' && old?.data.status !== 'archived') lines.push(`Search candidate ${name} rejected by independent verification.`);
+    } else if (folder === shared.log) {
+      // A log only grows: what is new are the records the other side did not have.
+      const seen = new Set(parseLog(before ?? '').map((record) => record.id));
+      for (const record of parseLog(after ?? '').filter((item) => !seen.has(item.id))) {
+        const by = String(record.performed_by ?? 'unknown');
+        if (record.type === 'handoff') lines.push(`Handoff from ${by}${Array.isArray(record.working_on) && record.working_on.length ? ` (working on ${record.working_on.join(', ')})` : ''}.`);
+        else if (record.type === 'decision' && record.kind === 'idea_update') lines.push(`Idea ${String(record.target)} updated by ${by}${record.idea?.status ? `: ${String(record.idea.status)}` : ''}.`);
+        else if (record.type === 'decision') lines.push(`Decision (${String(record.kind)}) on ${String(record.target)} by ${by}: ${firstLine(String(record.text ?? ''))}`);
+      }
     } else if (folder === shared.decisions) {
       if (change.status === 'A') lines.push(`Decision (${String(now?.data.kind ?? '?')}) on ${String(now?.data.target ?? '?')} by ${String(now?.data.performed_by ?? 'unknown')}: ${firstLine(now?.content ?? '')}`);
     } else if (folder === shared.handoffs) {

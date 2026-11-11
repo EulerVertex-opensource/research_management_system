@@ -42,6 +42,8 @@ function folders(paths: LayoutPaths) {
     // Remarks are not nodes, but their folder follows the same rule: one file each, flat, with frontmatter.
     nodes: [paths.assets, paths.definitions, paths.ideas, paths.plans, shared('checks'), shared('candidates'), ...(paths.remarks ? [paths.remarks] : [])],
     records: [shared('decisions'), shared('handoffs')],
+    // The append-only record logs: one JSON-lines file per collaborator, month, and machine.
+    log: shared('log'),
     approvals: shared('approvals'),
     writing,
     bindings: `${writing}/bindings`,
@@ -57,7 +59,7 @@ function folders(paths: LayoutPaths) {
 function governed(paths: LayoutPaths): string[] {
   const f = folders(paths);
   // With the legacy root `.` the package folder is a plain root folder the rules leave alone.
-  const list = [...f.nodes, ...f.records, f.approvals, f.writing, ...(paths.researchRoot === '.' ? [] : [f.package]), ...(paths.papers ? [paths.papers] : []), ...(paths.library ? [paths.library] : [])];
+  const list = [...f.nodes, ...f.records, f.log, f.approvals, f.writing, ...(paths.researchRoot === '.' ? [] : [f.package]), ...(paths.papers ? [paths.papers] : []), ...(paths.library ? [paths.library] : [])];
   return paths.researchRoot === '.' ? list : [paths.researchRoot, ...list];
 }
 
@@ -80,6 +82,7 @@ function allowedFile(paths: LayoutPaths, file: string): boolean {
   if (file === (paths.researchRoot === '.' ? 'style.md' : `${paths.researchRoot}/style.md`)) return true;
   if (f.nodes.includes(parent)) return NODE_FILE.test(base);
   if (f.records.includes(parent)) return base.endsWith('.md');
+  if (parent === f.log) return /^[a-z0-9_]+__\d{4}-\d{2}__[a-z0-9_]+\.jsonl$/.test(base);
   if (isUnder(file, f.approvals)) return /\.jsonl?$/.test(base);
   if (parent === f.sections) return SECTION_FILE.test(base);
   if (parent === f.bindings) return /^[a-z0-9][a-z0-9_-]*\.json$/.test(base);

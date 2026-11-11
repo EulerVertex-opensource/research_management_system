@@ -134,10 +134,12 @@ export interface LoopFiles {
 }
 
 /** Git-tracked folders that carry research meaning which used to live only in local loop state. */
-export interface SharedFolders { checks: string; decisions: string; handoffs: string; approvals: string; candidates: string }
+/** `log`: the append-only record logs (decisions, handoffs, idea updates), one per collaborator and machine. `candidates`: an object search's working files, local only (research-local). */
+export interface SharedFolders { checks: string; decisions: string; handoffs: string; approvals: string; candidates: string; log: string }
 export function sharedFolders(researchRoot: string): SharedFolders {
   const join = (child: string) => researchRoot === '.' ? child : path.posix.join(researchRoot, child);
-  return { checks: join('checks'), decisions: join('decisions'), handoffs: join('handoffs'), approvals: join('approvals'), candidates: join('candidates') };
+  // Search candidates are working files: local (research-local is ignored by git); the round records and checks carry what collaborators need.
+  return { checks: join('checks'), decisions: join('decisions'), handoffs: join('handoffs'), approvals: join('approvals'), candidates: 'research-local/candidates', log: join('log') };
 }
 
 export interface LoopQuestion {

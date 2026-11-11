@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const path = require('node:path');
 const esbuild = require('esbuild');
 const matter = require('gray-matter');
+const { decisionDocs, decisionData, handoffTexts, ideaRaw, logRecords } = require('./records-fixtures.cjs');
 const { searchNothing } = require('./search-fixtures.cjs');
 
 function load(file) {
@@ -43,7 +44,7 @@ function fixture(settings) {
   const core = new ResearchLoopCore(files, paths, { id: () => `id-${++counter}` });
   return { files, core, map: files.map };
 }
-const data = (f, file) => matter(f.map.get(file)).data;
+const data = (f, file) => matter(file.startsWith('research/ideas/') ? ideaRaw(f.map, file.slice('research/ideas/'.length, -3)) : f.map.get(file)).data;
 const routine = (rules = {}, rigor = {}) => ({ autoApprove: { enabled: true, ...rules }, rigor: { verifyProofs: 'off', refuteSearch: 'all', ...rigor } });
 
 /** Goals approved, main_theorem scaffolded, searched when the setting asks, then planned and proved. */
@@ -140,7 +141,7 @@ test('without permission the agent leaves conjecture ideas alone, unless the res
   assert.equal((await f.core.next()).stage, 'conjecture');
   await f.core.report({ outcome: 'none', summary: 'It is the definition of addition; nothing to conjecture.' });
   assert.equal(data(f, `research/ideas/${ideaId}.md`).status, 'draft', 'the idea stays for the researcher');
-  assert.match(f.map.get(`research/ideas/${ideaId}.md`), /## Not yet a conjecture\n\nIt is the definition of addition/);
+  assert.match(ideaRaw(f.map, ideaId), /## Not yet a conjecture\n\nIt is the definition of addition/);
   assert.equal((await f.core.next()).stage, 'ready', 'an idea is tried once');
   await assert.rejects(f.core.requestConjecture('main_theorem'), /not a conjecture/);
 });
@@ -230,7 +231,7 @@ test('working on its own, a reassessment offers conjectures that serve a set-asi
   await f.core.report({ outcome: 'none', summary: 'Nothing sound.' });
   const handed = await f.core.report({ outcome: 'none', summary: 'main_theorem: no route.', confirm: true });
   assert.match(handed.message, /recommend the conjectures worth taking up next \(add_zero/);
-  const handoff = [...f.map.entries()].filter(([file]) => file.startsWith('research/handoffs/')).map(([, raw]) => raw).join('\n');
+  const handoff = handoffTexts(f.map).join('\n');
   assert.match(handoff, /Conjectures worth taking up next, best first:\n- add_zero/);
 });
 
