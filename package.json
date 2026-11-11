@@ -2,7 +2,7 @@
   "name": "research-management-system",
   "displayName": "Research Assistant",
   "description": "Shared AI-assisted mathematical research context for Overleaf Git projects in VS Code",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "tianhao",
   "repository": {
     "type": "git",
