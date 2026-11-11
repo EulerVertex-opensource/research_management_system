@@ -14,7 +14,12 @@ export interface Provenance { performed_by: string; created_at: string; base_com
  * `route_request`: the researcher asked for a round of routes to a result (a fork names the settled result to start from);
  * `route_drop`: the researcher dropped a route (target: its plan); `route_merge`: what merging a round of routes decided.
  */
-export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check' | 'proof_check' | 'extraction_check' | 'route_request' | 'route_drop' | 'route_merge';
+/**
+ * `repair_request`: the researcher asked the loop to fill the gaps an independent check finds in their own proof of a result.
+ * `intake`: the researcher's own results taken into the loop (`ids`, the `main` results among them, their `source`);
+ * `intake_closed` (target: the intake's decision ID): every one of them is settled; `ids` are the goals then, `candidates` the suggested next goals.
+ */
+export type DecisionKind = 'direction' | 'answer' | 'changes_requested' | 'parked' | 'unparked' | 'search_request' | 'node_check' | 'proof_check' | 'extraction_check' | 'route_request' | 'route_drop' | 'route_merge' | 'repair_request' | 'intake' | 'intake_closed';
 
 export interface DecisionInfo {
   id: string;
@@ -39,6 +44,14 @@ export interface DecisionInfo {
   /** proof_check: the statement it was checked against, and the statements of the dependencies and definitions it read. */
   statementDigest?: string;
   dependencyDigests?: Record<string, string>;
+  /** intake: the nodes taken in; intake_closed: the required results when it closed. */
+  ids?: string[];
+  /** intake: the main results among them. */
+  main?: string[];
+  /** intake: the file or paper they came from. */
+  source?: string;
+  /** intake_closed: conjectures or conjecture ideas offered as the next goal. */
+  candidates?: string[];
 }
 
 export interface CheckInfo { id: string; target: string; outcome: string; statementDigest?: string; createdAt?: string; performedBy?: string }
@@ -60,14 +73,14 @@ export function decisionId(kind: DecisionKind, target: string, provenance: Prove
   return `decision_${stamp(provenance.created_at)}_${kind}_${safeIdPart(target)}_${suffix}`;
 }
 
-export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number; routeRound?: number; fork?: string; statementDigest?: string; dependencyDigests?: Record<string, string> }
+export interface DecisionExtra { reason?: string; failedPlansAtDirection?: string[]; digest?: string; rounds?: number; searchRound?: number; routeRound?: number; fork?: string; statementDigest?: string; dependencyDigests?: Record<string, string>; ids?: string[]; main?: string[]; source?: string; candidates?: string[] }
 
 export function decisionMarkdown(kind: DecisionKind, target: string, text: string, provenance: Provenance, extra: DecisionExtra = {}): string {
-  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check', proof_check: 'Independent proof check', extraction_check: 'Extraction coverage check', route_request: 'Routes requested', route_drop: 'Route dropped', route_merge: 'Routes merged' };
+  const titles: Record<DecisionKind, string> = { direction: 'New direction', answer: 'Researcher answer', changes_requested: 'Changes requested', parked: 'Parked', unparked: 'Unparked', search_request: 'Search requested', node_check: 'Independent check', proof_check: 'Independent proof check', extraction_check: 'Extraction coverage check', route_request: 'Routes requested', route_drop: 'Route dropped', route_merge: 'Routes merged', repair_request: 'Repair requested', intake: 'Researcher results taken in', intake_closed: 'Researcher results settled' };
   return stringifyMarkdown(`\n${text.trim() || '(no text)'}\n`, clean({
     type: 'decision', title: `${titles[kind]}: ${target}`, kind, target, reason: extra.reason,
     failed_plans_at_direction: extra.failedPlansAtDirection, digest: extra.digest, rounds: extra.rounds, search_round: extra.searchRound, route_round: extra.routeRound, fork: extra.fork,
-    statement_digest: extra.statementDigest, dependency_digests: extra.dependencyDigests, ...provenance,
+    statement_digest: extra.statementDigest, dependency_digests: extra.dependencyDigests, ids: extra.ids, main: extra.main, source: extra.source, candidates: extra.candidates, ...provenance,
   }));
 }
 
@@ -87,6 +100,10 @@ export function parseDecision(id: string, raw: string): DecisionInfo | undefined
     statementDigest: typeof data.statement_digest === 'string' ? data.statement_digest : undefined,
     dependencyDigests: data.dependency_digests && typeof data.dependency_digests === 'object' && !Array.isArray(data.dependency_digests)
       ? Object.fromEntries(Object.entries(data.dependency_digests as Record<string, unknown>).map(([key, value]) => [key, String(value)])) : undefined,
+    ids: Array.isArray(data.ids) ? data.ids.map(String) : undefined,
+    main: Array.isArray(data.main) ? data.main.map(String) : undefined,
+    source: typeof data.source === 'string' ? data.source : undefined,
+    candidates: Array.isArray(data.candidates) ? data.candidates.map(String) : undefined,
   };
 }
 

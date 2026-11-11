@@ -178,3 +178,49 @@ export function keepTryingLabel(reason: string): string {
 }
 
 export const KEEP_TRYING_HINT = 'No new idea from you: it goes back in the agent’s queue, and the agent tries again on its own, knowing what failed before.';
+
+/** Where one of the researcher's own results stands in the repair (Results → Repair): the label, and the color group on the graph. */
+export const REPAIR_LABEL: Record<string, string> = {
+  unchecked: 'Not checked yet', checking: 'Agent checking', gap: 'Gap: your call', needs_repair: 'Gap: to repair',
+  repairing: 'Agent repairing', review: 'Waits for your review', stuck: 'Repair stuck', to_prove: 'To prove', done: 'Done', retired: 'Retired',
+};
+
+const REPAIR_PROGRESS: Record<string, NodeProgress> = {
+  unchecked: 'waiting', checking: 'working', gap: 'needs_you', needs_repair: 'waiting', repairing: 'working',
+  review: 'needs_you', stuck: 'stuck', done: 'done', retired: 'inactive',
+};
+
+/** The graph color group of a repair state; a result to prove keeps its own. `active`: an agent works on it now. */
+export function repairProgress(state: string, own: NodeProgress, active?: boolean): NodeProgress {
+  if (state === 'to_prove') return own;
+  if (state === 'repairing' && !active) return 'waiting';
+  return REPAIR_PROGRESS[state] ?? own;
+}
+
+/** One line under the title in the repair view. */
+export function repairDetail(repair: { state: string; how?: string; gap?: string; failed: number; active?: boolean; note?: string }): string {
+  const firstLine = (text?: string) => (text ?? '').split('\n')[0].replace(/\s+/g, ' ').trim();
+  const clipped = (text: string) => (text.length > 90 ? `${text.slice(0, 87)}…` : text);
+  const attempts = repair.failed ? ` (${repair.failed} failed attempt${repair.failed > 1 ? 's' : ''})` : '';
+  switch (repair.state) {
+    case 'gap': return clipped(`Gap: ${firstLine(repair.gap)}. Ask the loop to repair it, or fix it yourself`);
+    case 'needs_repair': return clipped(`Gap: ${firstLine(repair.gap)}${attempts}`);
+    case 'repairing': return repair.note ? `${repair.note}${attempts}` : `${repair.active ? 'Being repaired now' : 'Repair under way, paused'}${attempts}`;
+    case 'review': return repair.how === 'repaired' ? 'Repaired and checked: compare it with your version' : 'Your proof passed the check as written';
+    case 'done': return repair.how === 'repaired' ? 'Repaired, approved' : repair.how === 'proved' ? 'Proved here, approved' : 'Sound as written, approved';
+    case 'stuck': return clipped(repair.note ? `Set aside: ${firstLine(repair.note)}` : `Set aside${attempts}`);
+    case 'unchecked': return 'Your proof waits for its independent check';
+    case 'checking': return 'The agent checks your proof as written';
+    case 'to_prove': return 'Came without a proof; the loop proves it';
+    default: return '';
+  }
+}
+
+/** Legend of the repair view. */
+export const REPAIR_LEGEND: Array<{ state: NodeProgress; label: string }> = [
+  { state: 'done', label: 'Done' },
+  { state: 'working', label: 'Agent checking or repairing' },
+  { state: 'needs_you', label: 'Waits for you (review, or a gap to decide on)' },
+  { state: 'stuck', label: 'Repair stuck' },
+  { state: 'waiting', label: 'Not checked yet, or a gap waiting its turn' },
+];

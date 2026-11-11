@@ -1,5 +1,6 @@
 import type { AttentionItem, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, SectionView } from '../../src/models/graph';
 import { isPrerequisiteEdge } from '../../src/models/graph';
+import { REPAIR_LABEL, repairDetail, repairProgress } from '../../src/domain/copy';
 
 /**
  * Pure selection logic for the Graph tab: which nodes and edges to draw, so a
@@ -12,8 +13,8 @@ export const MAX_VISIBLE = 150;
 
 export type AttentionFilter = 'all' | 'attention' | GraphFlag | 'draft' | 'approved';
 
-/** The graph's three views: one main result's tree, only what needs the researcher, or everything with filters. */
-export type GraphMode = 'goal' | 'needs' | 'all' | 'routes';
+/** The graph's views: one main result's tree, only what needs the researcher, everything with filters, routes, or the repair of the researcher's own results. */
+export type GraphMode = 'goal' | 'needs' | 'all' | 'routes' | 'repair';
 
 export interface ViewOptions {
   /** Results as an ordered list of boxes, or as the graph. */
@@ -22,6 +23,8 @@ export interface ViewOptions {
   mode?: GraphMode;
   /** The main result the "goal" view shows; defaults to the one the loop's status points at. */
   goal?: string;
+  /** The intake the "repair" view shows; defaults to the newest. */
+  intake?: string;
   scope: 'required' | 'all';
   showDefinitions: boolean;
   showInactive: boolean;
@@ -274,4 +277,41 @@ export function waitingItems(payload: GraphPayload): AttentionItem[] {
       why: '', ifIgnored: 'The loop stays stopped.', target: blocker.target, blocks: [], sections: [], buttons: blocker.buttons,
     }));
   return [...extra, ...payload.attention];
+}
+
+/**
+ * The payload as the repair view tells it: each of the intake's results colored and labelled by
+ * where it stands in the repair rather than by its general progress. Other nodes are unchanged.
+ */
+export function repairPayload(payload: GraphPayload, intakeId: string): GraphPayload {
+  return {
+    ...payload,
+    nodes: payload.nodes.map((node) => {
+      if (!node.repair || node.repair.intake !== intakeId) return node;
+      const progress = repairProgress(node.repair.state, node.progress, node.repair.active);
+      return { ...node, progress, progressLabel: node.repair.state === 'to_prove' ? node.progressLabel : REPAIR_LABEL[node.repair.state] ?? node.progressLabel, progressDetail: node.repair.state === 'to_prove' ? node.progressDetail : repairDetail(node.repair) };
+    }),
+  };
+}
+
+/** The intake's results and the dependencies among them, prerequisites above. */
+export function repairGraph(payload: GraphPayload, intakeId: string): FocusedGraph {
+  const intake = payload.intakes?.find((item) => item.id === intakeId);
+  if (!intake) return { nodes: [], edges: [], folds: [] };
+  const members = new Set(intake.ids);
+  const nodes = payload.nodes.filter((node) => members.has(node.id) && node.kind === 'asset');
+  const kept = new Set(nodes.map((node) => node.id));
+  return { nodes, edges: transitiveReduction(payload.edges.filter((edge) => PREREQUISITE(edge) && kept.has(edge.from) && kept.has(edge.to))).edges, folds: [] };
+}
+
+/** How many of an intake's results are in each repair state, for its selector and caption. */
+export function repairCounts(payload: GraphPayload, intakeId: string): { total: number; done: number; you: number; working: number; stuck: number } {
+  const states = payload.nodes.filter((node) => node.repair?.intake === intakeId).map((node) => node.repair!);
+  return {
+    total: states.length,
+    done: states.filter((item) => item.state === 'done').length,
+    you: states.filter((item) => item.state === 'review' || item.state === 'gap').length,
+    working: states.filter((item) => item.active).length,
+    stuck: states.filter((item) => item.state === 'stuck').length,
+  };
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { GraphAction, GraphPayload } from '../../src/models/graph';
-import { PROGRESS_LEGEND } from '../../src/domain/copy';
-import { AttentionFilter, GraphMode, MAX_VISIBLE, ViewOptions, adjacency, blockingStates, defaultGoal, goalGraph, impactOf, needsGraph, reach, traceGraph, visibleGraph } from './graphModel';
+import { PROGRESS_LEGEND, REPAIR_LEGEND } from '../../src/domain/copy';
+import { AttentionFilter, GraphMode, MAX_VISIBLE, ViewOptions, adjacency, blockingStates, defaultGoal, goalGraph, impactOf, needsGraph, reach, repairCounts, repairGraph, repairPayload, traceGraph, visibleGraph } from './graphModel';
 import { GraphCanvas } from './GraphCanvas';
 import { buttonStyle } from './AttentionList';
 import { ResultCard } from './ResultCard';
@@ -36,6 +36,7 @@ const MODES: { id: GraphMode; label: string; hint: string }[] = [
   { id: 'needs', label: 'Held up', hint: 'Results that are stuck or wait for you, and the main results they hold up' },
   { id: 'all', label: 'Everything', hint: 'Every result, with search and filters' },
   { id: 'routes', label: 'Routes', hint: 'The routes to one result, side by side: the first one complete proves it' },
+  { id: 'repair', label: 'Repair', hint: 'Your own results you handed to the loop: which passed their check, which have a gap, and which the agent is repairing' },
 ];
 
 const DISPLAYS: { id: ViewOptions['display']; label: string; hint: string }[] = [
@@ -56,10 +57,10 @@ export function Toggle({ label, checked, onChange, title }: { label: string; che
   return <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer' }} title={title}><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />{label}</label>;
 }
 
-function Legend() {
+function Legend({ repair = false }: { repair?: boolean }) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', padding: '7px 14px', borderTop: `1px solid ${COLOR.border}`, fontSize: 11, color: COLOR.muted, alignItems: 'center' }}>
-      {PROGRESS_LEGEND.map(({ state, label }) => (
+      {(repair ? REPAIR_LEGEND : PROGRESS_LEGEND).map(({ state, label }) => (
         <span key={state} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
           <span style={{ width: 11, height: 11, borderRadius: 3, boxSizing: 'border-box', background: tint(PROGRESS_STYLE[state].color, 14), border: `1.5px ${PROGRESS_STYLE[state].dashed ? 'dashed' : 'solid'} ${PROGRESS_STYLE[state].color}` }} />{label}
         </span>
@@ -73,15 +74,19 @@ function Legend() {
   );
 }
 
-export function ProgressView({ payload, options, onOptions, selectedId, onSelect, onNavigate, onAction }: Props) {
+export function ProgressView({ payload: raw, options, onOptions, selectedId, onSelect, onNavigate, onAction }: Props) {
   const [ignoreCap, setIgnoreCap] = useState(false);
   const set = (patch: Partial<ViewOptions>) => onOptions({ ...options, ...patch });
+  const intakes = raw.intakes ?? [];
+  const intakeId = options.intake && intakes.some((item) => item.id === options.intake) ? options.intake : intakes[0]?.id;
+  // The repair view colors and labels the intake's results by where they stand in the repair.
+  const payload = useMemo(() => (options.mode === 'repair' && intakeId && !options.trace ? repairPayload(raw, intakeId) : raw), [raw, options.mode, intakeId, options.trace]);
   const goals = payload.required.filter((id) => payload.nodes.some((node) => node.id === id));
   const unfinished = goals.filter((id) => payload.nodes.find((node) => node.id === id)?.progress !== 'done');
   // With every main result done, one folded tree says little: start from everything instead.
   const chosen: GraphMode = options.mode ?? (unfinished.length ? 'goal' : 'all');
   const routed = routedResults(payload);
-  const mode: GraphMode = chosen === 'goal' && !goals.length ? 'all' : chosen;
+  const mode: GraphMode = chosen === 'goal' && !goals.length ? 'all' : chosen === 'repair' && !intakes.length ? 'all' : chosen;
   // The routes view shows one result with routes: the one asked for, else the loop's current one, else the first.
   const routeTarget = options.goal && routed.includes(options.goal) ? options.goal : payload.loop?.assetId && routed.includes(payload.loop.assetId) ? payload.loop.assetId : routed[0];
   const goal = options.goal && goals.includes(options.goal) ? options.goal : defaultGoal(payload);
@@ -94,9 +99,10 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
     if (mode === 'goal' && goal) return { ...goalGraph(payload, goal), overCap: false, hidden: 0, reduced: 0 };
     if (mode === 'needs') return { ...needsGraph(payload), overCap: false, hidden: 0, reduced: 0 };
     if (mode === 'routes') return { nodes: [], edges: [], folds: [], overCap: false, hidden: 0, reduced: 0 };
+    if (mode === 'repair') return { ...(intakeId ? repairGraph(payload, intakeId) : { nodes: [], edges: [], folds: [] }), overCap: false, hidden: 0, reduced: 0 };
     // A list stays readable with many results; only the graph has a size cap.
     return { ...visibleGraph(payload, { ...options, focus: undefined }, ignoreCap || list), folds: [] };
-  }, [payload, mode, goal, options, ignoreCap, list, trace]);
+  }, [payload, mode, goal, options, ignoreCap, list, trace, intakeId]);
   const impact = useMemo(() => (trace?.direction === 'down' ? impactOf(payload, trace.id) : undefined), [payload, trace]);
   const selected = payload.nodes.find((node) => node.id === selectedId);
 
@@ -123,6 +129,7 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
     : mode === 'goal' && goal ? `What ${payload.nodes.find((node) => node.id === goal)?.title ?? goal} still needs, ${list ? 'prerequisites first' : 'prerequisites above'}. Finished branches are folded.`
     : mode === 'needs' ? 'Results that are stuck or wait for you, and the main results they hold up.'
     : mode === 'routes' ? (routeTarget ? `${routesSummary(routesTo(payload, routeTarget))}. Each route proves the result from its lemmas; the first one complete wins.` : '')
+    : mode === 'repair' ? repairCaption(raw, intakeId)
     : `${focused.nodes.length} shown · ${focused.hidden} hidden by the filters.`;
 
   return (
@@ -131,7 +138,7 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
           <h2 style={{ margin: '0 8px 0 0', fontSize: 15, fontWeight: 600 }}>Results</h2>
           {!trace && <div role="group" aria-label="Which results" style={{ display: 'flex', border: `1px solid ${COLOR.border}`, borderRadius: 4, overflow: 'hidden' }}>
-            {MODES.map((item) => (
+            {MODES.filter((item) => item.id !== 'repair' || intakes.length > 0).map((item) => (
               <button key={item.id} aria-pressed={mode === item.id} title={item.hint} onClick={() => set({ mode: item.id })} style={segment(mode === item.id)}>{item.label}</button>
             ))}
           </div>}
@@ -152,6 +159,17 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
               <span style={{ color: COLOR.muted, whiteSpace: 'nowrap' }}>Routes to</span>
               <select value={routeTarget} onChange={(event) => set({ goal: event.target.value })} style={{ ...inputStyle, maxWidth: 420, minWidth: 0 }}>
                 {routed.map((id) => <option key={id} value={id}>{payload.required.includes(id) ? '★ ' : ''}{payload.nodes.find((item) => item.id === id)?.title ?? id} ({routesSummary(routesTo(payload, id))})</option>)}
+              </select>
+            </label>
+          )}
+          {!trace && mode === 'repair' && intakes.length > 0 && (
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, minWidth: 0 }}>
+              <span style={{ color: COLOR.muted, whiteSpace: 'nowrap' }}>Your results</span>
+              <select value={intakeId} onChange={(event) => set({ intake: event.target.value })} style={{ ...inputStyle, maxWidth: 420, minWidth: 0 }}>
+                {intakes.map((item) => {
+                  const counts = repairCounts(raw, item.id);
+                  return <option key={item.id} value={item.id}>{item.closed ? '✓ ' : ''}{item.source ?? 'Upload'} · {item.at.slice(0, 10)} ({counts.done} of {counts.total} done)</option>;
+                })}
               </select>
             </label>
           )}
@@ -205,7 +223,7 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
               onSelect={(id) => onSelect(id === selectedId ? undefined : id)} onBackground={() => onSelect(undefined)} />
           ) : (
             <div style={{ padding: 24, opacity: 0.7, fontSize: 13 }}>
-              {mode === 'needs' ? 'Nothing is stuck and nothing waits for you.' : payload.required.length ? 'Nothing matches these filters.' : 'No main results yet: list them in project.md to see what they rest on, or choose "Everything".'}
+              {mode === 'repair' ? 'None of these results is in the project any more.' : mode === 'needs' ? 'Nothing is stuck and nothing waits for you.' : payload.required.length ? 'Nothing matches these filters.' : 'No main results yet: list them in project.md to see what they rest on, or choose "Everything".'}
             </div>
           )}
         </div>
@@ -218,7 +236,7 @@ export function ProgressView({ payload, options, onOptions, selectedId, onSelect
           </aside>
         )}
       </div>
-      {!list && (mode === 'routes' && !trace ? <RouteLegend /> : <Legend />)}
+      {!list && (mode === 'routes' && !trace ? <RouteLegend /> : <Legend repair={mode === 'repair' && !trace} />)}
     </div>
   );
 }
@@ -245,4 +263,15 @@ function PaperPassages({ impact, onAction }: { impact: ReturnType<typeof impactO
       ) : <div style={{ color: COLOR.muted, marginTop: 4 }}>No section of the paper presents it or what rests on it.</div>}
     </section>
   );
+}
+
+/** What the repair view shows, in a sentence: how far the repair got, and what it leads to. */
+function repairCaption(payload: GraphPayload, intakeId: string | undefined): string {
+  const intake = payload.intakes?.find((item) => item.id === intakeId);
+  if (!intake) return '';
+  const counts = repairCounts(payload, intake.id);
+  const from = intake.source ? ` from ${intake.source}` : '';
+  if (intake.closed) return `Your results${from} are settled: ${counts.done} of ${counts.total} done${counts.stuck ? `, ${counts.stuck} still open` : ''}. Choose the next research goal in Needs you.`;
+  const parts = [`${counts.done} of ${counts.total} done`, counts.you ? `${counts.you} wait for you` : '', counts.working ? `the agent works on ${counts.working}` : '', counts.stuck ? `${counts.stuck} stuck` : ''].filter(Boolean);
+  return `Your results${from}: ${parts.join(', ')}. Once every one is settled, you choose the next research goal.`;
 }

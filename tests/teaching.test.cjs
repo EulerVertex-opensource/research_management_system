@@ -241,9 +241,11 @@ test('a chat that names a manuscript skill is a writing chat; teaching and writi
   assert.equal(roleSignal('UserPromptSubmit', { prompt: 'Continue the research loop: run research-loop next and follow it.' }, TEACH_PROMPT_PATTERN), 'drive');
   assert.equal(roleSignal('PreToolUse', bash('node .agents/skills/draft-latex/scripts/manuscript-writing.cjs impact'), TEACH_PROMPT_PATTERN), 'write');
   assert.equal(roleSignal('PreToolUse', { tool_name: 'Bash', tool_input: { command: ['bash', '-lc', 'node .agents/skills/research-loop/scripts/research-loop.cjs next'] } }, TEACH_PROMPT_PATTERN), 'drive');
-  // A driver stays the driver; a chat beside the loop never becomes one.
+  // A driver stays the driver. A writing chat drives only when the researcher invokes the loop there; a teaching chat never does.
   assert.equal(nextSessionRole('drive', 'write', true), undefined);
-  assert.equal(nextSessionRole('write', 'drive', true), undefined);
+  assert.equal(nextSessionRole('write', 'drive', true), 'drive');
+  assert.equal(nextSessionRole('write', 'drive', false), undefined, 'the agent running next does not take over');
+  assert.equal(nextSessionRole('teach', 'drive', true), undefined);
   assert.equal(nextSessionRole('teach', 'drive', false), undefined);
   assert.equal(nextSessionRole(undefined, 'write', false), 'write');
   assert.equal(nextSessionRole(undefined, 'drive', false), 'drive');
@@ -259,9 +261,10 @@ test('a chat that names a manuscript skill is a writing chat; teaching and writi
   assert.equal(sessionRole(withSessionRole(roles, 'teach', 's1', 'again'), 's1'), 'teach');
   // A writing chat never drives the loop, but reads it and records what the paper needs.
   const loop = 'node .agents/skills/research-loop/scripts/research-loop.cjs';
-  for (const command of ['next', 'report proved --summary x', 'resume', 'pause', 'park a --reason x', 'focus a', 'search request a', 'idea convert idea_1 --asset a', 'budget allocate a 2 --reason x']) {
+  for (const command of ['next', 'report proved --summary x', 'resume', 'pause', 'park a --reason x', 'focus a', 'search request a', 'idea convert idea_1 --asset a', 'budget allocate a 2 --reason x', 'repair request a', 'start --provider claude --intake a,b']) {
     assert.match(writingToolDecision(bash(`${loop} ${command}`)).reason ?? '', /writes the manuscript/, command);
   }
+  assert.match(writingToolDecision(bash(`${loop} start --provider claude`)).reason ?? '', /\/research-loop/, 'the refusal says how the researcher hands this chat the loop');
   for (const command of ['status --brief', 'show main_theorem', 'remark list --target a', 'idea add --title t --body b --kind question', 'teach list', 'sync status']) {
     assert.equal(writingToolDecision(bash(`${loop} ${command}`)).deny, false, command);
   }

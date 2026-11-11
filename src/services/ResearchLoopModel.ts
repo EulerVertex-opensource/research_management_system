@@ -49,6 +49,8 @@ export interface BatchItem {
   recheck?: string[];
   statementDigest?: string;
   inputs?: FrozenInput[];
+  /** Stages plan and execute of a repair: the gap the independent check found in the researcher's proof. */
+  repair?: string;
   done?: { outcome: ReportOutcome; summary: string; at: string };
 }
 /** Stages a batch may hold: each writes only its own target's files. */
@@ -194,6 +196,8 @@ export interface LoopState {
     node?: NodeCheckTarget;
     /** Stages that execute or check work: what they work from, as it was when the stage began. */
     inputs?: FrozenInput[];
+    /** Stages plan, execute, and verify_proof of a repair: the gap the independent check found in the researcher's proof. */
+    repair?: string;
   };
   /** falsifiedAt is legacy local state; falsification now lives in shared check records. */
   /** constructionProof: digest of the proof a verified search construction wrote into the asset; it vouches for that proof as a verified plan would. */
@@ -208,6 +212,11 @@ export interface LoopState {
   answers: LoopAnswer[];
   approvalQueue: ApprovalRequest[];
   researcherInput?: ResearcherInput;
+  /**
+   * The researcher's own results taken in with `start --intake` (extracted from their upload): the
+   * nodes, the main results among them that become the goals, and where they came from.
+   */
+  intake?: { ids: string[]; main: string[]; source?: string; at: string; decision?: string };
   extension?: LoopExtension;
   lock?: LoopLock;
   autopilot: { iterationCap: number; sessions: Record<string, { blocks: number; lastSignature: string; lastBlockAt: string }> };

@@ -685,7 +685,7 @@ export class LoopHost implements vscode.Disposable {
       case 'loop': {
         if (request.op === 'start') await this.startCommand();
         else if (request.op === 'resume') await this.resumeCommand();
-        else if (request.op === 'extend') await this.extendCommand();
+        else if (request.op === 'extend') await this.extendCommand(typeof request.goal === 'string' ? request.goal : undefined);
         else await this.openChat(this.core?.current?.provider);
         return;
       }
@@ -843,8 +843,9 @@ export class LoopHost implements vscode.Disposable {
     vscode.window.setStatusBarMessage(`$(beaker) Research loop started. ${chatHint(picked.provider)}`, 10000);
   }
 
-  async extendCommand(): Promise<void> {
-    const goal = await vscode.window.showInputBox({ title: 'Extend the research project', prompt: 'Describe the new goal or conjecture to add. Existing approved results are kept.', ignoreFocusOut: true });
+  /** `suggested`: a goal the dashboard proposes (a conjecture from the researcher's work), shown for them to edit or accept. */
+  async extendCommand(suggested?: string): Promise<void> {
+    const goal = await vscode.window.showInputBox({ title: 'Extend the research project', prompt: 'Describe the new goal or conjecture to add. Existing approved results are kept.', ignoreFocusOut: true, ...(suggested ? { value: suggested } : {}) });
     if (!goal?.trim()) return;
     const state = await this.withCore(async (core) => { await core.extend(goal, { provider: core.current?.provider ?? this.preferredProvider(), force: true }); return core.current; });
     await this.openChat(state?.provider);

@@ -390,14 +390,17 @@ export function sessionRole(roles: SessionRoles, session: string | undefined): S
 
 /**
  * The role a chat takes from a turn's signal, or undefined to keep the one it
- * has. A driver stays the driver, and a chat beside the loop never becomes
- * one. Only the researcher's own prompt moves a chat between teaching and
- * writing: a teaching chat running a manuscript preview stays a teaching chat.
+ * has. A driver stays the driver. Only the researcher's own prompt moves a chat
+ * beside the loop: between teaching and writing (a teaching chat running a
+ * manuscript preview stays a teaching chat), or from writing to driving when
+ * they invoke the loop there (a chat that organized their manuscript often
+ * wrote the manuscript plan on the way). A teaching chat never drives, and no
+ * command the agent runs makes a chat beside the loop its driver.
  */
 export function nextSessionRole(known: SessionRole | undefined, signal: SessionRole | undefined, fromPrompt: boolean): SessionRole | undefined {
   if (!signal || known === 'drive' || known === signal) return undefined;
   if (!known) return signal;
-  if (signal === 'drive') return undefined;
+  if (signal === 'drive') return known === 'write' && fromPrompt ? 'drive' : undefined;
   return fromPrompt ? signal : undefined;
 }
 
@@ -517,14 +520,15 @@ export function teachingToolDecision(paths: ProjectPaths, input: HookInput, root
 const WRITING_REFUSED = new Set([...DRIVING_COMMANDS, 'pause', 'stop', 'park', 'unpark', 'focus', 'handoff']);
 const writingRefuses = (call: { command: string; sub?: string }) => WRITING_REFUSED.has(call.command)
   || (call.command === 'search' && call.sub === 'request') || (call.command === 'conjecture' && call.sub === 'request')
-  || (call.command === 'budget' && call.sub === 'allocate') || (call.command === 'idea' && (call.sub === 'convert' || call.sub === 'promote'));
+  || (call.command === 'budget' && call.sub === 'allocate') || (call.command === 'idea' && (call.sub === 'convert' || call.sub === 'promote'))
+  || (call.command === 'repair' && call.sub === 'request');
 
-export const WRITING_NOTE = 'Research Assistant: this chat writes the manuscript (plan-manuscript, draft-latex, revise-manuscript-prose, check-notation). It never drives the research loop: do not run research-loop next, report, resume, or other commands that move the loop, and do not prove results here. A result the paper needs but nobody proved goes under ## Gaps of its brief (or as an idea) for the loop. The loop runs in its own chat.';
+export const WRITING_NOTE = 'Research Assistant: this chat writes the manuscript (plan-manuscript, draft-latex, revise-manuscript-prose, check-notation). It never drives the research loop: do not run research-loop next, report, resume, or other commands that move the loop, and do not prove results here. A result the paper needs but nobody proved goes under ## Gaps of its brief (or as an idea) for the loop. The loop runs in its own chat; if the researcher wants this chat to drive it, they invoke the research-loop skill here themselves (/research-loop; Codex $research-loop).';
 
 /** A writing chat edits the manuscript and its plans; it never drives the loop, which runs in its own chat. */
 export function writingToolDecision(input: HookInput): ToolDecision {
   const refused = loopCalls(input).find(writingRefuses);
-  if (refused) return { deny: true, reason: `This chat writes the manuscript; it never drives the research loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat; tell the researcher to ask there. Record what the paper needs from the loop under ## Gaps of the section brief or with idea add.` };
+  if (refused) return { deny: true, reason: `This chat writes the manuscript; it never drives the research loop (research-loop ${refused.command}${refused.sub ? ` ${refused.sub}` : ''}). The loop runs in its own chat. Tell the researcher: to drive the loop from this chat, they invoke the research-loop skill here themselves (/research-loop; Codex $research-loop), or they open a new chat for it. Record what the paper needs from the loop under ## Gaps of the section brief or with idea add.` };
   return { deny: false };
 }
 

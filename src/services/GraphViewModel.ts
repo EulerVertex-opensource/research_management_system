@@ -19,6 +19,10 @@ import { readApprovals } from './ApprovalStore';
 import { ManuscriptModel, loadManuscriptModel } from './ManuscriptImpactLoader';
 import { Remarks } from './Remarks';
 import { ideaUsage, promotionCandidates } from '../domain/ideaUsage';
+import { goalsSince, intakeViews, repairViews } from '../domain/repair';
+import { DecisionInfo, parseDecision } from './ResearchRecords';
+import { sharedFolders } from './ResearchLoopModel';
+import type { AttentionItem, IntakeView } from '../models/graph';
 
 /**
  * Builds the Graph tab payload: compact node views (no bodies), mathematical
@@ -44,6 +48,8 @@ export interface GraphInputs {
   remarks?: Record<string, number>;
   /** Routes worked on at once per result (the researcher's setting); the rest show as waiting their turn. */
   maxLiveRoutes?: number;
+  /** The shared decision records, for the researcher's own results taken in (intakes) and their repair. */
+  decisions?: DecisionInfo[];
 }
 
 const RESEARCH_KINDS = new Set(['asset', 'definition']);
@@ -254,6 +260,8 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       ? { progress: 'stalled', progressLabel: 'Agent stopped', progressDetail: 'No activity from the agent' }
       : { progress: 'stalled', progressLabel: 'No agent working', progressDetail: 'The loop is on, but no agent is working on it' });
   }
+  const intakes = intakeViews(input.decisions ?? [], input.nodes);
+  if (intakes.length) for (const [id, repair] of repairViews({ intakes, decisions: input.decisions ?? [], nodes: input.nodes, graph: byId, state })) byId.get(id)!.repair = repair;
   const promotions = promotionCandidates(ideas, ideaUsage(plans));
   const attention = computeAttention({ state, nodes: byId, sections, uncovered, required, recheck: input.recheck, promotions, stoppedOn: health.key === 'stopped' ? health.blockers.map((item) => item.target).filter((id): id is string => Boolean(id)) : [] });
   // The loop itself can be what waits on the researcher: an agent gone quiet, a pause, or a stopped loop's reasons that are not nodes.
@@ -266,6 +274,8 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
       attention.unshift({ key: `loop:blocker:${index}`, priority: 0, category: 'loop', title: blocker.title, reason: '', why: blocker.detail, ifIgnored: 'The loop stays stopped.', ...(blocker.target ? { target: blocker.target } : {}), blocks: [], sections: [], buttons: blocker.buttons });
     }
   }
+  const handoff = intakeHandoff(intakes, required);
+  if (handoff) attention.push(handoff);
   const history = buildHistory(input.events ?? [], (id) => byId.get(id)?.title ?? id, (id) => byId.get(id)?.type ?? '');
   const routes = routeViews(plans, nodes, (id) => (refutedBy.get(id) ?? []).some((example) => example.status === 'approved'), (id) => Boolean(state?.parked[id]), input.maxLiveRoutes ?? 3);
 
@@ -278,6 +288,33 @@ export function buildGraphPayload(input: GraphInputs): GraphPayload {
     ...(manuscript ? { manuscriptState: manuscript.impact.state } : {}),
     nodes, edges, attention, sections, coverage, health, history,
     ...(routes.length ? { routes } : {}),
+    ...(intakes.length ? { intakes } : {}),
+  };
+}
+
+/**
+ * When the repair of the researcher's own results has ended (every one settled) and no new goal
+ * was added since: what happened, and the way on to a new research goal.
+ */
+function intakeHandoff(intakes: IntakeView[], required: string[]): AttentionItem | undefined {
+  const latest = intakes[0];
+  const closed = latest?.closed;
+  if (!closed || goalsSince(required, closed.required).length) return undefined;
+  const candidates = closed.candidates.filter((item) => item.open).slice(0, 3);
+  return {
+    key: `intake:${latest.id}`, priority: 2, category: 'intake',
+    title: `Your results${latest.source ? ` from ${latest.source}` : ''} are settled: choose the next research goal`,
+    reason: closed.summary, why: 'The repair of your results is finished; the loop has nothing left to do until you give it a new goal.',
+    ifIgnored: 'The loop stays done. Your settled results stay approved and can support any new goal.',
+    blocks: [], sections: [], since: closed.at,
+    buttons: [
+      ...candidates.map((item) => ({
+        label: `Take up “${item.title}”`, kind: 'secondary' as const,
+        hint: 'Reopens the project with this conjecture as a new goal; you can edit the wording first',
+        action: { action: 'loop' as const, op: 'extend' as const, goal: item.kind === 'conjecture' ? `Take up the conjecture ${item.id} (${item.title}) as a new goal.` : `Take up the conjecture idea ${item.id} (${item.title}): state it precisely and make it a new goal.` },
+      })),
+      { label: 'Set a new goal…', kind: 'primary' as const, hint: 'Describe a new goal or conjecture; your settled results are kept', action: { action: 'loop' as const, op: 'extend' as const } },
+    ],
   };
 }
 
@@ -330,10 +367,16 @@ export async function collectGraphPayload(files: LoopFiles, paths: ProjectPaths,
   const agent = await readAgentActivity(files);
   const remarks: Record<string, number> = {};
   for (const remark of await new Remarks(files, paths).all().catch(() => [])) if (remark.status === 'active') remarks[remark.target] = (remarks[remark.target] ?? 0) + 1;
+  const decisions: DecisionInfo[] = [];
+  const decisionsDir = sharedFolders(paths.researchRoot).decisions;
+  for (const file of await files.listFiles(decisionsDir).catch(() => [] as string[])) {
+    const info = parseDecision(file.slice(file.lastIndexOf('/') + 1).replace(/\.md$/, ''), await files.readFile(file).catch(() => ''));
+    if (info) decisions.push(info);
+  }
   return buildGraphPayload({
     nodes, project, projectApproved: Boolean(project) && isApproved(approvals, 'project', 'project', project),
     state, agent, manuscript, sectionsDir: paths.sections, now: new Date().toISOString(), events, recheck, remarks,
-    maxLiveRoutes: (await readLoopSettings(files)).settings.maxLiveRoutes,
+    maxLiveRoutes: (await readLoopSettings(files)).settings.maxLiveRoutes, decisions,
   });
 }
 

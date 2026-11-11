@@ -70,7 +70,7 @@ type AssetInfo = ContextNode;
 type Selection =
   | { stage: 'discuss_goals' | 'draft_project' | 'review_project' | 'ready'; note?: string }
   | { stage: 'scaffold'; missing: string[]; incomplete: string[]; missingDefinitions?: string[] }
-  | { stage: 'plan'; assetId: string }
+  | { stage: 'plan'; assetId: string; repair?: string }
   | { stage: 'verify_proof'; assetId: string; planId: string; recheck?: string[] }
   | { stage: 'search'; assetId: string; mode: SearchMode }
   | { stage: 'conjecture'; ideaId: string }
@@ -78,6 +78,17 @@ type Selection =
   | { stage: 'route'; assetId: string; fork?: string }
   | { stage: 'reduce' | 'verify_reduction'; assetId: string; planId: string }
   | { stage: 'waiting'; reason: string; waitingOn: WaitingReason[] };
+/** Where the researcher's own results stand after their checks (see intakeReport). */
+export interface IntakeReport {
+  /** The results no other result of the set rests on: the goals of an intake. */
+  main: string[];
+  titles: Record<string, string>;
+  confirmed: Array<{ id: string; title: string; mode: NodeCheckTarget['mode'] }>;
+  gaps: Array<{ id: string; title: string; mode: NodeCheckTarget['mode']; summary: string }>;
+  unproved: Array<{ id: string; title: string }>;
+  unchecked: Array<{ id: string; title: string; mode: NodeCheckTarget['mode'] }>;
+  other: Array<{ id: string; title: string; why: string }>;
+}
 type Finish = (message: string, next: LoopStage, patch?: Partial<LoopState['current']>) => Promise<{ stage: LoopStage; message: string }>;
 type SearchRound = NonNullable<LoopState['current']['search']>;
 /** A construction to search for: it lists required properties (`- P1: ...`) and no construction has been written yet. */
@@ -438,6 +449,7 @@ export class ResearchLoopCore {
     if (stage !== 'batch') delete state.current.batch;
     if (stage !== 'verify_proof') delete state.current.recheck;
     if (stage !== 'verify_node') delete state.current.node;
+    if (stage !== 'plan' && stage !== 'execute' && stage !== 'verify_proof') delete state.current.repair;
     if (stage !== 'waiting') delete state.waitingOn;
     const inputs = await this.freezeInputs(stage, state.current);
     if (inputs) state.current.inputs = inputs; else delete state.current.inputs;
@@ -450,14 +462,14 @@ export class ResearchLoopCore {
 
   // ---------- run control ----------
 
-  async start(provider: AgentProvider, options: { goal?: string; sessionId?: string; force?: boolean } = {}): Promise<LoopState> {
+  async start(provider: AgentProvider, options: { goal?: string; sessionId?: string; force?: boolean; inputKind?: 'goals' | 'intake' } = {}): Promise<LoopState> {
     if (this.state && this.state.status === 'running' && !options.force) {
       // A new goal for a running loop is an extension, never a reason to refuse it.
-      if (options.goal?.trim()) return this.extend(options.goal, { provider, sessionId: options.sessionId });
+      if (options.goal?.trim()) return this.extend(options.goal, { provider, sessionId: options.sessionId, inputKind: options.inputKind });
       throw new Error('A research loop is already running. Use resume, or stop it first.');
     }
     const state = newState(provider, this.id(), this.now(), this.iterationCap ?? (await this.loopSettings()).iterationCap);
-    if (options.goal?.trim()) state.researcherInput = { kind: 'goals', text: options.goal.trim(), at: this.now() };
+    if (options.goal?.trim()) state.researcherInput = { kind: options.inputKind ?? 'goals', text: options.goal.trim(), at: this.now() };
     this.state = state;
     if (options.sessionId) state.lock = { sessionId: options.sessionId, provider, acquiredAt: this.now(), heartbeatAt: this.now() };
     await this.adoptExistingApprovals();
@@ -474,11 +486,11 @@ export class ResearchLoopCore {
    * Add a new goal. On an approved project this reopens project.md for new required results, keeping the existing ones;
    * on a project still under revision the goal is folded into the draft.
    */
-  async extend(goal: string, options: { provider?: AgentProvider; sessionId?: string; force?: boolean } = {}): Promise<LoopState> {
+  async extend(goal: string, options: { provider?: AgentProvider; sessionId?: string; force?: boolean; inputKind?: 'goals' | 'intake' } = {}): Promise<LoopState> {
     if (!goal.trim()) throw new Error('Describe the new goal to add.');
     const state = this.state;
     if (!state || state.status === 'stopped' || state.status === 'idle') {
-      const started = await this.start(options.provider ?? state?.provider ?? 'claude', { goal, sessionId: options.sessionId, force: true });
+      const started = await this.start(options.provider ?? state?.provider ?? 'claude', { goal, sessionId: options.sessionId, force: true, inputKind: options.inputKind });
       // An explicit extension of a project under revision drafts the goal in, rather than reviewing the old text.
       if (started.stage !== 'draft_project' && !(await this.isProjectApproved())) await this.setStage('draft_project', { assetId: undefined, planId: undefined, counterexampleId: undefined });
       return started;
@@ -488,7 +500,7 @@ export class ResearchLoopCore {
     if (state.status !== 'running') state.runningSince = this.now();
     state.status = 'running';
     state.lastError = null;
-    state.researcherInput = { kind: 'goals', text: goal.trim(), at: this.now() };
+    state.researcherInput = { kind: options.inputKind ?? 'goals', text: goal.trim(), at: this.now() };
     // A new goal sends the loop on like a resume: an autonomous run that handed back starts afresh, and so does every chat's continuation count.
     if (state.autonomy?.handedOverAt) delete state.autonomy;
     state.autopilot.sessions = {};
@@ -1494,6 +1506,195 @@ export class ResearchLoopCore {
     return remaining > 0 ? { remaining } : undefined;
   }
 
+  // ---------- the researcher's own results: intake and repair ----------
+
+  /** Whether the researcher asked the loop to fill the gaps in their own proof of this result. */
+  private async repairConsent(assetId: string, decisions?: DecisionInfo[]): Promise<boolean> {
+    return (decisions ?? await this.decisions()).some((item) => item.kind === 'repair_request' && item.target === assetId);
+  }
+
+  /**
+   * What a result whose proof the researcher asked the loop to complete needs next: a check of the
+   * proof as written when this version has none, a repair plan when the check found a gap. A proof a
+   * loop plan wrote (a repair among them) goes the usual way, and so does one the check confirmed.
+   */
+  private async repairWork(assetId: string, raw: string, decisions?: DecisionInfo[]): Promise<Selection | undefined> {
+    if (!(await this.repairConsent(assetId, decisions))) return undefined;
+    let content: string;
+    try { content = parseMarkdown(raw).content; } catch { return undefined; }
+    if (!proofText(content) || (await this.vouchingPlans(assetId, raw)).length) return undefined;
+    const verdict = await this.nodeVerdict({ id: assetId, mode: 'proof' }, raw);
+    if (!verdict) return { stage: 'verify_node', node: { id: assetId, mode: 'proof' } };
+    if (verdict.reason !== 'rejected') return undefined;
+    return { stage: 'plan', assetId, repair: verdict.text.trim() || 'the independent check rejected the proof as written.' };
+  }
+
+  /** The gap a pending repair plan closes, or undefined for any other plan. */
+  private async repairGapOf(planId: string): Promise<string | undefined> {
+    try {
+      const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
+      return plan.data.purpose === 'repair' ? sectionContent(plan.content, 'Gap') || 'see ## Gap in the plan.' : undefined;
+    } catch { return undefined; }
+  }
+
+  /** A plan written to repair the researcher's proof keeps that proof as written, and the gap it closes. */
+  private async markRepairPlan(planId: string, assetRaw: string, gap: string): Promise<void> {
+    const file = `${this.paths.plans}/${planId}.md`;
+    const plan = parseMarkdown(await this.files.readFile(file));
+    const previous = stripManagedBlocks(sectionContent(parseMarkdown(assetRaw).content, 'Proof')).trim();
+    let content = plan.content.trimEnd();
+    if (!hasSection(content, 'Gap')) content += `\n\n## Gap\n\n${gap}`;
+    if (!hasSection(content, 'Previous proof')) content += `\n\n## Previous proof\n\n${previous}`;
+    await this.writeOwned(file, stringifyMarkdown(`${content}\n`, { ...plan.data, purpose: 'repair', repairs_proof_digest: proofDigest(assetRaw) }));
+  }
+
+  /** A failed repair leaves the researcher's proof as they wrote it, for the next attempt to start from. */
+  private async restoreRepairedProof(assetId: string, planContent: string): Promise<void> {
+    const previous = sectionContent(planContent, 'Previous proof');
+    if (!previous) return;
+    const file = `${this.paths.assets}/${assetId}.md`;
+    const asset = parseMarkdown(await this.files.readFile(file));
+    if (stripManagedBlocks(sectionContent(asset.content, 'Proof')).trim() === previous.trim()) return;
+    await this.writeOwned(file, stringifyMarkdown(withProof(asset.content, previous), asset.data));
+  }
+
+  /**
+   * The researcher asks the loop to complete their own proofs of these results: each is checked as
+   * written, and a gap the check finds is repaired by a plan that keeps the rest of their argument.
+   * Never automatic: the agent runs this only when the researcher asks. Returns the message for the agent.
+   */
+  async requestRepair(ids: string[]): Promise<string> {
+    const asked: string[] = [];
+    const skipped: string[] = [];
+    for (const id of [...new Set(ids)]) {
+      const file = await findNodeFile(this.files, this.paths, 'asset', id);
+      const raw = file ? await this.files.readFile(file).catch(() => '') : '';
+      let data: Record<string, any> = {};
+      try { data = raw ? parseMarkdown(raw).data : {}; } catch { data = {}; }
+      if (!file || !raw || isLibraryPath(file, this.paths)) { skipped.push(`${id} (no such result in the project)`); continue; }
+      if (data.status !== 'draft' || !PROVABLE_TYPES.has(data.type) || isCited(data.source)) { skipped.push(`${id} (not a draft result the loop proves)`); continue; }
+      if (await this.repairConsent(id)) { asked.push(id); continue; }
+      await this.writeDecision('repair_request', id, `The researcher asked the loop to check their proof of ${id} and fill the gaps the check finds, keeping the rest of their argument.`);
+      await this.event('repair_requested', { assetId: id });
+      asked.push(id);
+    }
+    if (!asked.length) throw new Error(`Nothing to repair: ${skipped.join('; ')}.`);
+    return `The loop will check ${asked.join(', ')} as written and repair the gaps it finds${skipped.length ? `; skipped ${skipped.join('; ')}` : ''}.`;
+  }
+
+  /**
+   * Where the researcher's own results stand: per node, whether an independent check confirmed it,
+   * found a gap, or has not run, and which results have no proof yet; and the main results among
+   * them (those no other result of the set rests on), which become the goals of an intake.
+   */
+  async intakeReport(ids: string[]): Promise<IntakeReport> {
+    const report: IntakeReport = { main: [], titles: {}, confirmed: [], gaps: [], unproved: [], unchecked: [], other: [] };
+    const assets = await this.collectKind('asset');
+    const unique = [...new Set(ids)];
+    const provable = unique.filter((id) => assets.has(id) && !assets.get(id)!.origin && PROVABLE_TYPES.has(assets.get(id)!.data.type) && !INACTIVE_STATUSES.has(assets.get(id)!.data.status));
+    const used = new Set(provable.flatMap((id) => Array.isArray(assets.get(id)!.data.depends_on) ? assets.get(id)!.data.depends_on as string[] : []));
+    report.main = provable.filter((id) => !used.has(id));
+    if (!report.main.length) report.main = provable;
+    for (const id of unique) {
+      const { node, raw, skip } = await this.checkTargetOf(id);
+      const title = (() => { try { return String(parseMarkdown(raw).data.title ?? id); } catch { return id; } })();
+      report.titles[id] = title;
+      if (!node) {
+        if (skip?.startsWith('no proof yet')) report.unproved.push({ id, title });
+        else report.other.push({ id, title, why: skip ?? 'nothing to check' });
+        continue;
+      }
+      const verdict = await this.currentVerdict(node, raw);
+      if (!verdict) report.unchecked.push({ id, title, mode: node.mode });
+      else if (verdict.reason === 'rejected') report.gaps.push({ id, title, mode: node.mode, summary: verdict.text.trim() });
+      else report.confirmed.push({ id, title, mode: node.mode });
+    }
+    return report;
+  }
+
+  /**
+   * Close every intake whose results are all settled (approved, set aside, or retired) once the
+   * goals are approved: a shared record with what was sound, repaired, proved, and still open, and
+   * the conjectures the researcher may take up next. Returns what the agent tells the researcher.
+   */
+  private async closeIntakes(): Promise<string | undefined> {
+    const decisions = sortDecisions(await this.decisions());
+    const closed = new Set(decisions.filter((item) => item.kind === 'intake_closed').map((item) => item.target));
+    const open = decisions.filter((item) => item.kind === 'intake' && !closed.has(item.id) && item.ids?.length);
+    if (!open.length) return undefined;
+    const project = await this.files.readFile(this.paths.projectMd).catch(() => '');
+    if (!project || !(await this.isProjectApproved(project))) return undefined;
+    const state = this.require();
+    const records = (await this.approvals()).records;
+    const assets = await this.collectKind('asset');
+    const plans = await this.plans();
+    const ideas = [...(await this.collect(this.paths.ideas)).values()];
+    const messages: string[] = [];
+    for (const intake of open) {
+      const results = intake.ids!.filter((id) => assets.has(id) && !assets.get(id)!.origin && PROVABLE_TYPES.has(assets.get(id)!.data.type));
+      if (!results.length) continue;
+      const approved = (id: string) => assets.get(id)!.data.status === 'approved' && isApproved(records, 'asset', id, assets.get(id)!.raw);
+      if (!results.every((id) => approved(id) || state.parked[id] || INACTIVE_STATUSES.has(assets.get(id)!.data.status))) continue;
+      const title = (id: string) => String(assets.get(id)?.data.title ?? id);
+      const vouching = (id: string) => { const digest = proofDigest(assets.get(id)!.raw); return plans.filter((plan) => plan.data.target_asset === id && plan.data.status === 'succeeded' && plan.data.proof_digest === digest); };
+      const repaired = results.filter((id) => approved(id) && vouching(id).some((plan) => plan.data.purpose === 'repair'));
+      const proved = results.filter((id) => approved(id) && !repaired.includes(id) && vouching(id).length > 0);
+      const sound = results.filter((id) => approved(id) && !repaired.includes(id) && !proved.includes(id));
+      const unresolved = results.filter((id) => !approved(id) && state.parked[id]);
+      const inIntake = new Set(intake.ids);
+      const conjectures = [...assets.values()].filter((asset) => asset.data.type === CONJECTURE_TYPE && ['draft', 'approved'].includes(asset.data.status)
+        && (inIntake.has(asset.id) || (Array.isArray(asset.data.serves) && asset.data.serves.some((id: string) => inIntake.has(id)))));
+      const conjectureIdeas = ideas.filter((idea) => idea.data.idea_kind === 'conjecture' && idea.data.status === 'draft'
+        && Array.isArray(idea.data.related_assets) && idea.data.related_assets.some((id: string) => inIntake.has(id)));
+      const candidates = [...conjectures.map((item) => item.id), ...conjectureIdeas.map((item) => item.id)];
+      const named = (ids: string[]) => ids.map(title).join('; ');
+      const lines = [
+        sound.length ? `Sound as written: ${named(sound)}.` : '',
+        repaired.length ? `Repaired where the check found a gap: ${named(repaired)}.` : '',
+        proved.length ? `Proved here: ${named(proved)}.` : '',
+        unresolved.length ? `Still open: ${unresolved.map((id) => `${title(id)}${state.parked[id]?.note ? ` (${state.parked[id].note})` : ''}`).join('; ')}.` : '',
+      ].filter(Boolean);
+      await this.writeDecision('intake_closed', intake.id, lines.join('\n'), { ids: requiredAssetIds(project), candidates });
+      await this.event('intake_closed', { intake: intake.id, sound: sound.length, repaired: repaired.length, proved: proved.length, open: unresolved.length });
+      const offer = candidates.length
+        ? `conjectures from their work: ${candidates.map((id) => `${String((assets.get(id) ?? ideas.find((idea) => idea.id === id))?.data.title ?? id)} (${id})`).join('; ')}, or a goal of their own`
+        : 'a goal of their own';
+      messages.push(`The researcher's results${intake.source ? ` from ${intake.source}` : ''} are settled. ${lines.join(' ')} Tell the researcher in a few lines, then offer a new research goal: ${offer}. On their choice run ${LOOP_COMMAND} extend --goal "..." (for a conjecture: --goal "Take up the conjecture <id>", then promote it in draft_project).`);
+    }
+    return messages.length ? messages.join('\n\n') : undefined;
+  }
+
+  /**
+   * Take the researcher's own results into the loop (`start --intake`): the loop drafts the goals
+   * from their main results, then checks each proof as written and repairs the gaps, as the
+   * researcher asked. Starts the loop, or extends a running or approved one.
+   */
+  async intake(ids: string[], options: { provider: AgentProvider; sessionId?: string; force?: boolean; source?: string }): Promise<LoopState> {
+    const report = await this.intakeReport(ids);
+    if (!report.main.length) throw new Error(`None of ${ids.join(', ')} is a draft result of this project the loop could prove; extract the researcher's results first.`);
+    const proved = [...report.confirmed, ...report.gaps, ...report.unchecked].filter((item) => item.mode === 'proof').map((item) => item.id);
+    if (proved.length) await this.requestRepair(proved);
+    const line = (items: Array<{ id: string; title: string }>) => items.map((item) => `${item.title} (${item.id})`).join('; ');
+    const goal = [
+      `Complete and verify the researcher's own results${options.source ? ` from ${options.source}` : ''}.`,
+      `Main results, to list under required_results: ${line(report.main.map((id) => ({ id, title: report.titles[id] ?? id })))}.`,
+      report.gaps.length ? `Gaps the independent checks found: ${report.gaps.map((item) => `${item.title} (${item.id}): ${item.summary.split('\n')[0].replace(/[.\s]+$/, '')}`).join('; ')}.` : '',
+      report.unproved.length ? `Without a proof yet: ${line(report.unproved)}.` : '',
+      report.unchecked.length ? `Not checked yet (the loop checks them): ${line(report.unchecked)}.` : '',
+    ].filter(Boolean).join('\n');
+    const state = this.state && this.state.status !== 'stopped' && this.state.status !== 'idle' && !options.force
+      ? await this.extend(goal, { provider: options.provider, sessionId: options.sessionId, inputKind: 'intake' })
+      : await this.start(options.provider, { goal, sessionId: options.sessionId, force: options.force, inputKind: 'intake' });
+    const current = this.require();
+    const taken = [...new Set(ids)];
+    // Shared, so collaborators' dashboards show the same repair, and the loop knows when it is settled.
+    const decision = await this.writeDecision('intake', options.source ?? 'upload', goal, { ids: taken, main: report.main, ...(options.source ? { source: options.source } : {}) });
+    current.intake = { ids: taken, main: report.main, ...(options.source ? { source: options.source } : {}), at: this.now(), decision };
+    await this.save();
+    await this.event('intake', { ids: current.intake.ids, main: report.main, gaps: report.gaps.map((item) => item.id) });
+    return state;
+  }
+
   /**
    * The researcher asks for a deeper counterexample search on an asset, even one already checked.
    * Never automatic: the agent runs this only when the researcher asks. Returns the message for the agent.
@@ -2226,6 +2427,10 @@ export class ResearchLoopCore {
       const target = await this.checkTargetOf(node.id);
       if (target.node && !(await this.currentVerdict(target.node, target.raw))) return true;
     }
+    if (node.mode === 'proof' && await this.repairConsent(node.id)) {
+      const raw = await this.files.readFile(await this.nodeFile('asset', node.id)).catch(() => '');
+      if (raw && (await this.repairWork(node.id, raw))?.stage === 'verify_node') return true;
+    }
     const settings = await this.loopSettings();
     const policy = settings.autonomy.enabled ? AUTONOMOUS_AUTO_APPROVE : settings.autoApprove;
     if (!policy.enabled) return false;
@@ -2305,8 +2510,9 @@ export class ResearchLoopCore {
   // approval queue updates the loop state (its note, and auto mode).
 
   /** Whether the researcher wants extracted nodes checked right away, and where each named node stands. */
-  async extractionChecks(ids: string[]): Promise<{ enabled: boolean; pending: NodeCheckTarget[]; checked: Array<{ id: string; mode: NodeCheckTarget['mode']; verdict: string; summary: string }>; skipped: Array<{ id: string; why: string }> }> {
-    const enabled = (await this.loopSettings()).rigor.verifyExtracted === 'agent';
+  /** `requested`: the researcher asked for these checks in this chat, so they run whatever the setting says. */
+  async extractionChecks(ids: string[], options: { requested?: boolean } = {}): Promise<{ enabled: boolean; pending: NodeCheckTarget[]; checked: Array<{ id: string; mode: NodeCheckTarget['mode']; verdict: string; summary: string }>; skipped: Array<{ id: string; why: string }> }> {
+    const enabled = options.requested === true || (await this.loopSettings()).rigor.verifyExtracted === 'agent';
     const pending: NodeCheckTarget[] = [];
     const checked: Array<{ id: string; mode: NodeCheckTarget['mode']; verdict: string; summary: string }> = [];
     const skipped: Array<{ id: string; why: string }> = [];
@@ -2590,6 +2796,8 @@ export class ResearchLoopCore {
       state.extension.projectApproved = true;
     }
     if (!projectApproved) {
+      // The researcher's own results were just taken in: the goals are drafted from them first, whatever project.md says now.
+      if (state.researcherInput?.kind === 'intake') return { stage: 'draft_project' };
       if (required.length && projectSection(project, 'Main Problem')) {
         await this.enqueueApproval('project', 'project', 'Review the goals and required results in project.md.');
         return { stage: 'review_project' };
@@ -2710,6 +2918,9 @@ export class ResearchLoopCore {
       }
       if (state.parked[id]) continue;
       if (proofText(asset.body) && !state.progress[id]?.changesRequested) {
+        // The researcher's own proof, which they asked the loop to complete: checked as written, then repaired where the check found a gap.
+        const repair = await this.repairWork(id, asset.raw, decisions);
+        if (repair) { offer(id, repair); continue; }
         // A proof the loop wrote is checked independently before it goes to approval, when the researcher asked for that,
         // and again when something it rests on changed since.
         const check = await this.proofToCheck(id, asset.raw);
@@ -2806,9 +3017,10 @@ export class ResearchLoopCore {
     const assetId = selection.assetId;
     if (selection.stage === 'plan') {
       const pending = await this.pendingPlan(assetId);
-      if (!pending) return { item, stage: 'plan', assetId };
+      if (!pending) return { item, stage: 'plan', assetId, ...(selection.repair ? { repair: selection.repair } : {}) };
       const raw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`).catch(() => '');
-      return { item, stage: 'execute', assetId, planId: pending, ...(raw ? { statementDigest: statementDigest(raw) } : {}) };
+      const repair = await this.repairGapOf(pending);
+      return { item, stage: 'execute', assetId, planId: pending, ...(raw ? { statementDigest: statementDigest(raw) } : {}), ...(repair ? { repair } : {}) };
     }
     if (selection.stage === 'verify_proof') {
       if (selection.recheck?.length) await this.setAsideVerdict(selection.planId);
@@ -2821,7 +3033,7 @@ export class ResearchLoopCore {
   /** What an item's stage sees as `current`: the batch's, narrowed to the item. */
   private itemCurrent(item: BatchItem, base: LoopState['current']): LoopState['current'] {
     const { batch: _batch, route: _route, search: _search, ...rest } = base;
-    return { ...rest, assetId: item.assetId, planId: item.planId, node: item.node, recheck: item.recheck, inputs: item.inputs, statementDigest: item.statementDigest };
+    return { ...rest, assetId: item.assetId, planId: item.planId, node: item.node, recheck: item.recheck, inputs: item.inputs, statementDigest: item.statementDigest, repair: item.repair };
   }
 
   /**
@@ -3754,7 +3966,10 @@ export class ResearchLoopCore {
       const patch: Partial<LoopState['current']> = 'assetId' in selection ? { assetId: selection.assetId, planId: undefined, counterexampleId: undefined, ideaId: undefined } : { assetId: undefined, planId: undefined, counterexampleId: undefined, ideaId: undefined };
       if (selection.stage === 'conjecture') patch.ideaId = selection.ideaId;
       if (selection.stage === 'verify_node') { patch.node = selection.node; patch.assetId = selection.node.id; }
-      if (selection.stage === 'plan' && 'assetId' in selection) patch.planId = await this.pendingPlan(selection.assetId);
+      if (selection.stage === 'plan' && 'assetId' in selection) {
+        patch.planId = await this.pendingPlan(selection.assetId);
+        patch.repair = selection.repair;
+      }
       if (selection.stage === 'reduce' || selection.stage === 'verify_reduction') patch.planId = selection.planId;
       if (selection.stage === 'route') patch.route = { target: selection.assetId, round: (await this.lastRouteRound(selection.assetId)) + 1, slots: [], ...(selection.fork ? { fork: selection.fork } : {}) };
       if (selection.stage === 'verify_proof') {
@@ -3788,6 +4003,8 @@ export class ResearchLoopCore {
       if (waiting) return this.result(waiting);
     }
     const result = this.result();
+    const settled = await this.closeIntakes();
+    if (settled) result.instruction = `${settled}\n\n${result.instruction}`;
     if (driftNote) result.instruction = `${driftNote.replace(/ (Continue with next\.|Check again against the current version: run next for the fresh context\.)/, '')}\n\n${result.instruction}`;
     if (state.stage === 'ready') {
       const manuscript = await this.manuscriptStatus();
@@ -4045,6 +4262,7 @@ export class ResearchLoopCore {
       case 'draft_project':
         if (state.researcherInput?.kind === 'autonomous_conjecture') return `Stage draft_project: an autonomous exploration.\n${state.researcherInput.text}\nIf you take one up, edit only ${this.paths.projectMd} (the promote command retypes the conjecture).${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}`;
         if (state.researcherInput?.kind === 'autonomous_revision') return `Stage draft_project: an autonomous reassessment of the goals.\n${state.researcherInput.text}\nIf you add goals, edit only ${this.paths.projectMd}.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}`;
+        if (state.researcherInput?.kind === 'intake') return `Stage draft_project, from the researcher's own results (extracted from what they uploaded). Draft or revise ${this.paths.projectMd} only; never edit the extracted results. Keep its frontmatter \`type: project\` and list under \`required_results\` every main result named below (\`- id: <id>\` with \`role: ...\`); their lemmas follow through depends_on. ## Main Problem states what the main results establish; ## Scope and Assumptions the standing hypotheses of the upload; ## Intended Contribution that the project completes and verifies these results, naming the gaps the checks found and the results still without a proof; ## Background what the upload builds on. Record open questions as ideas. Report with a summary the researcher reads with the approval: one line on the goals, then the gaps the loop will try to fill, by result title.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}${input}${report('complete|question')}`;
         return `Stage draft_project. Draft or revise ${this.paths.projectMd} only. Keep its frontmatter \`type: project\` and list every result the project must establish under \`required_results\` (one entry per stable snake_case asset ID: \`- id: main_theorem\` with \`role: ...\`). Fill ## Main Problem, ## Scope and Assumptions (including scope decisions), ## Intended Contribution, and ## Background. Record open questions as ideas (record_idea with kind question), not in project.md; do not list known results or writing status: the dashboard derives them. Do not claim approval.${state.extension && !state.extension.projectApproved ? this.extensionInstruction(state.extension) : ''}${input}${report('complete|question')}`;
       case 'review_project':
         return `Stage review_project. Call request_approval(kind: "project", target: "project", summary: "<what changed>") so the researcher can approve project.md. Do not edit files. Then run: ${LOOP_COMMAND} next`;
@@ -4077,9 +4295,11 @@ export class ResearchLoopCore {
         return `Stage verify_counterexample for ${state.current.counterexampleId} (refutes ${asset}). Independently recheck every hypothesis and calculation; write ## Verdict in the example, beginning with the word confirmed or rejected, then the reason. confirmed: leave it draft (the researcher will confirm). rejected: set the example status to archived. Never edit ${asset}.${report('confirmed|rejected|question')}`;
       case 'plan': {
         const requested = state.current.assetId ? state.progress[state.current.assetId]?.changesRequested : undefined;
+        if (state.current.repair && !state.current.planId) return `Stage plan for asset ${asset}: a repair of the researcher's own proof, which they asked the loop to complete. The independent check found: ${state.current.repair}\nUse the plan-proof skill (Repairing a proof). Read the proof as written (${LOOP_COMMAND} show ${asset} --section Proof). Write one new pending plan in ${this.paths.plans}/ that closes this gap and keeps the researcher's argument: the steps that hold stay as they are, and the checklist covers only what the gap needs (the missing case, estimate, or lemma, proved inside the proof). Goal with the target link, Plan checklist, Verification, Assumed definitions; with failed repair plans present also ## Difference from failed plans. Do not edit the asset: the loop keeps the proof as written in the plan. If the gap cannot be closed without changing the statement, write no plan and report none --summary "<what the statement would need>".${input}${report('complete --plan <id>|none|question')}`;
         return `Stage plan for asset ${asset}. Use the plan-proof skill. ${state.current.planId ? `Execute the existing pending plan ${state.current.planId} instead of writing a new one: report complete --plan ${state.current.planId}.` : `First check the pack's library analogues: a known result proving a version of this statement can be adapted (list it under adapts) instead of proving from scratch. Write one new pending plan in ${this.paths.plans}/ (Goal with the target link, Plan checklist, Verification, Assumed definitions; with an adapted result also ## Adapted from; with failed plans present also ## Difference from failed plans, one bullet per failed plan ID). If no genuinely new approach is in sight, write no plan and report none --summary "<what the failed plans show and why nothing new is in sight>": it spends no attempt, and the result counts as stuck.`}${requested ? `\nThe researcher requested changes: ${requested}` : ''}${input}${report(state.current.planId ? 'complete --plan <id>|question' : 'complete --plan <id>|none|question')}`;
       }
       case 'execute':
+        if (state.current.repair) return `Stage execute plan ${state.current.planId} for asset ${asset}: a repair of the researcher's proof. Use the execute-proof skill (Repairing a proof). The gap: ${state.current.repair}\nFollow the checklist; tick boxes only for established steps. Success: replace ## Proof in the asset with the complete repaired proof, keeping the researcher's steps and wording wherever they hold and changing only what the gap needs (statement unchanged, status draft); set the plan status succeeded and add ## Outcome saying what was added or changed. The proof as written stays in the plan under ## Previous proof: never edit that section. Obstruction: leave the asset's proof as it is, set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
         return `Stage execute plan ${state.current.planId} for asset ${asset}. Use the execute-proof skill. Follow the checklist; tick boxes only for established steps. A result the plan adapts comes with its proof in the pack: follow it and check each changed step, rather than proving the step anew. Success: write the complete proof under ## Proof in the asset (statement unchanged, status draft), then set the plan status succeeded and add ## Outcome. Obstruction: set the plan status failed with ## Failure. Never set status approved.${report('proved|failed|question')}`;
       case 'verify_proof':
         return `Stage verify_proof for asset ${asset} (plan ${state.current.planId}).${state.current.recheck?.length ? ` This is a re-check: ${state.current.recheck.join(', ')} changed since the proof was written or last checked; check every step that uses them against their current text (the pack notes it).` : ''} Use the verify-proof skill. Check the ## Proof in the pack against the statement, step by step, as a referee would: every step follows, every hypothesis of a cited result holds, nothing is assumed that the statement does not give. Do not read the plan's reasoning. Add ## Verdict to ${this.paths.plans}/${state.current.planId}.md: first line confirmed or rejected; for rejected, name the first step that fails and why. Change nothing else; never edit ${asset}.${report('confirmed|rejected|question')}`;
@@ -4456,6 +4676,11 @@ export class ResearchLoopCore {
         const project = await this.files.readFile(this.paths.projectMd);
         if (!projectSection(project, 'Main Problem')) throw new Error('project.md needs a ## Main Problem.');
         if (!requiredAssetIds(project).length) throw new Error('project.md needs required_results with asset IDs.');
+        if (state.researcherInput?.kind === 'intake' && state.intake) {
+          const assets = await this.collectKind('asset');
+          const unlisted = state.intake.main.filter((id) => assets.has(id) && !INACTIVE_STATUSES.has(assets.get(id)!.data.status) && !requiredAssetIds(project).includes(id));
+          if (unlisted.length) throw new Error(`List the researcher's main result(s) ${unlisted.join(', ')} under required_results: the researcher asked the loop to complete and verify them. If they asked to leave one out, ask them to deprecate it in the dashboard first.`);
+        }
         const assessment = run && state.researcherInput?.kind === 'autonomous_revision' ? run.assessment ?? { at: this.now(), proved: [], setAside: [] } : undefined;
         const exploring = Boolean(run) && state.researcherInput?.kind === 'autonomous_conjecture';
         const added = (assessment || exploring) && state.extension ? requiredAssetIds(project).filter((id) => !state.extension!.baselineRequired.includes(id)) : [];
@@ -4729,10 +4954,12 @@ export class ResearchLoopCore {
         const plan = parseMarkdown(await this.files.readFile(`${this.paths.plans}/${planId}.md`));
         if (plan.data.type !== 'plan' || plan.data.status !== 'pending' || plan.data.target_asset !== assetId) throw new Error(`${planId} must be a pending plan targeting ${assetId}.`);
         const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+        const repair = await this.repairWork(assetId, assetRaw);
+        if (repair?.stage === 'plan' && repair.repair) await this.markRepairPlan(planId, assetRaw, repair.repair);
         state.progress[assetId] = { ...state.progress[assetId], changesRequested: undefined };
         state.current.statementDigest = statementDigest(assetRaw);
         state.researcherInput = undefined;
-        return finish(`Plan ${planId} recorded. Next: execute it.`, 'execute', { planId });
+        return finish(`Plan ${planId} recorded${repair?.stage === 'plan' ? ' (a repair of the researcher\'s proof)' : ''}. Next: execute it.`, 'execute', { planId, ...(repair?.stage === 'plan' && repair.repair ? { repair: repair.repair } : {}) });
       }
       case 'execute': {
         await validated();
@@ -4746,6 +4973,7 @@ export class ResearchLoopCore {
           if (asset.data.status !== 'draft') throw new Error(`${assetId} must stay draft until the researcher approves it.`);
           // Tie the succeeded plan to the proof it produced; a later proof edit shows the plan as outdated.
           const assetRaw = await this.files.readFile(`${this.paths.assets}/${assetId}.md`);
+          if (plan.data.purpose === 'repair' && proofDigest(assetRaw) === plan.data.repairs_proof_digest) throw new Error(`The proof of ${assetId} is unchanged: write the repaired proof under ## Proof in the asset, closing the gap named in ${planId}.`);
           plan.data.proof_digest = proofDigest(assetRaw);
           // What the proof stands on, so auto mode can tell when a statement it relied on changed.
           plan.data.statement_digest = statementDigest(assetRaw);
@@ -4756,12 +4984,13 @@ export class ResearchLoopCore {
           for (const definition of report.assumedDefinitions ?? []) if (await this.files.exists(`${this.paths.definitions}/${definition}.md`)) await this.enqueueApproval('definition', definition, `Used by the proof of ${assetId}.`);
           delete state.current.statementDigest;
           if ((await this.loopSettings()).rigor.verifyProofs === 'agent') return finish(`Proof recorded for ${assetId}. Next: verify it independently.`, 'verify_proof', { planId });
-          await this.enqueueApproval('asset', assetId, `Proof from ${planId}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
+          await this.enqueueApproval('asset', assetId, `${plan.data.purpose === 'repair' ? `Your proof, repaired by ${planId} where the check found a gap (your version is kept in the plan)` : `Proof from ${planId}`}${report.assumedDefinitions?.length ? `; uses draft definitions ${report.assumedDefinitions.join(', ')}` : ''}.`);
           if ((await this.autoApproveQueued()).includes(`asset:${assetId}`)) return finish(`Proof recorded for ${assetId} and approved automatically (auto mode). Continue with next.`, 'select', { assetId: undefined, planId: undefined });
           return finish(`Proof recorded for ${assetId}. Call request_approval(kind: "asset", target: "${assetId}") and continue with next.`, 'select', { assetId: undefined, planId: undefined });
         }
         if (report.outcome !== 'failed') throw new Error('execute outcome must be proved, failed, or question.');
         if (plan.data.type !== 'plan' || plan.data.status !== 'failed' || !sectionContent(plan.content, 'Failure')) throw new Error(`${planId} must have status failed and a ## Failure section.`);
+        if (plan.data.purpose === 'repair') await this.restoreRepairedProof(assetId, plan.content);
         delete state.current.statementDigest;
         return this.afterFailedPlan(assetId, planId, `Plan ${planId} failed`, finish, Boolean(run));
       }
@@ -4793,7 +5022,7 @@ export class ResearchLoopCore {
           }
           const rewrite = plan.data.purpose === 'rewrite';
           if (rewrite) await this.finishRewrite(assetId, plan.content, plan.data, assetRaw);
-          await this.enqueueApproval('asset', assetId, rewrite ? 'Proof reworded at your request in the teaching chat, verified independently.' : `Proof from ${planId}, verified independently.`);
+          await this.enqueueApproval('asset', assetId, rewrite ? 'Proof reworded at your request in the teaching chat, verified independently.' : plan.data.purpose === 'repair' ? `Your proof, repaired by ${planId} where the check found a gap and verified independently (your version is kept in the plan).` : `Proof from ${planId}, verified independently.`);
           if ((await this.autoApproveQueued()).includes(`asset:${assetId}`)) return finish(`Proof of ${assetId} verified independently and approved automatically (auto mode). Continue with next.`, 'select', { assetId: undefined, planId: undefined });
           return finish(`Proof of ${assetId} verified independently. Call request_approval(kind: "asset", target: "${assetId}") and continue with next.`, 'select', { assetId: undefined, planId: undefined });
         }
@@ -4803,6 +5032,7 @@ export class ResearchLoopCore {
         if (plan.data.purpose === 'rewrite') return finish(await this.rejectRewrite(assetId, planId), 'select', { assetId: undefined, planId: undefined });
         if (state.current.recheck?.length) return finish(await this.rejectStaleProof(assetId, planId, state.current.recheck), 'select', { assetId: undefined, planId: undefined });
         await this.rejectProof(assetId, planId);
+        if (plan.data.purpose === 'repair') await this.restoreRepairedProof(assetId, plan.content);
         return this.afterFailedPlan(assetId, planId, `Independent verification rejected the proof from ${planId}`, finish, Boolean(run));
       }
       case 'verify_node': {

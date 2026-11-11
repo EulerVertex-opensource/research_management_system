@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import { execFile } from 'child_process';
-import { ResearchLoopCore } from '../services/ResearchLoopCore';
+import { IntakeReport, ResearchLoopCore } from '../services/ResearchLoopCore';
 import { PROJECT_CONFIG_PATH } from '../services/ProjectPathsCore';
 import { BRIDGE_PATH, CONTEXT_PACK_PATH, DRIVER_PATH, dashboardLinkPath, isWaitingForHuman, REPORT_OUTCOMES, ReportOutcome, SYNC_PATH, StageReport, stageSignature } from '../services/ResearchLoopModel';
 import { loadUsageView } from '../services/UsageCollector';
@@ -51,6 +51,7 @@ function parseArgs(argv: string[]): Args {
 const USAGE = `Usage: research-loop <command> [options]
   status [--brief] [--json]
   start --provider claude|codex [--goal "..."] [--session ID] [--force]
+  start --provider claude|codex --intake a,b [--source <file or paper>] [--session ID]   (the researcher's own extracted results: goals from their main results, proofs checked and gaps repaired; only when the researcher asks)
   extend --goal "..." [--provider claude|codex] [--session ID] [--force]   (add a new goal to an approved project)
   resume [--session ID] [--provider claude|codex] [--force] [--focus id,id] | pause | stop
   focus [<required id>...] | focus clear   (the required results the researcher wants first)
@@ -71,9 +72,11 @@ const USAGE = `Usage: research-loop <command> [options]
   teach revise <id> --file <draft.md|->   (a rewording the researcher asked for: ## Proof with ## Changes; the loop checks and applies it)
   teach style [--add "rule"]   (the project's proof style; --add after the researcher agreed to keep a rule)
   validate [--fix]
-  check next --ids a,b [--source <file or paper>] [--count N]   (after extracting: independent checks, run in the extracting chat; never drives the loop)
+  check next --ids a,b [--source <file or paper>] [--count N] [--requested]   (--requested: the researcher asked for the checks, whatever the setting) (after extracting: independent checks, run in the extracting chat; never drives the loop)
   check verdict <id> confirmed|rejected --summary "..."
   check coverage --source <file or paper> --ids a,b complete|gaps --summary "..."
+  check summary --ids a,b [--json]   (where extracted results stand: checked, gaps, no proof yet; the main results)
+  repair request <id>...   (only when the researcher asks: check their proof as written and fill the gaps the check finds)
   park <asset> --reason TEXT [--note TEXT] | unpark <asset>
   budget status | budget allocate <asset> <n> --reason "..."   (autonomous mode: give a stuck result n more attempts with a new direction)
   idea add --title "..." --body "..." [--kind approach|question|observation|test_case|risk|conjecture] [--asset ID]... [--tag TAG]... [--origin agent|researcher]   (agent by default; researcher only for the researcher's own idea in their words)
@@ -619,6 +622,19 @@ function text(value: string | true | undefined, name: string): string {
 }
 
 /** A comma- or space-separated list of IDs. */
+/** Where the researcher's extracted results stand, written for the agent to retell to the researcher (titles, not IDs). */
+function intakeText(report: IntakeReport): string {
+  const named = (item: { id: string; title: string }) => `${item.title} (${item.id})`;
+  const lines = [`Main results: ${report.main.map((id) => named({ id, title: report.titles[id] ?? id })).join('; ') || 'none'}.`];
+  if (report.confirmed.length) lines.push(`Checked and sound: ${report.confirmed.map(named).join('; ')}.`);
+  if (report.gaps.length) lines.push('Gaps the independent checks found:', ...report.gaps.map((item) => `- ${named(item)}: ${item.summary.split('\n')[0]}`));
+  if (report.unproved.length) lines.push(`No proof yet: ${report.unproved.map(named).join('; ')}.`);
+  if (report.unchecked.length) lines.push(`Not checked yet: ${report.unchecked.map(named).join('; ')}.`);
+  if (report.other.length) lines.push(`Not checked (nothing to check): ${report.other.map((item) => `${named(item)}: ${item.why}`).join('; ')}.`);
+  if (report.gaps.length || report.unproved.length || report.unchecked.length) lines.push(`To have the research loop complete them (check each proof as written, fill the gaps keeping the rest of the argument, prove what has no proof), ask the researcher; on their yes run ${LOOP_COMMAND} start --provider <claude|codex> --intake ${[...new Set([...report.main, ...report.gaps.map((item) => item.id), ...report.unproved.map((item) => item.id), ...report.unchecked.map((item) => item.id), ...report.confirmed.map((item) => item.id)])].join(',')}.`);
+  return lines.join('\n');
+}
+
 function ids(value: string): string[] {
   return value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
 }
@@ -658,6 +674,14 @@ async function main(): Promise<void> {
     }
     case 'start': {
       const provider = args.flags.provider === 'codex' ? 'codex' : 'claude';
+      if (args.flags.intake !== undefined) {
+        const source = typeof args.flags.source === 'string' && args.flags.source.trim() ? args.flags.source.trim() : undefined;
+        await core.intake(ids(text(args.flags.intake, 'intake')), { provider, sessionId: session, force: args.flags.force === true, source });
+        await alive();
+        const next = await core.next();
+        out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Taking in the researcher's results (${provider}). ${next.instruction}`);
+        return;
+      }
       await core.start(provider, { goal: typeof args.flags.goal === 'string' ? args.flags.goal : undefined, sessionId: session, force: args.flags.force === true });
       await alive();
       const next = await core.next();
@@ -666,6 +690,14 @@ async function main(): Promise<void> {
     }
     case 'extend': {
       const provider = args.flags.provider === 'codex' ? 'codex' : args.flags.provider === 'claude' ? 'claude' : undefined;
+      if (args.flags.intake !== undefined) {
+        const source = typeof args.flags.source === 'string' && args.flags.source.trim() ? args.flags.source.trim() : undefined;
+        await core.intake(ids(text(args.flags.intake, 'intake')), { provider: provider ?? core.current?.provider ?? 'claude', sessionId: session, source });
+        await alive();
+        const next = await core.next();
+        out(json ? { ...core.statusSummary(), instruction: next.instruction } : `Taking in the researcher's results. ${next.instruction}`);
+        return;
+      }
       await core.extend(text(args.flags.goal, 'goal'), { provider, sessionId: session, force: args.flags.force === true });
       await alive();
       const next = await core.next();
@@ -749,10 +781,16 @@ async function main(): Promise<void> {
         out(await core.recordCoverage(text(source, 'source'), batchOf(), verdict, typeof args.flags.summary === 'string' ? args.flags.summary : ''));
         return;
       }
-      if (sub !== 'next') throw new Error('check next --ids a,b [--source <file or paper>] [--count N] | check verdict <id> confirmed|rejected --summary "..." | check coverage --source ... --ids ... complete|gaps --summary "..."');
+      if (sub === 'summary') {
+        const report = await core.intakeReport(batchOf());
+        out(json ? report : intakeText(report));
+        return;
+      }
+      if (sub !== 'next') throw new Error('check next --ids a,b [--source <file or paper>] [--count N] [--requested] | check summary --ids a,b | check verdict <id> confirmed|rejected --summary "..." | check coverage --source ... --ids ... complete|gaps --summary "..."');
       const batch = batchOf();
-      const plan = await core.extractionChecks(batch);
-      if (!plan.enabled) { out(json ? { enabled: false } : 'Checking extracted results is off (Settings, How thorough: Check what is extracted). Request approval as usual.'); return; }
+      const requested = args.flags.requested === true;
+      const plan = await core.extractionChecks(batch, { requested });
+      if (!plan.enabled) { out(json ? { enabled: false } : `Checking extracted results is off (Settings, How thorough: Check what is extracted), so nothing was checked. If the researcher asked you to verify these results, or they are the researcher's own work they want completed, run this again with --requested; otherwise request approval as usual and tell the researcher the results were not checked.`); return; }
       const count = Math.min(8, Math.max(1, Number(args.flags.count) || 4));
       const tasks = [];
       for (const node of plan.pending.slice(0, count)) tasks.push({ id: node.id, mode: node.mode, ...(await core.extractionCheckTask(node)) });
@@ -762,7 +800,7 @@ async function main(): Promise<void> {
       const lines: string[] = [];
       if (plan.checked.length) lines.push(`Checked: ${plan.checked.map((item) => `${item.id} ${item.verdict}`).join(', ')}.`);
       if (plan.skipped.length) lines.push(`Not checked: ${plan.skipped.map((item) => `${item.id} (${item.why})`).join(', ')}.`);
-      const again = `Then run ${LOOP_COMMAND} check next --ids ${batch.join(',')}${source ? ` --source "${source}"` : ''} again.`;
+      const again = `Then run ${LOOP_COMMAND} check next --ids ${batch.join(',')}${source ? ` --source "${source}"` : ''}${requested ? ' --requested' : ''} again.`;
       if (tasks.length) {
         lines.push(`${plan.pending.length} to check${plan.pending.length > tasks.length ? ` (${tasks.length} now)` : ''}. You extracted them, so do not check them yourself: run one independent subagent per check${tasks.length > 1 ? ', in parallel, all in one message' : ''} (research-worker-deep where available), giving each only its instruction:`);
         for (const task of tasks) lines.push(`- ${task.id} (${task.mode}, pack ~${task.tokens} tokens): ${task.instruction}`);
@@ -772,7 +810,12 @@ async function main(): Promise<void> {
       } else {
         if (coverage && !coverage.due && coverage.last?.reason === 'gaps') lines.push(`The coverage checks still found gaps; tell the researcher what remains: ${coverage.last.text.split('\n').slice(0, 6).join(' / ')}`);
         const rejected = plan.checked.filter((item) => item.verdict === 'rejected');
-        lines.push(`Every extracted node is checked${source ? '' : ' (pass --source to also check the extraction is complete)'}. Now request approval for them (request_approval); each request carries its verdict.${rejected.length ? ` Did not pass: ${rejected.map((item) => `${item.id} (${item.summary.replace(/\.$/, '')})`).join('; ')}. Tell the researcher; do not fix them unasked.` : ''}`);
+        const unproved = plan.skipped.filter((item) => /no proof yet/.test(item.why));
+        if (rejected.some((item) => item.mode === 'proof') || unproved.length) {
+          lines.push(`Every extracted node is checked${source ? '' : ' (pass --source to also check the extraction is complete)'}. Some proofs have gaps or are missing, so do not request approval yet. Run ${LOOP_COMMAND} check summary --ids ${batch.join(',')} and show the researcher where their results stand, then ask (ask_researcher, kind discussion) whether the research loop should complete them: check each proof as written, fill the gaps keeping the rest of their argument, and prove what has no proof. If they agree, run ${LOOP_COMMAND} start --provider <claude|codex> --intake ${batch.join(',')}${source ? ` --source "${source}"` : ''} (extend --intake when a loop already runs) and drive the loop from there with the research-loop skill. If they decline, request approval for what passed and leave the rest to them; do not fix their proofs unasked.`);
+        } else {
+          lines.push(`Every extracted node is checked${source ? '' : ' (pass --source to also check the extraction is complete)'}. Now request approval for them (request_approval); each request carries its verdict.${rejected.length ? ` Did not pass: ${rejected.map((item) => `${item.id} (${item.summary.replace(/\.$/, '')})`).join('; ')}. Tell the researcher; do not fix them unasked.` : ''}`);
+        }
       }
       out(lines.join('\n'));
       return;
@@ -939,6 +982,14 @@ async function main(): Promise<void> {
     }
     case 'package': {
       await runPackage(sub, args, { root, out, json, loopRunning: core.current?.status === 'running', extensionVersion: EXTENSION_VERSION, core, confirm: confirmOnTty });
+      return;
+    }
+    case 'repair': {
+      if (sub !== 'request') throw new Error('repair request <id>...');
+      const targets = args.positional.slice(2).flatMap((item) => ids(item));
+      if (!targets.length) throw new Error('repair request <id>...');
+      out(`${await core.requestRepair(targets)} Run: ${LOOP_COMMAND} next`);
+      await core.touch(session);
       return;
     }
     case 'search': {

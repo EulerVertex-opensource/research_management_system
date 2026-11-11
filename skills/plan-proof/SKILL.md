@@ -32,4 +32,13 @@ Reuse what the project already learned. The pack's **idea guide** lists ideas re
 - If the loop reports the failed-plan limit is reached since the last researcher direction, do not write another plan; report `question`.
 - Unclear statement or missing definition: report `question --question "..."`.
 
+## Repairing a proof
+
+When the stage says it repairs the researcher's own proof, the researcher wrote a proof, an independent check found a gap in it (the stage quotes the verdict), and the researcher asked the loop to fill it. The plan closes that gap; it is not a new proof.
+
+- Read the proof as written (`research-loop show <id> --section Proof`) and find the step the verdict names. Plan only what the gap needs: the missing case, the estimate that does not follow as written, the hypothesis of a cited result that is not checked, a lemma the step silently uses (proved inside the proof, or, when plans for other results rely on it too, promoted as above). The steps that hold stay as the researcher wrote them; say in `## Goal` which step changes and what stays.
+- Do not edit the asset: the loop copies the proof as written into the plan under `## Previous proof` and names the gap under `## Gap` when you report. A failed repair brings that proof back for the next attempt.
+- With failed repair plans present, `## Difference from failed plans` as for any plan.
+- When the gap cannot be closed without changing the statement (a missing hypothesis, a weaker conclusion), write no plan: report `none --summary "<what the statement would need>"`. Changing the statement is the researcher's call.
+
 Never change the statement; a revised statement gets a new asset ID. Never set `status: approved`.

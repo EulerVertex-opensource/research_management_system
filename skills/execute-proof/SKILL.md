@@ -16,6 +16,14 @@ Input: the context pack from `research-loop next` (the plan, the frozen target s
 - Unclear statement or missing definition: report `question --question "..."`.
 - Long proof: if about 30 tool calls in the proof is not complete, stop at a clean point. Write every finished step out in full under `## Progress` in the plan (which checklist items it settles, and the argument itself), and reply `partial: <what remains>`. A fresh worker continues from there with a small context. When you continue a partial execution, read the plan's `## Progress` first (`show <plan id> --section Progress`) and build on it; do not redo it. When the proof is complete, put the whole of it under `## Proof` and delete `## Progress`.
 
+## Repairing a proof
+
+A plan with `purpose: repair` fills a gap in the researcher's own proof; `## Gap` names it and `## Previous proof` holds their proof as written.
+
+- Success: replace `## Proof` in the asset with the complete repaired proof. Keep the researcher's steps, order, notation, and wording wherever they hold; change or add only what the gap needs, and write those parts out in full. `## Outcome` says what was added or changed, by step, so the researcher can find it.
+- Never edit `## Previous proof` or `## Gap` in the plan. A proof left unchanged is refused.
+- Obstruction: leave the asset's proof as it is (the loop restores the researcher's version anyway), set the plan `status: failed`, and write `## Failure` as for any plan.
+
 ## A route's reduction (stage reduce)
 
 A route (a plan with `route_lemmas`) proves its target from its lemmas. The reduction is that argument, written before the lemmas are proved: each lemma, and each dependency, is used as a black box by its statement in the pack, whether or not it is proved yet.

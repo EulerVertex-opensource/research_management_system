@@ -66,8 +66,49 @@ export interface GraphNodeView {
   statement: string;
   /** For a required result: how many of the results it rests on (itself included) are done. */
   closure?: { done: number; total: number };
+  /** One of the researcher's own results taken in with an intake: where it stands in the repair (Results → Repair). */
+  repair?: RepairNodeView;
   /** A verified result: where the researcher stands on it (their own local mark) and the level the teaching chat aims for. */
   understanding?: { state: UnderstandingState; level?: UnderstandingLevel; suggested: UnderstandingLevel };
+}
+
+/**
+ * Where one of the researcher's own results stands in the repair. `unchecked`: has a proof, no check yet;
+ * `checking`: the agent checks it as written; `gap`: the check found a gap and the researcher has not asked for a
+ * repair; `needs_repair`: a gap the loop will repair; `repairing`: a repair is under way; `review`: sound as written
+ * or repaired and checked, waiting for the researcher; `stuck`: set aside; `to_prove`: it came without a proof.
+ */
+export type RepairState = 'unchecked' | 'checking' | 'gap' | 'needs_repair' | 'repairing' | 'review' | 'stuck' | 'to_prove' | 'done' | 'retired';
+
+export interface RepairNodeView {
+  /** The intake's decision ID. */
+  intake: string;
+  state: RepairState;
+  /** For review and done: sound as written, repaired, or proved here (it came without a proof). */
+  how?: 'sound' | 'repaired' | 'proved';
+  /** The gap the independent check found. */
+  gap?: string;
+  /** Repair attempts that failed. */
+  failed: number;
+  /** The repair plan under way, or the one that produced the current proof. */
+  plan?: string;
+  /** For a repaired proof: the researcher's proof as written, and the proof now. */
+  previous?: string;
+  proof?: string;
+  /** The agent is working on it right now. */
+  active?: boolean;
+  note?: string;
+}
+
+/** The researcher's own results taken in at once (`start --intake`), and how the repair ended. */
+export interface IntakeView {
+  id: string;
+  at: string;
+  source?: string;
+  ids: string[];
+  main: string[];
+  /** Every result settled: the summary, the goals then, and the conjectures offered as next goals (`open`: still available). */
+  closed?: { at: string; summary: string; required: string[]; candidates: Array<{ id: string; title: string; kind: 'conjecture' | 'idea'; open: boolean }> };
 }
 
 /** `serves`: the conjecture `from` would unblock or strengthen `to`; not a prerequisite either way. */
@@ -91,7 +132,7 @@ export type GraphAction =
   /** Agent work stays in the chat: the extension copies the prompt and opens the chat. */
   | { action: 'agent'; prompt: string }
   /** Loop controls the researcher may use from the dashboard. */
-  | { action: 'loop'; op: 'start' | 'resume' | 'extend' | 'openChat' }
+  | { action: 'loop'; op: 'start' | 'resume' | 'extend' | 'openChat'; goal?: string }
   | { action: 'syncPull' }
   /** The researcher read a result marked for re-check again, and it still holds. */
   | { action: 'confirmRecheck'; id: string }
@@ -105,7 +146,7 @@ export interface AttentionButton { label: string; action: GraphAction; kind?: 'p
 export interface AttentionItem {
   key: string;
   priority: AttentionPriority;
-  category: 'question' | 'counterexample' | 'approval' | 'manuscript_invalid' | 'manuscript_stale' | 'parked' | 'uncovered' | 'unlocked' | 'required_inactive' | 'upstream' | 'loop' | 'recheck' | 'promote';
+  category: 'question' | 'counterexample' | 'approval' | 'manuscript_invalid' | 'manuscript_stale' | 'parked' | 'uncovered' | 'unlocked' | 'required_inactive' | 'upstream' | 'loop' | 'recheck' | 'promote' | 'intake';
   title: string;
   /** Extra detail, e.g. the agent's summary of what it wants reviewed; may be empty. */
   reason: string;
@@ -260,4 +301,6 @@ export interface GraphPayload {
   study?: { behind: number; total: number };
   /** Every route to every result (parallel routes), oldest first. */
   routes?: RouteView[];
+  /** The researcher's own results taken in at once (intakes), newest first. */
+  intakes?: IntakeView[];
 }

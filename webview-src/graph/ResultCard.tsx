@@ -7,6 +7,7 @@ import { ActionRow, buttonStyle } from './AttentionList';
 import { useTechnical } from '../technical';
 import { COLOR, CITED_COLOR, DEFINITION_COLOR, nodeStyle, tint } from './colors';
 import { LEVEL_HINT, LEVEL_LABEL, STATE_LABEL, UNDERSTANDING_LEVELS } from '../../src/domain/understandingLevels';
+import { RepairSection } from './ProofDiff';
 import { RouteRow, isOpen, routesSummary, routesTo, sharedLemmas } from './RoutesView';
 
 /**
@@ -139,6 +140,7 @@ export function ResultCard({ node, payload, expanded, onToggle, onAction, onDeta
             {node.sections.length > 0 && <span>In the paper: {node.sections.join(', ')}</span>}
             {technical && <span style={{ fontFamily: 'var(--vscode-editor-font-family, monospace)' }}>{node.filePath}</span>}
           </div>
+          {node.repair && <RepairSection node={node} onAction={onAction} onDetails={onDetails} />}
           {routes.length > 0 && (
             <section style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
