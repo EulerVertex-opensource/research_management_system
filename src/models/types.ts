@@ -57,6 +57,8 @@ export interface ResearchNode extends NodeFrontmatter {
   /** Set on library nodes (known results under the library folder); derived from the path. */
   origin?: 'library';
   collection?: string;
+  /** A route plan's route fields (route_lemmas, route_title, its own origin, ...); see ROUTE_FIELDS. */
+  route?: Record<string, unknown>;
 }
 
 /** What the dashboard derives for project.md instead of storing it there: progress, open questions, writing. */

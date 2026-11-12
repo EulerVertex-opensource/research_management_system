@@ -12,6 +12,7 @@ import { hasSectionContent } from '../domain/sections';
 import { nodeTemplate } from '../domain/templates';
 import { libraryFolders, libraryProblems, locateNodeFile } from '../domain/registry';
 import { layoutReport } from '../domain/layout';
+import { routeFieldsOf } from '../domain/routeSchema';
 
 function slugify(title: string): string {
   return title
@@ -47,12 +48,13 @@ function frontmatterOf(data: Record<string, any>): NodeFrontmatter {
   };
 }
 
-function parseNode(relativePath: string, raw: string): ResearchNode | null {
+export function parseNode(relativePath: string, raw: string): ResearchNode | null {
   try {
     const { data, content } = parseMarkdown(raw);
     const id = path.basename(relativePath, '.md');
     const frontmatter = frontmatterOf(data);
-    return { ...frontmatter, title: frontmatter.title || id, id, filePath: relativePath, body: content.trim() };
+    const route = routeFieldsOf(data);
+    return { ...frontmatter, title: frontmatter.title || id, id, filePath: relativePath, body: content.trim(), ...(route ? { route } : {}) };
   } catch {
     return null;
   }

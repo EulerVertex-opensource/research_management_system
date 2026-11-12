@@ -14,6 +14,7 @@ function load(file, external = []) {
 }
 
 const { buildGraphPayload, collectGraphPayload } = load('../src/services/GraphViewModel.ts');
+const { parseNode } = load('../src/services/NodeIndexService.ts');
 const { loadManuscriptModel, loadImpactNodes, readSectionBriefFile } = load('../src/services/ManuscriptImpactLoader.ts');
 const { lockBinding } = load('../src/domain/manuscriptImpact.ts');
 const { researchDigest } = load('../src/domain/digests.ts');
@@ -42,11 +43,9 @@ function memoryFiles(initial) {
   };
 }
 
+/** Nodes as the node index reads them, so the payload sees only the fields the index keeps. */
 function researchNodes(files) {
-  return [...files.map.keys()].filter((file) => /^research\/(assets|definitions|ideas|plans)\/.*\.md$/.test(file)).map((file) => {
-    const { data, content } = matter(files.map.get(file));
-    return { id: path.posix.basename(file, '.md'), filePath: file, body: content, tags: [], depends_on: [], uses_definitions: [], related_assets: [], ...data };
-  });
+  return [...files.map.keys()].filter((file) => /^research\/(assets|definitions|ideas|plans)\/.*\.md$/.test(file)).map((file) => parseNode(file, files.map.get(file)));
 }
 
 async function fixture() {

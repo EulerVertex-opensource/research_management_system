@@ -21,6 +21,18 @@ export function isRoutePlan(data: Record<string, any> | undefined): boolean {
   return Boolean(data) && data!.type === 'plan' && Array.isArray(data!.route_lemmas);
 }
 
+/**
+ * The frontmatter fields only a route carries. The node index keeps them apart, under `route`,
+ * because there `origin` means a library node.
+ */
+export const ROUTE_FIELDS = ['route_lemmas', 'route_title', 'route_round', 'origin', 'forked_from', 'superseded_by', 'reduction_digest', 'reduction_verified_digest', 'reduction_inputs'] as const;
+
+/** A route plan's own fields (see ROUTE_FIELDS), or undefined for any other file. */
+export function routeFieldsOf(data: Record<string, any>): Record<string, unknown> | undefined {
+  if (!isRoutePlan(data)) return undefined;
+  return Object.fromEntries(ROUTE_FIELDS.filter((key) => data[key] !== undefined).map((key) => [key, data[key]]));
+}
+
 export function routeLemmas(data: Record<string, any>): string[] {
   return Array.isArray(data.route_lemmas) ? data.route_lemmas.filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0) : [];
 }

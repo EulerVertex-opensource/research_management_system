@@ -1,6 +1,6 @@
 import { ProjectPaths, ResearchNode } from '../models/types';
 import { CoverageCell, CoverageRow, GraphEdgeView, GraphFlag, GraphNodeView, GraphPayload, RouteView, SectionView, isPrerequisiteEdge } from '../models/graph';
-import { ProofNumbers, applyBeam, isRoutePlan, routeInfo } from '../domain/routes';
+import { ProofNumbers, applyBeam, routeInfo } from '../domain/routes';
 import { readLoopSettings } from './LoopSettingsStore';
 import { buildGraph, nodeKey } from '../domain/graph';
 import { nodeKindOf } from '../domain/nodeKinds';
@@ -323,8 +323,10 @@ function routeViews(plans: ResearchNode[], nodes: GraphNodeView[], refuted: (id:
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const settled = (id: string) => byId.get(id)?.progress === 'done';
   const retired = (id: string) => !byId.has(id) || ['deprecated', 'archived'].includes(byId.get(id)!.status);
-  const routePlans = plans.filter((plan) => isRoutePlan(plan as unknown as Record<string, any>));
-  const raw = routePlans.map((plan) => routeInfo({ id: plan.id, data: plan as unknown as Record<string, any>, content: plan.body }, (id) => ({ settled: settled(id), refuted: refuted(id), inactive: retired(id), parked: parked(id) })));
+  // The node index keeps a route's fields under `route` (its `origin` there means a library node).
+  const routePlans = plans.filter((plan) => plan.type === 'plan' && plan.route);
+  const dataOf = (plan: ResearchNode): Record<string, any> => ({ type: plan.type, status: plan.status, target_asset: plan.target_asset, ...plan.route });
+  const raw = routePlans.map((plan) => routeInfo({ id: plan.id, data: dataOf(plan), content: plan.body }, (id) => ({ settled: settled(id), refuted: refuted(id), inactive: retired(id), parked: parked(id) })));
   const graphOf = (routes: typeof raw) => ({
     settled, dead: (id: string) => retired(id) || refuted(id), deps: () => [] as string[],
     routes: (id: string) => routes.filter((route) => route.target === id), leafCost: () => 1,
@@ -334,7 +336,7 @@ function routeViews(plans: ResearchNode[], nodes: GraphNodeView[], refuted: (id:
   const final = new ProofNumbers(graphOf(beamed));
   return beamed.map((route, index) => {
     const left = final.ofRoute(route);
-    const round = Number((routePlans[index] as unknown as Record<string, unknown>).route_round);
+    const round = Number(routePlans[index].route?.route_round);
     return { ...route, left: Number.isFinite(left) ? left : null, ...(Number.isInteger(round) ? { round } : {}) };
   });
 }
