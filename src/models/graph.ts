@@ -276,6 +276,8 @@ export interface RouteView {
   death?: { kind: 'refuted' | 'inactive' | 'cycle'; lemma: string };
   suspendedBy?: string[];
   supersededBy?: string;
+  /** Why it was dropped (`## Dropped`) or failed (`## Failure`): the first paragraph, cut short. */
+  closedReason?: string;
 }
 
 export interface GraphPayload {

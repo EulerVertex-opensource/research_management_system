@@ -33,6 +33,8 @@ export interface ViewOptions {
   focus?: { id: string; depth: number };
   /** Only what one result rests on ("up") or what rests on it ("down"), in either display. */
   trace?: { id: string; direction: 'up' | 'down' };
+  /** The Routes graph leaves out routes that closed (failed, ruled out, dropped, set aside). */
+  hideClosedRoutes?: boolean;
 }
 
 export const DEFAULT_OPTIONS: ViewOptions = { display: 'list', scope: 'required', showDefinitions: false, showInactive: false, search: '', filter: 'all' };

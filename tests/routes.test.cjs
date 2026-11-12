@@ -153,3 +153,34 @@ test('the route map digest changes with a route, a lemma statement, or the goal,
   // A route no longer pending (dropped, failed) leaves the map.
   assert.equal(routes.routeMapDigest(goal, [...plans, { ...second, data: { ...second.data, status: 'abandoned' } }], (id) => raws[id]), base);
 });
+
+test('route map model: lemma order, the point that holds each route, and what holds the result up', () => {
+  const model = load('../webview-src/graph/routeModel.ts');
+  const node = (id, progress, extra = {}) => ({ id, title: id.toUpperCase(), progress, progressLabel: progress, progressDetail: '', ...extra });
+  const byId = new Map([node('a', 'done'), node('b', 'waiting'), node('c', 'needs_you', { progressDetail: 'Answer the question' }), node('d', 'stuck'), node('e', 'working'), node('dep', 'needs_you')].map((item) => [item.id, item]));
+  const route = (planId, lemmas, extra = {}) => ({ planId, title: planId, target: 'goal', origin: 'agent', state: 'live', reduction: 'verified', lemmas, settledLemmas: 0, left: 1, ...extra });
+  // b depends on e, so e goes above it; settled a goes first.
+  const edges = [{ from: 'b', to: 'e', type: 'depends_on' }, { from: 'goal', to: 'dep', type: 'depends_on' }, { from: 'goal', to: 'defn', type: 'uses_definition' }];
+  assert.deepEqual(model.orderLemmas(route('r', ['b', 'e', 'a']), edges, byId), ['a', 'e', 'b']);
+  assert.deepEqual(model.commonDeps('goal', edges), ['dep']);
+  // Held: stuck beats needs-you; the other hold is counted.
+  assert.deepEqual(model.routePoint(route('r', ['c', 'd']), byId), { kind: 'stuck', at: 'd', tag: 'Stuck', label: 'The agent is stuck on it', more: 1 });
+  assert.equal(model.routePoint(route('r', ['a', 'c']), byId).label, 'Answer the question');
+  assert.deepEqual(model.routePoint(route('r', ['a', 'b'], { state: 'suspended', suspendedBy: ['b'] }), byId).at, 'b');
+  // Dead, failed, dropped, superseded, frozen, won.
+  assert.deepEqual(model.routePoint(route('r', ['a', 'b'], { state: 'dead', death: { kind: 'refuted', lemma: 'b' } }), byId).tag, 'Counterexample');
+  assert.equal(model.routePoint(route('r', [], { state: 'failed', closedReason: 'Loses a log.' }), byId).label, 'Failed: Loses a log.');
+  assert.deepEqual(model.routePoint(route('r', ['a'], { state: 'abandoned', closedReason: 'Too long.' }), byId), { kind: 'closed', at: 'route', tag: 'Dropped', label: 'Dropped: Too long.', more: 0 });
+  assert.equal(model.routePoint(route('r', ['a'], { state: 'superseded', supersededBy: 'w' }), byId, { routes: [route('w', [], { title: 'via W' })] }).label, 'Set aside: via W won');
+  assert.equal(model.routePoint(route('r', ['b'], { state: 'frozen' }), byId).kind, 'waiting');
+  assert.equal(model.routePoint(route('r', ['a'], { state: 'won' }), byId).kind, 'won');
+  // Not held: the reduction first, then the agent's lemma, then the first open one; complete last.
+  assert.equal(model.routePoint(route('r', ['b'], { reduction: 'none' }), byId).at, 'reduction');
+  assert.equal(model.routePoint(route('r', ['b', 'e']), byId, { loopAsset: 'e' }).tag, 'Agent on it');
+  assert.equal(model.routePoint(route('r', ['a', 'b']), byId).at, 'b');
+  assert.equal(model.routePoint(route('r', ['a']), byId).tag, 'Complete');
+  // The result: its own held prerequisite holds every route; a lemma two routes share holds both.
+  const payload = { nodes: [...byId.values()], edges, routes: [route('r1', ['c', 'a']), route('r2', ['c', 'b']), route('r3', ['d']), route('r4', ['c'], { state: 'dead', death: { kind: 'refuted', lemma: 'c' } })] };
+  const blockers = model.resultBlockers('goal', payload, byId);
+  assert.deepEqual(blockers.map((item) => [item.id, item.kind, item.routes.length, item.common]), [['d', 'stuck', 1, false], ['dep', 'needs_you', 3, true], ['c', 'needs_you', 2, false]]);
+});

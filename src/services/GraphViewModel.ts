@@ -11,7 +11,7 @@ import { buildHistory } from '../domain/history';
 import { NodeProgress, isProvable, needsLabel, parkLabel } from '../domain/copy';
 import { sectionReasons } from '../domain/manuscriptImpact';
 import { parseTexBlocks } from '../domain/texBlocks';
-import { statementPart, stripManagedBlocks } from '../domain/sections';
+import { sectionContent, statementPart, stripManagedBlocks } from '../domain/sections';
 import { isCited } from '../domain/schema';
 import { LoopFiles, LoopState, isApproved } from './ResearchLoopModel';
 import { AgentActivity, readAgentActivity } from './AgentActivity';
@@ -337,8 +337,17 @@ function routeViews(plans: ResearchNode[], nodes: GraphNodeView[], refuted: (id:
   return beamed.map((route, index) => {
     const left = final.ofRoute(route);
     const round = Number(routePlans[index].route?.route_round);
-    return { ...route, left: Number.isFinite(left) ? left : null, ...(Number.isInteger(round) ? { round } : {}) };
+    const closedReason = closedReasonOf(route.state, routePlans[index].body ?? '');
+    return { ...route, left: Number.isFinite(left) ? left : null, ...(Number.isInteger(round) ? { round } : {}), ...(closedReason ? { closedReason } : {}) };
   });
+}
+
+/** Why a route was dropped (`## Dropped`) or failed (`## Failure`): the first paragraph, cut short. */
+function closedReasonOf(state: RouteView['state'], body: string): string {
+  const heading = state === 'abandoned' ? 'Dropped' : state === 'failed' ? 'Failure' : '';
+  if (!heading) return '';
+  const first = sectionContent(body, heading).split(/\n\s*\n/)[0]?.replace(/\s+/g, ' ').trim() ?? '';
+  return first.length > 200 ? `${first.slice(0, 199)}…` : first;
 }
 
 const STATEMENT_LIMIT = 4000;

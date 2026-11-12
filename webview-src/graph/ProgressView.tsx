@@ -7,6 +7,7 @@ import { buttonStyle } from './AttentionList';
 import { ResultCard } from './ResultCard';
 import { ResultList } from './ResultList';
 import { RouteLegend, RouteList, RouteMap, routedResults, routesSummary, routesTo } from './RoutesView';
+import { isConnected } from './routeModel';
 import { CITED_COLOR, COLOR, DEFINITION_COLOR, PROGRESS_STYLE, SECTION_STATE_COLOR, SECTION_STATE_LABEL, nodeStyle, tint } from './colors';
 
 interface Props {
@@ -128,7 +129,7 @@ export function ProgressView({ payload: raw, options, onOptions, selectedId, onS
   const caption = trace ? ''
     : mode === 'goal' && goal ? `What ${payload.nodes.find((node) => node.id === goal)?.title ?? goal} still needs, ${list ? 'prerequisites first' : 'prerequisites above'}. Finished branches are folded.`
     : mode === 'needs' ? 'Results that are stuck or wait for you, and the main results they hold up.'
-    : mode === 'routes' ? (routeTarget ? `${routesSummary(routesTo(payload, routeTarget))}. Each route proves the result from its lemmas; the first one complete wins.` : '')
+    : mode === 'routes' ? (!routeTarget ? '' : list ? `${routesSummary(routesTo(payload, routeTarget))}. Each route proves the result from its lemmas; the first one complete wins.` : 'Each column is a route, read top to bottom into the result; the first one complete proves it.')
     : mode === 'repair' ? repairCaption(raw, intakeId)
     : `${focused.nodes.length} shown · ${focused.hidden} hidden by the filters.`;
 
@@ -161,6 +162,9 @@ export function ProgressView({ payload: raw, options, onOptions, selectedId, onS
                 {routed.map((id) => <option key={id} value={id}>{payload.required.includes(id) ? '★ ' : ''}{payload.nodes.find((item) => item.id === id)?.title ?? id} ({routesSummary(routesTo(payload, id))})</option>)}
               </select>
             </label>
+          )}
+          {!trace && mode === 'routes' && !list && routeTarget && routesTo(payload, routeTarget).some((route) => !isConnected(route)) && (
+            <Toggle label="Closed routes" checked={!options.hideClosedRoutes} onChange={(value) => set({ hideClosedRoutes: !value })} title="Show the routes that failed, were ruled out, dropped, or set aside" />
           )}
           {!trace && mode === 'repair' && intakes.length > 0 && (
             <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, minWidth: 0 }}>
@@ -208,7 +212,7 @@ export function ProgressView({ payload: raw, options, onOptions, selectedId, onS
             routeTarget
               ? (list
                 ? <RouteList payload={payload} target={routeTarget} onSelect={(id) => onSelect(id === selectedId ? undefined : id)} onAction={onAction} />
-                : <RouteMap payload={payload} target={routeTarget} selectedId={selectedId} onSelect={onSelect} />)
+                : <RouteMap payload={payload} target={routeTarget} selectedId={selectedId} onSelect={onSelect} hideClosed={options.hideClosedRoutes} />)
               : <div style={{ padding: 24, opacity: 0.7, fontSize: 13 }}>No result has routes yet. With routes on (Settings → Parallel routes), a main result not yet attempted gets several routes planned side by side.</div>
           ) : focused.overCap ? (
             <div style={{ padding: 24, fontSize: 13 }}>

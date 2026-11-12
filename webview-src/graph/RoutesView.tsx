@@ -1,14 +1,18 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import type { GraphAction, GraphNodeView, GraphPayload, RouteView } from '../../src/models/graph';
 import { buttonStyle } from './AttentionList';
 import { COLOR, nodeStyle, tint } from './colors';
 import { useTechnical } from '../technical';
+import { RoutePoint, RoutePointKind, commonDeps, isBlocker, isConnected, isOpen, orderLemmas, resultBlockers, routePoint, routesTo, sharedLemmas } from './routeModel';
+
+export { isOpen, routesTo, sharedLemmas } from './routeModel';
 
 /**
  * Parallel routes to one result: a route proves it from a few lemmas by a short reduction, and the
- * first route complete wins. The Routes view draws them side by side (the result above, one diamond
- * per route, the lemmas below, a lemma several routes share drawn once between them), or lists them;
- * the result card and the route map review reuse the list rows.
+ * first route complete wins. The Routes view draws one column per route (its lemmas top to bottom,
+ * then its reduction, then the result below every column), closed routes included, and marks the
+ * one place that holds each route; or it lists them. The result card and the route map review reuse
+ * the list rows.
  */
 
 export const ROUTE_STATE_LABEL: Record<RouteView['state'], string> = {
@@ -28,16 +32,6 @@ const REDUCTION_MARK: Record<RouteView['reduction'], { mark: string; hint: strin
   verified: { mark: '✓', hint: 'The step from the lemmas to the result holds' },
   failed: { mark: '✗', hint: 'The step from the lemmas to the result failed' },
 };
-
-const OPEN_STATES = new Set<RouteView['state']>(['live', 'reduced', 'suspended', 'frozen']);
-export const isOpen = (route: RouteView) => OPEN_STATES.has(route.state);
-
-/** The routes to a result, open ones first (the most promising first), then the rest. */
-export function routesTo(payload: GraphPayload, target: string): RouteView[] {
-  const rank = (route: RouteView) => (isOpen(route) ? 0 : route.state === 'won' ? 1 : 2);
-  return (payload.routes ?? []).filter((route) => route.target === target)
-    .sort((a, b) => rank(a) - rank(b) || (a.left ?? Infinity) - (b.left ?? Infinity) || (a.round ?? 0) - (b.round ?? 0));
-}
 
 /** Results that have routes, main results first. */
 export function routedResults(payload: GraphPayload): string[] {
@@ -78,7 +72,7 @@ export function RouteRow({ route, payload, shared, onSelect, actions }: { route:
   const title = (id: string) => byId.get(id)?.title ?? id;
   const color = ROUTE_STATE_COLOR[route.state];
   const technical = useTechnical();
-  const reason = why(route, title);
+  const reason = why(route, title) || (route.closedReason ? `${route.state === 'failed' ? 'Failed' : 'Dropped'}: ${route.closedReason}` : '');
   return (
     <div style={{ border: `1px solid ${tint(color, 50)}`, borderRadius: 6, background: tint(color, isOpen(route) ? 8 : 3), padding: '7px 10px', display: 'flex', flexDirection: 'column', gap: 5, opacity: isOpen(route) || route.state === 'won' ? 1 : 0.75 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -101,13 +95,6 @@ export function RouteRow({ route, payload, shared, onSelect, actions }: { route:
       {reason && <div style={{ fontSize: 11.5, color }}>{reason}</div>}
     </div>
   );
-}
-
-/** Lemmas that two or more of the given routes need. */
-export function sharedLemmas(routes: RouteView[]): Set<string> {
-  const count = new Map<string, number>();
-  for (const route of routes) for (const lemma of route.lemmas) count.set(lemma, (count.get(lemma) ?? 0) + 1);
-  return new Set([...count].filter(([, n]) => n > 1).map(([id]) => id));
 }
 
 export const dropPrompt = (route: RouteView, title: string) => `Drop the route "${route.title}" to ${title}: run research-loop route drop ${route.planId} --reason "<my reason; ask me if I did not say>", then continue the loop.`;
@@ -145,106 +132,320 @@ export function RouteList({ payload, target, onSelect, onAction }: { payload: Gr
   );
 }
 
-const GOAL_W = 340; const GOAL_H = 46; const COL_W = 230; const LEMMA_W = 190; const LEMMA_H = 44; const DIAMOND = 13;
-const ROW_GOAL = 20; const ROW_ROUTE = 120; const ROW_LEMMA = 260;
-const clipText = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
-/** The routes drawn: the result on top, a diamond per route, the lemmas below. */
-export function RouteMap({ payload, target, selectedId, onSelect }: { payload: GraphPayload; target: string; selectedId?: string; onSelect: (id: string | undefined) => void }) {
-  const routes = useMemo(() => routesTo(payload, target).filter((route) => route.state !== 'superseded' && route.state !== 'abandoned'), [payload, target]);
-  const folded = routesTo(payload, target).filter((route) => route.state === 'superseded' || route.state === 'abandoned');
-  const byId = new Map(payload.nodes.map((node) => [node.id, node]));
-  const goal = byId.get(target);
-  const shared = sharedLemmas(routes.filter(isOpen));
-  // Lemma columns: each under the routes that need it, a shared one between them, then spread apart;
-  // the canvas is as wide as the wider row, and every row is centred in it.
-  const routeRow = routes.length * COL_W;
-  const ideal = (index: number) => COL_W * index + COL_W / 2;
-  const lemmaIds = [...new Set(routes.flatMap((route) => route.lemmas))];
-  const placed = lemmaIds.map((id) => {
-    const xs = routes.map((route, index) => (route.lemmas.includes(id) ? ideal(index) : undefined)).filter((x): x is number => x !== undefined);
-    return { id, x: xs.reduce((a, b) => a + b, 0) / xs.length };
-  }).sort((a, b) => a.x - b.x);
-  for (let index = 1; index < placed.length; index++) placed[index].x = Math.max(placed[index].x, placed[index - 1].x + LEMMA_W + 14);
-  const lemmaMin = placed.length ? placed[0].x - LEMMA_W / 2 : 0;
-  const lemmaMax = placed.length ? placed[placed.length - 1].x + LEMMA_W / 2 : 0;
-  const canvasWidth = Math.max(GOAL_W + 40, routeRow, lemmaMax - lemmaMin + 20);
-  const routeOffset = (canvasWidth - routeRow) / 2;
-  const routeX = (index: number) => routeOffset + ideal(index);
-  // Keep each lemma under its routes where it fits, else shift the whole row back inside the canvas.
-  let shift = routeOffset;
-  if (lemmaMin + shift < 10) shift = 10 - lemmaMin;
-  if (lemmaMax + shift > canvasWidth - 10) shift = canvasWidth - 10 - lemmaMax;
-  for (const item of placed) item.x += shift;
-  const lemmaX = new Map(placed.map((item) => [item.id, item.x]));
-  const goalStyle = goal ? nodeStyle(goal) : { color: COLOR.muted, dashed: true };
-  const edge = (route: RouteView) => ({ stroke: ROUTE_STATE_COLOR[route.state], width: route.state === 'won' ? 3 : isOpen(route) ? 1.8 : 1.2, dash: route.state === 'dead' || route.state === 'failed' || route.state === 'frozen' || route.state === 'suspended' ? '5 4' : undefined });
-  const box = (x: number, y: number, w: number, h: number, node: GraphNodeView | undefined, id: string, label: string, note: string) => {
-    const chars = Math.floor(w / 6.6);
-    const style = node ? nodeStyle(node) : { color: COLOR.muted, dashed: true };
-    const selected = selectedId === id;
-    return (
-      <g key={id} style={{ cursor: 'pointer' }} onClick={(event) => { event.stopPropagation(); onSelect(selected ? undefined : id); }}>
-        <rect x={x - w / 2} y={y} width={w} height={h} rx={6} fill={tint(style.color, 14)} stroke={selected ? COLOR.active : style.color} strokeWidth={selected ? 2.5 : 1.5} strokeDasharray={style.dashed ? '5 3' : undefined} />
-        <text x={x} y={y + 18} textAnchor="middle" fontSize={12.5} fontWeight={600} fill="var(--vscode-foreground)">{clipText(label, Math.floor(chars * 0.85))}</text>
-        <text x={x} y={y + 34} textAnchor="middle" fontSize={11} fill={COLOR.muted}>{clipText(note, chars)}</text>
-      </g>
-    );
-  };
+// ---------- the route map: one column per route, the result below ----------
+
+const OPEN_W = 240; const CLOSED_W = 200; const GAP = 14; const DIVIDER_W = 18; const RESULT_W = 380; const FAN_H = 34;
+
+export const POINT_COLOR: Record<RoutePointKind, string> = {
+  dead: COLOR.error, stuck: COLOR.error, needs_you: COLOR.waiting, waiting: COLOR.muted, closed: COLOR.inactive, won: COLOR.approved, next: COLOR.active,
+};
+export const POINT_ICON: Record<RoutePointKind, string> = { dead: '⛔', stuck: '⛔', needs_you: '⛔', waiting: '⏸', closed: '—', won: '✓', next: '▶' };
+
+const clamp = (lines: number): React.CSSProperties => ({ display: '-webkit-box', WebkitLineClamp: lines, WebkitBoxOrient: 'vertical', overflow: 'hidden' });
+const letterOf = (index: number) => String.fromCharCode(65 + (index % 26)) + (index >= 26 ? String(Math.floor(index / 26)) : '');
+
+/** How the flow runs down a column at one spot: through settled lemmas, open ones, or cut off. */
+type Flow = 'done' | 'open' | 'broken' | 'won' | 'closed';
+const FLOW: Record<Flow, { color: string; width: number; dashed: boolean }> = {
+  done: { color: COLOR.approved, width: 2, dashed: false },
+  open: { color: COLOR.active, width: 1.5, dashed: false },
+  broken: { color: COLOR.muted, width: 1.5, dashed: true },
+  won: { color: COLOR.approved, width: 3, dashed: false },
+  closed: { color: COLOR.inactive, width: 1.5, dashed: true },
+};
+
+function Segment({ flow, grow = false, cut, height = 14 }: { flow: Flow; grow?: boolean; cut?: RoutePointKind; height?: number }) {
+  const style = FLOW[flow];
   return (
-    <div style={{ height: '100%', overflow: 'auto', display: 'flex', flexDirection: 'column' }} onClick={() => onSelect(undefined)}>
-      <svg width={canvasWidth} height={ROW_LEMMA + LEMMA_H + 24} style={{ display: 'block', margin: '8px auto 0', flexShrink: 0 }} role="img" aria-label={`Routes to ${goal?.title ?? target}`}>
-        {routes.map((route, index) => {
-          const style = edge(route);
-          return (
-            <g key={`edges:${route.planId}`}>
-              <line x1={canvasWidth / 2} y1={ROW_GOAL + GOAL_H} x2={routeX(index)} y2={ROW_ROUTE - DIAMOND} stroke={style.stroke} strokeWidth={style.width} strokeDasharray={style.dash} opacity={0.85} />
-              {route.lemmas.map((lemma) => <line key={lemma} x1={routeX(index)} y1={ROW_ROUTE + DIAMOND + 38} x2={lemmaX.get(lemma)!} y2={ROW_LEMMA} stroke={style.stroke} strokeWidth={style.width} strokeDasharray={style.dash} opacity={0.75} />)}
-            </g>
-          );
-        })}
-        {box(canvasWidth / 2, ROW_GOAL, GOAL_W, GOAL_H, goal, target, goal?.title ?? target, `${goal?.progressLabel ?? ''} · ${routesSummary(routesTo(payload, target))}`)}
-        {routes.map((route, index) => {
-          const color = ROUTE_STATE_COLOR[route.state];
-          const x = routeX(index);
-          const filled = route.reduction === 'verified';
-          return (
-            <g key={route.planId}>
-              <title>{`${route.title} — ${ROUTE_STATE_LABEL[route.state]}. ${REDUCTION_MARK[route.reduction].hint}.`}</title>
-              <polygon points={`${x},${ROW_ROUTE - DIAMOND} ${x + DIAMOND},${ROW_ROUTE} ${x},${ROW_ROUTE + DIAMOND} ${x - DIAMOND},${ROW_ROUTE}`} fill={filled ? color : tint(color, 18)} stroke={color} strokeWidth={1.8} strokeDasharray={route.reduction === 'written' ? '3 2' : undefined} />
-              <text x={x} y={ROW_ROUTE + 4} textAnchor="middle" fontSize={10} fontWeight={700} fill={filled ? '#fff' : color}>{REDUCTION_MARK[route.reduction].mark}</text>
-              <text x={x} y={ROW_ROUTE + DIAMOND + 15} textAnchor="middle" fontSize={12} fontWeight={600} fill="var(--vscode-foreground)">{clipText(route.title, 30)}</text>
-              <text x={x} y={ROW_ROUTE + DIAMOND + 30} textAnchor="middle" fontSize={11} fill={color}>{clipText(`${ORIGIN_LABEL[route.origin]} · ${ROUTE_STATE_LABEL[route.state]}${isOpen(route) && route.left !== null ? ` · ${route.left} left` : ''}`, 40)}</text>
-            </g>
-          );
-        })}
-        {placed.map(({ id, x }) => box(x, ROW_LEMMA, LEMMA_W, LEMMA_H, byId.get(id), id, byId.get(id)?.title ?? id, `${byId.get(id)?.progressLabel ?? 'missing'}${shared.has(id) ? ' · shared' : ''}`))}
-      </svg>
-      {folded.length > 0 && (
-        <div style={{ padding: '4px 14px 10px', fontSize: 11.5, color: COLOR.muted, textAlign: 'center' }}>
-          Not drawn: {folded.map((route) => `${route.title} (${ROUTE_STATE_LABEL[route.state].toLowerCase()})`).join(' · ')}
-        </div>
+    <div aria-hidden style={{ flex: grow ? 1 : undefined, minHeight: cut ? 26 : height, display: 'flex', justifyContent: 'center', position: 'relative' }}>
+      <div style={{ borderLeft: `${style.width}px ${style.dashed ? 'dashed' : 'solid'} ${style.color}` }} />
+      {cut && (
+        <span style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 16, height: 16, borderRadius: 8, background: POINT_COLOR[cut], color: '#fff', fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</span>
       )}
     </div>
   );
 }
 
+function Tag({ point }: { point: RoutePoint }) {
+  const color = POINT_COLOR[point.kind];
+  const strong = isBlocker(point) && point.kind !== 'waiting';
+  return (
+    <span title={point.label} style={{ fontSize: 10.5, fontWeight: 700, borderRadius: 8, padding: '0 6px', whiteSpace: 'nowrap', color: strong ? '#fff' : color, background: strong ? color : tint(color, 18), border: strong ? 'none' : `1px solid ${tint(color, 60)}` }}>
+      {POINT_ICON[point.kind]} {point.tag}
+    </span>
+  );
+}
+
+interface Pointer { highlight?: string; onHover: (id: string | undefined) => void; onSelect: (id: string) => void }
+
+function LemmaCard({ id, node, point, others, pointer }: { id: string; node?: GraphNodeView; point?: RoutePoint; others: string[]; pointer: Pointer }) {
+  const style = node ? nodeStyle(node) : { color: COLOR.muted, dashed: true };
+  const blocker = point && isBlocker(point);
+  const lit = pointer.highlight === id;
+  const border = blocker ? `2px solid ${POINT_COLOR[point!.kind]}` : `1.5px ${style.dashed ? 'dashed' : 'solid'} ${style.color}`;
+  return (
+    <button onClick={(event) => { event.stopPropagation(); pointer.onSelect(id); }} onMouseEnter={() => pointer.onHover(id)} onMouseLeave={() => pointer.onHover(undefined)}
+      title={node ? `${node.title}: ${node.progressLabel}${point ? `. ${point.label}` : ''}` : `${id}: not in the project`}
+      style={{ width: '100%', textAlign: 'left', cursor: 'pointer', borderRadius: 6, padding: '6px 9px', border, background: tint(blocker ? POINT_COLOR[point!.kind] : style.color, blocker ? 16 : 10), color: 'var(--vscode-foreground)', boxShadow: lit ? `0 0 0 2px ${COLOR.active}` : undefined, display: 'flex', flexDirection: 'column', gap: 3, font: 'inherit' }}>
+      <span style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.3, ...clamp(2) }}>{node?.progress === 'done' ? '✓ ' : ''}{node?.title ?? id}</span>
+      <span style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 6px', alignItems: 'center', fontSize: 11, color: COLOR.muted }}>
+        {point?.tag !== node?.progressLabel && <span>{node?.progressLabel ?? 'Missing'}</span>}
+        {others.length > 0 && <span title={`Also needed by route${others.length === 1 ? '' : 's'} ${others.join(', ')}`}>🔗 also {others.join(', ')}</span>}
+        {point && <Tag point={point} />}
+      </span>
+      {blocker && <span style={{ fontSize: 11, color: POINT_COLOR[point!.kind], ...clamp(2) }}>{point!.label}</span>}
+    </button>
+  );
+}
+
+function RouteHeader({ route, letter, point, best, title }: { route: RouteView; letter: string; point: RoutePoint; best: boolean; title: (id: string) => string }) {
+  const color = ROUTE_STATE_COLOR[route.state];
+  const technical = useTechnical();
+  const pointColor = POINT_COLOR[point.kind];
+  const atLemma = point.at !== 'route' && point.at !== 'reduction';
+  const line = point.kind === 'won' ? ''
+    : isBlocker(point) && atLemma ? `${POINT_ICON[point.kind]} Held at ${title(point.at)}${point.more ? ` (+${point.more} more)` : ''}`
+    : point.kind === 'next' ? `▶ ${atLemma ? `${point.tag}: ${title(point.at)}` : point.label}`
+    : `${POINT_ICON[point.kind]} ${point.label}${point.more ? ` (+${point.more} more held)` : ''}`;
+  return (
+    <div title={technical ? route.planId : undefined} style={{ border: `1px solid ${tint(color, 55)}`, borderRadius: 6, background: tint(color, 9), padding: '7px 9px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ width: 18, height: 18, borderRadius: 9, border: `1.5px solid ${color}`, color, fontSize: 10.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{letter}</span>
+        <span style={{ fontSize: 10.5, fontWeight: 600, color: '#fff', background: color, borderRadius: 8, padding: '0 7px' }}>{ROUTE_STATE_LABEL[route.state]}</span>
+        {best && <span style={{ fontSize: 10.5, color: COLOR.active, fontWeight: 600 }}>best</span>}
+      </div>
+      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.3, ...clamp(2) }}>{route.title}</div>
+      <div style={{ fontSize: 11, color: COLOR.muted }}>
+        {ORIGIN_LABEL[route.origin]}{route.forkedFrom ? ` from ${title(route.forkedFrom)}` : ''}
+        {route.lemmas.length > 0 ? ` · lemmas ${route.settledLemmas}/${route.lemmas.length}` : ''}
+        {isOpen(route) && route.left !== null ? ` · ${route.left === 0 ? 'complete' : `${route.left} step${route.left === 1 ? '' : 's'} left`}` : ''}
+      </div>
+      {line && <div title={point.label} style={{ fontSize: 11.5, color: point.kind === 'next' ? COLOR.muted : pointColor, fontWeight: isBlocker(point) ? 600 : 400, ...clamp(3) }}>{line}</div>}
+    </div>
+  );
+}
+
+function Diamond({ route, point }: { route: RouteView; point: RoutePoint }) {
+  const color = ROUTE_STATE_COLOR[route.state];
+  const filled = route.reduction === 'verified';
+  const here = point.at === 'reduction' || (point.kind === 'dead' && point.at === 'route' && route.reduction === 'failed');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }} title={`${REDUCTION_MARK[route.reduction].hint}.${here ? ` ${point.label}.` : ''}`}>
+      <svg width={30} height={30} style={{ display: 'block' }}>
+        <polygon points="15,2 28,15 15,28 2,15" fill={filled ? color : tint(color, 18)} stroke={here ? POINT_COLOR[point.kind] : color} strokeWidth={here ? 2.5 : 1.8} strokeDasharray={route.reduction === 'written' ? '3 2' : undefined} />
+        <text x={15} y={19} textAnchor="middle" fontSize={11} fontWeight={700} fill={filled ? '#fff' : color}>{REDUCTION_MARK[route.reduction].mark}</text>
+      </svg>
+      <span style={{ fontSize: 10.5, color: COLOR.muted }}>step from the lemmas</span>
+      {here && point.kind !== 'dead' && <Tag point={point} />}
+    </div>
+  );
+}
+
+function RouteColumn({ route, letter, width, best, order, point, usedBy, byId, pointer }: {
+  route: RouteView; letter: string; width: number; best: boolean; order: string[]; point: RoutePoint; usedBy: Map<string, string[]>; byId: Map<string, GraphNodeView>; pointer: Pointer;
+}) {
+  const connected = isConnected(route);
+  const title = (id: string) => byId.get(id)?.title ?? id;
+  const blockAt = isBlocker(point) ? order.indexOf(point.at) : -1;
+  const routeCut = point.at === 'route' && point.kind !== 'won';
+  const flowAfter = (index: number): Flow => {
+    if (route.state === 'won') return 'won';
+    if (routeCut) return 'closed';
+    if (blockAt >= 0 && index >= blockAt) return 'broken';
+    if (index >= 0 && order.slice(0, index + 1).every((id) => byId.get(id)?.progress === 'done')) return 'done';
+    return 'open';
+  };
+  const last = order.length - 1;
+  return (
+    <div style={{ width, flexShrink: 0, display: 'flex', flexDirection: 'column', opacity: connected ? 1 : 0.62 }}>
+      <RouteHeader route={route} letter={letter} point={point} best={best} title={title} />
+      <Segment flow={flowAfter(-1) === 'done' ? 'open' : flowAfter(-1)} />
+      {order.map((id, index) => (
+        <React.Fragment key={id}>
+          <LemmaCard id={id} node={byId.get(id)} point={point.at === id ? point : undefined} pointer={pointer}
+            others={connected ? (usedBy.get(id) ?? []).filter((other) => other !== letter) : []} />
+          {index < last && <Segment flow={flowAfter(index)} cut={index === blockAt ? point.kind : undefined} />}
+        </React.Fragment>
+      ))}
+      {order.length === 0 && <div style={{ fontSize: 11.5, color: COLOR.muted, textAlign: 'center', border: `1px dashed ${COLOR.border}`, borderRadius: 6, padding: '6px 8px' }}>A direct proof: no lemma first</div>}
+      <Segment flow={flowAfter(last)} grow cut={last >= 0 && last === blockAt ? point.kind : undefined} />
+      <Diamond route={route} point={point} />
+      {connected
+        ? <Segment flow={route.state === 'won' ? 'won' : flowAfter(last)} height={10} />
+        : <div aria-label="Not joined to the result" style={{ textAlign: 'center', fontSize: 11, color: COLOR.inactive, paddingTop: 2 }}>┆<br />✕</div>}
+    </div>
+  );
+}
+
+function Chip({ id, node, pointer, held }: { id: string; node?: GraphNodeView; pointer: Pointer; held?: RoutePoint }) {
+  const style = node ? nodeStyle(node) : { color: COLOR.muted, dashed: true };
+  return (
+    <button onClick={(event) => { event.stopPropagation(); pointer.onSelect(id); }} onMouseEnter={() => pointer.onHover(id)} onMouseLeave={() => pointer.onHover(undefined)}
+      title={node ? `${node.title}: ${node.progressLabel}` : id}
+      style={{ fontSize: 11.5, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', color: 'var(--vscode-foreground)', border: held ? `2px solid ${POINT_COLOR[held.kind]}` : `1px ${style.dashed ? 'dashed' : 'solid'} ${style.color}`, background: tint(style.color, 12), boxShadow: pointer.highlight === id ? `0 0 0 2px ${COLOR.active}` : undefined, maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', font: 'inherit' }}>
+      {node?.progress === 'done' ? '✓ ' : held ? `${POINT_ICON[held.kind]} ` : ''}{node?.title ?? id} · {node?.progressLabel ?? 'missing'}
+    </button>
+  );
+}
+
+/** What holds the result up, across its open routes, the worst first; or that nothing does. */
+function BlockerBar({ payload, target, routes, letters, byId, pointer, points }: {
+  payload: GraphPayload; target: string; routes: RouteView[]; letters: Map<string, string>; byId: Map<string, GraphNodeView>; pointer: Pointer; points: Map<string, RoutePoint>;
+}) {
+  const title = (id: string) => byId.get(id)?.title ?? id;
+  const won = routes.find((route) => route.state === 'won');
+  const open = routes.filter(isOpen);
+  const blockers = won ? [] : resultBlockers(target, payload, byId);
+  const frozen = open.filter((route) => route.state === 'frozen').length;
+  const best = open[0];
+  const bestPoint = best ? points.get(best.planId) : undefined;
+  const tone = won ? COLOR.approved : !open.length ? COLOR.error : blockers.length ? POINT_COLOR[blockers[0].kind] : COLOR.active;
+  const heading = won ? `Proved through the route ${won.title}`
+    : !open.length ? (routes.length ? 'Every route is closed: each column says why' : 'No routes yet')
+    : blockers.length ? 'What holds this result up' : 'Nothing is blocking';
+  const row = (blocker: (typeof blockers)[number]) => (
+    <div key={blocker.id} style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 8px', alignItems: 'center', fontSize: 12 }}>
+      <span style={{ color: POINT_COLOR[blocker.kind] }}>⛔</span>
+      <button onClick={(event) => { event.stopPropagation(); pointer.onSelect(blocker.id); }} onMouseEnter={() => pointer.onHover(blocker.id)} onMouseLeave={() => pointer.onHover(undefined)}
+        style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: COLOR.link, fontWeight: 600, font: 'inherit', textDecoration: pointer.highlight === blocker.id ? 'underline' : undefined }}>{title(blocker.id)}</button>
+      <Tag point={{ kind: blocker.kind, at: blocker.id, tag: blocker.tag, label: blocker.label, more: 0 }} />
+      <span style={{ color: COLOR.muted }}>
+        {blocker.common ? 'needed by every route' : `holds ${blocker.routes.length === open.length && open.length > 1 ? 'every open route' : `route${blocker.routes.length === 1 ? '' : 's'} ${blocker.routes.map((id) => letters.get(id) ?? '?').join(', ')}`} (${blocker.routes.length} of ${open.length} open)`}
+        {blocker.label ? ` · ${blocker.label}` : ''}
+      </span>
+    </div>
+  );
+  const footer = [
+    routesSummary(routes),
+    best && bestPoint?.kind === 'next' ? `${letters.get(best.planId)} ${best.title}: ${bestPoint.at === 'reduction' ? bestPoint.label.toLowerCase() : `${bestPoint.tag.toLowerCase()} ${title(bestPoint.at)}`}` : '',
+    frozen ? `${frozen} route${frozen === 1 ? ' waits its' : 's wait their'} turn` : '',
+  ].filter(Boolean).join(' · ');
+  return (
+    <div style={{ margin: '8px 12px 0', padding: '7px 11px', borderRadius: 6, border: `1px solid ${tint(tone, 55)}`, background: tint(tone, 8), display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: tone }}>{heading}</div>
+      {blockers.slice(0, 3).map(row)}
+      {blockers.length > 3 && (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 11.5, color: COLOR.muted }}>{blockers.length - 3} more</summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>{blockers.slice(3).map(row)}</div>
+        </details>
+      )}
+      <div style={{ fontSize: 11.5, color: COLOR.muted }}>{footer}</div>
+    </div>
+  );
+}
+
+/**
+ * The routes drawn: one column per route, its lemmas top to bottom, its reduction below them, and
+ * the result below every open column. Closed routes stand on the right, dimmed and not joined to the
+ * result, each saying why it closed. Each route marks the one place that holds it.
+ */
+export function RouteMap({ payload, target, selectedId, onSelect, hideClosed = false }: { payload: GraphPayload; target: string; selectedId?: string; onSelect: (id: string | undefined) => void; hideClosed?: boolean }) {
+  const [hover, setHover] = useState<string>();
+  const byId = useMemo(() => new Map(payload.nodes.map((node) => [node.id, node])), [payload]);
+  const all = useMemo(() => routesTo(payload, target), [payload, target]);
+  const connected = all.filter(isConnected);
+  const closed = all.filter((route) => !isConnected(route)).sort((a, b) => (b.round ?? 0) - (a.round ?? 0));
+  const shownClosed = hideClosed ? [] : closed;
+  const columns = [...connected, ...shownClosed];
+  const letters = new Map(columns.map((route, index) => [route.planId, letterOf(index)]));
+  // Closed routes keep their letter when hidden, so the bar can still name them.
+  closed.forEach((route, index) => { if (!letters.has(route.planId)) letters.set(route.planId, letterOf(connected.length + index)); });
+  const shared = sharedLemmas(connected);
+  const usedBy = new Map<string, string[]>();
+  for (const route of connected) for (const lemma of route.lemmas) if (shared.has(lemma)) usedBy.set(lemma, [...(usedBy.get(lemma) ?? []), letters.get(route.planId)!]);
+  const orders = new Map(all.map((route) => [route.planId, orderLemmas(route, payload.edges, byId)]));
+  const points = new Map(all.map((route) => [route.planId, routePoint(route, byId, { order: orders.get(route.planId), routes: all, loopAsset: payload.loop?.assetId })]));
+  const pointer: Pointer = { highlight: hover ?? selectedId, onHover: setHover, onSelect: (id) => onSelect(id === selectedId ? undefined : id) };
+  const goal = byId.get(target);
+  const goalStyle = goal ? nodeStyle(goal) : { color: COLOR.muted, dashed: true };
+  const deps = commonDeps(target, payload.edges);
+  const heldDeps = new Map(resultBlockers(target, payload, byId).filter((item) => item.common).map((item) => [item.id, { kind: item.kind, at: item.id, tag: item.tag, label: item.label, more: 0 } as RoutePoint]));
+  // Geometry: open columns share a block as wide as the result at least, centred in it.
+  const connectedW = connected.length ? connected.length * OPEN_W + (connected.length - 1) * GAP : 0;
+  const blockW = Math.max(connectedW, RESULT_W);
+  const offset = (blockW - connectedW) / 2;
+  const columnX = (index: number) => offset + index * (OPEN_W + GAP) + OPEN_W / 2;
+  const closedW = shownClosed.length ? GAP + DIVIDER_W + GAP + shownClosed.length * CLOSED_W + (shownClosed.length - 1) * GAP : 0;
+  const width = blockW + closedW;
+  const fan = (route: RouteView) => ({ stroke: ROUTE_STATE_COLOR[route.state], width: route.state === 'won' ? 3 : 1.8, dash: route.state === 'frozen' || route.state === 'suspended' ? '5 4' : undefined });
+  const sectionLabel: React.CSSProperties = { fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6, color: COLOR.muted, textTransform: 'uppercase', paddingBottom: 6 };
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }} onClick={() => onSelect(undefined)}>
+      <BlockerBar payload={payload} target={target} routes={all} letters={letters} byId={byId} pointer={pointer} points={points} />
+      <div style={{ flex: 1, overflow: 'auto', padding: '10px 14px 14px' }}>
+        <div role="group" aria-label={`Routes to ${goal?.title ?? target}`} style={{ width, margin: '0 auto' }}>
+          <div style={{ display: 'flex' }}>
+            <div style={{ ...sectionLabel, width: blockW - offset, paddingLeft: offset }}>{connected.length ? `Open · best first${connected.some((route) => route.state === 'won') ? ' · and the winner' : ''}` : 'No open route'}</div>
+            {shownClosed.length > 0 && <div style={{ ...sectionLabel, paddingLeft: GAP + DIVIDER_W + GAP }}>Closed · {shownClosed.length}</div>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'stretch' }}>
+            <div style={{ width: blockW, display: 'flex', justifyContent: 'center', gap: GAP, alignItems: 'stretch', flexShrink: 0 }}>
+              {connected.map((route, index) => (
+                <RouteColumn key={route.planId} route={route} letter={letters.get(route.planId)!} width={OPEN_W} best={index === 0 && isOpen(route) && connected.length > 1}
+                  order={orders.get(route.planId)!} point={points.get(route.planId)!} usedBy={usedBy} byId={byId} pointer={pointer} />
+              ))}
+            </div>
+            {shownClosed.length > 0 && <>
+              <div aria-hidden style={{ width: DIVIDER_W, margin: `0 ${GAP}px`, display: 'flex', justifyContent: 'center', flexShrink: 0 }}><div style={{ borderLeft: `1px dashed ${COLOR.border}` }} /></div>
+              <div style={{ display: 'flex', gap: GAP, alignItems: 'stretch' }}>
+                {shownClosed.map((route) => (
+                  <RouteColumn key={route.planId} route={route} letter={letters.get(route.planId)!} width={CLOSED_W} best={false}
+                    order={orders.get(route.planId)!} point={points.get(route.planId)!} usedBy={usedBy} byId={byId} pointer={pointer} />
+                ))}
+              </div>
+            </>}
+          </div>
+          <div style={{ width: blockW, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            {connected.length > 0
+              ? <svg width={blockW} height={FAN_H} style={{ display: 'block' }} aria-hidden>
+                {connected.map((route, index) => {
+                  const style = fan(route); const x = columnX(index); const cx = blockW / 2;
+                  return <path key={route.planId} d={`M ${x} 0 C ${x} ${FAN_H / 2}, ${cx} ${FAN_H / 2}, ${cx} ${FAN_H}`} fill="none" stroke={style.stroke} strokeWidth={style.width} strokeDasharray={style.dash} opacity={0.85} />;
+                })}
+              </svg>
+              : <div style={{ height: 14 }} />}
+            {deps.length > 0 && <>
+              <div style={{ width: Math.min(blockW, 720), boxSizing: 'border-box', border: `1px dashed ${COLOR.border}`, borderRadius: 6, padding: '6px 9px', background: COLOR.card, display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <span style={{ fontSize: 11, color: COLOR.muted }}>Needed by every route{deps.every((id) => byId.get(id)?.progress === 'done') ? ' · all done' : ''}</span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                  {deps.map((id) => <Chip key={id} id={id} node={byId.get(id)} pointer={pointer} held={heldDeps.get(id)} />)}
+                </div>
+              </div>
+              <Segment flow={connected.some((route) => route.state === 'won') ? 'won' : 'open'} height={12} />
+            </>}
+            <button onClick={(event) => { event.stopPropagation(); pointer.onSelect(target); }} onMouseEnter={() => setHover(target)} onMouseLeave={() => setHover(undefined)}
+              style={{ width: RESULT_W, boxSizing: 'border-box', textAlign: 'center', cursor: 'pointer', borderRadius: 8, padding: '8px 12px', font: 'inherit', color: 'var(--vscode-foreground)', border: `2px ${goalStyle.dashed ? 'dashed' : 'solid'} ${goalStyle.color}`, background: tint(goalStyle.color, 14), boxShadow: pointer.highlight === target ? `0 0 0 2px ${COLOR.active}` : undefined, display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700, lineHeight: 1.3, ...clamp(2) }}>{payload.required.includes(target) ? '★ ' : ''}{goal?.title ?? target}</span>
+              <span style={{ fontSize: 11.5, color: COLOR.muted }}>{goal?.progressLabel ?? 'Missing'} · {routesSummary(all)}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** Legend for the route map. */
 export function RouteLegend() {
-  const item = (color: string, label: string, dash?: boolean) => (
+  const line = (flow: Flow, label: string) => (
     <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-      <span style={{ width: 18, height: 0, borderTop: `2px ${dash ? 'dashed' : 'solid'} ${color}` }} />{label}
+      <span style={{ width: 0, height: 14, borderLeft: `${FLOW[flow].width}px ${FLOW[flow].dashed ? 'dashed' : 'solid'} ${FLOW[flow].color}` }} />{label}
     </span>
   );
+  const mark = (kind: RoutePointKind, label: string) => <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><span style={{ color: POINT_COLOR[kind] }}>{POINT_ICON[kind]}</span>{label}</span>;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', padding: '7px 14px', borderTop: `1px solid ${COLOR.border}`, fontSize: 11, color: COLOR.muted, alignItems: 'center' }}>
-      <span>◇ a route: ✓ its step from the lemmas holds, … written, — not yet</span>
-      {item(COLOR.active, 'being worked on')}
-      {item(COLOR.approved, 'proved the result')}
-      {item(COLOR.error, 'failed or ruled out', true)}
-      {item(COLOR.muted, 'waits its turn', true)}
-      <span>A lemma two routes need is drawn once, between them</span>
+      <span>Each column is a route: its lemmas, then ◇ the step from them (✓ holds, … written, — not yet)</span>
+      {line('done', 'lemmas done so far')}
+      {line('open', 'still to prove')}
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><span style={{ width: 14, height: 14, borderRadius: 7, background: COLOR.error, color: '#fff', fontSize: 9, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>✕</span>cut: the route is held here</span>
+      {mark('needs_you', 'blocker (red: dead or stuck, amber: needs you)')}
+      {mark('waiting', 'waits its turn')}
+      {mark('next', 'next step')}
+      <span>🔗 a lemma another route needs too</span>
+      <span>Closed routes: dimmed, on the right, not joined to the result</span>
     </div>
   );
 }
